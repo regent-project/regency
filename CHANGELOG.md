@@ -7,6 +7,60 @@ change." for a component that did not change); it becomes the GitHub release
 notes. Changes waiting for the next release go under `# Unreleased` (see
 RELEASING.md).
 
+# Release v0.2.0
+
+Web client improvements: a chart of jobs in progress, a steadier map, and outcome
+details right in the host history.
+
+## scheduler
+
+No change.
+
+## runner
+
+No change.
+
+## dbwriter
+
+No change.
+
+## backend
+
+No change.
+
+## endpoint
+
+No change.
+
+## sourcesync
+
+No change.
+
+## regencyctl
+
+No change.
+
+## frontend
+
+- Map, "Jobs in progress" panel: chart of pending and running jobs over the
+  last 2 min, 10 min, 30 min or 1 h (time-weighted averages, so short jobs
+  are never missed), built from the jobs the page already receives; the
+  whole last hour shows as soon as the page has loaded. Its scale follows
+  the data shown (gridlines at round values); hovering it shows the time
+  slot and its values.
+- Map, graph and areas displays: hosts in name order, so they no longer
+  move when a host's state changes (the graph display used to put the worst
+  hosts on the inner rings).
+- Map: host names zoom with the hosts (their size is in map units, no
+  longer a fixed 9 px), shown once they are readable.
+- Host page, history: "Details" expands the outcome right under its row
+  ("Hide" folds it back; several can be open), instead of showing it below
+  the whole list.
+
+## all-in-one
+
+The web client changes above.
+
 # Release v0.1.0
 
 First release of regency, the fleet-scale control plane of regent-sdk:

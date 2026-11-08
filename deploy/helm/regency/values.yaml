@@ -18,12 +18,12 @@ security:
 services:
   scheduler:
     replicas: 2
-    tag: "0.1.0"
+    tag: "0.2.0"
     resources: {}
     env: {}
   runner:
     replicas: 2
-    tag: "0.1.0"
+    tag: "0.2.0"
     pool: default
     resources: {}
     env: {}
@@ -32,12 +32,12 @@ services:
     hostSecrets: ""
   dbwriter:
     replicas: 2
-    tag: "0.1.0"
+    tag: "0.2.0"
     resources: {}
     env: {}
   backend:
     replicas: 2
-    tag: "0.1.0"
+    tag: "0.2.0"
     resources: {}
     env: {}
     service:
@@ -45,7 +45,7 @@ services:
       port: 8080
   endpoint:
     replicas: 2
-    tag: "0.1.0"
+    tag: "0.2.0"
     resources: {}
     env: {}
     # TLS secret (tls.crt/tls.key) of the endpoint's server certificate;
@@ -58,12 +58,12 @@ services:
       port: 8443
   sourcesync:
     replicas: 2
-    tag: "0.1.0"
+    tag: "0.2.0"
     resources: {}
     env: {}
 
 regencyctl:
-  tag: "0.1.0"
+  tag: "0.2.0"
 
 # Web UI + API (gRPC-Web) through an ingress to backend (which serves the web
 # client on the same port).

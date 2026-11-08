@@ -3,9 +3,9 @@ name: regency
 description: regency, fleet-scale control plane for regent-sdk (configuration management)
 type: application
 # chart version: follows the workspace version (D20); not released yet
-version: 0.1.0
+version: 0.2.0
 # informative: each service has its own image tag in values.yaml
-appVersion: "0.1.0"
+appVersion: "0.2.0"
 home: https://github.com/regent-project/regency
 sources:
   - https://github.com/regent-project/regency
