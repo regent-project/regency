@@ -6,6 +6,7 @@ mod canvas;
 mod client;
 mod config;
 mod expected;
+mod jobchart;
 mod map;
 mod oneshot;
 mod pages;

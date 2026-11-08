@@ -2,8 +2,10 @@
 //! inventory (or assignment, label value, state) is a node (a card with its
 //! compliance and Assess/Reach buttons); its hosts are dots on rings around
 //! it, linked to it, colored by their compliance against their effective
-//! expected state (D23; grey: unassigned or outdated). Areas: each inventory is a rectangle holding its hosts in a
-//! grid, its card in the top right corner; a host in several inventories is
+//! expected state (D23; grey: unassigned or outdated), the worst ones on
+//! the inner rings. Areas: each inventory is a rectangle holding its hosts
+//! in a grid, in name order (they never move when a state changes), its
+//! card in the top right corner; a host in several inventories is
 //! drawn in each of them. A host with a job
 //! in progress (PENDING, STARTED or ABORT_REQUIRED) is drawn in the job
 //! colour, without animation (redrawing rings every frame cost too much at
@@ -431,18 +433,12 @@ fn members<'a>(
     }
     members
         .into_iter()
-        .map(|(name, (target, mut hosts))| {
-            hosts.sort_by(|a, b| {
-                severity(host_state(b))
-                    .cmp(&severity(host_state(a)))
-                    .then(a.host_id.cmp(&b.host_id))
-            });
-            Members {
-                collapsed: collapsed.contains(&name),
-                name,
-                target,
-                hosts,
-            }
+        // hosts in name order (the map's), whatever their state
+        .map(|(name, (target, hosts))| Members {
+            collapsed: collapsed.contains(&name),
+            name,
+            target,
+            hosts,
         })
         .collect()
 }
@@ -495,7 +491,19 @@ fn layout(
 ) -> Layout {
     let groups = |every| members(hosts, group_by, label_key, collapsed, every, assignments);
     let mut layout = match display {
-        Display::Graph => graph_layout(groups(false)),
+        Display::Graph => {
+            // the worst hosts on the inner rings, close to their card
+            let mut groups = groups(false);
+            for group in &mut groups {
+                group.hosts.sort_by(|a, b| {
+                    severity(host_state(b))
+                        .cmp(&severity(host_state(a)))
+                        .then(a.host_id.cmp(&b.host_id))
+                });
+            }
+            graph_layout(groups)
+        }
+        // name order: a host changing state stays where it is
         Display::Areas => areas_layout(groups(true)),
     };
     if layout.groups.is_empty() {
@@ -1119,6 +1127,7 @@ pub fn Map() -> impl IntoView {
                 <button class="rail" title="Show jobs and activity" on:click=move |_| left_open.set(true)>"Jobs"</button>
                 <button class="shrink" title="Hide this panel" on:click=move |_| left_open.set(false)>"‹"</button>
                 <h2>"Jobs in progress"</h2>
+                <crate::jobchart::JobChart jobs />
                 {move || active.with(|(counts, _)| if counts.is_empty() {
                     view! { <p class="muted">"No job in progress."</p> }.into_any()
                 } else {
@@ -1632,6 +1641,37 @@ mod tests {
         hosts.insert(multi.host_id.clone(), multi);
         hosts.insert("lonely".into(), host("lonely", &[], "unknown"));
         hosts
+    }
+
+    #[test]
+    fn areas_keep_hosts_in_name_order() {
+        // states vary across the fleet: the cells must not follow them,
+        // or every host would move when one changes state
+        let hosts = fleet();
+        let map = layout(
+            &hosts,
+            Display::Areas,
+            GroupBy::Inventory,
+            "",
+            &BTreeSet::new(),
+            &selectors(),
+        );
+        for group in &map.groups {
+            let mut cells: Vec<(f64, f64, &str)> = map
+                .of_host
+                .keys()
+                .flat_map(|id| {
+                    map.placements(id)
+                        .filter(|p| (p.gx, p.gy) == (group.x, group.y))
+                        .map(move |p| (p.y, p.x, id.as_str()))
+                })
+                .collect();
+            cells.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            let ids: Vec<&str> = cells.iter().map(|c| c.2).collect();
+            let mut sorted = ids.clone();
+            sorted.sort();
+            assert_eq!(ids, sorted, "{}", group.name);
+        }
     }
 
     #[test]

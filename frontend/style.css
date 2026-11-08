@@ -103,6 +103,25 @@ svg.map .btn:hover rect { filter: brightness(1.35); }
 .map-side .activity li { display: flex; gap: .35rem; align-items: center; font-size: 12px; white-space: nowrap; }
 .map-side .activity .badge { font-size: 11px; }
 .map-side .activity .host { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* jobs in progress over time (jobchart.rs): pending grey, running in the job colour */
+.job-chart { margin: .25rem 0 .9rem; }
+.job-chart-head { display: flex; justify-content: space-between; align-items: center; gap: .5rem; margin-bottom: .3rem; font-size: 12px; }
+.job-chart .chart-legend { display: inline-flex; align-items: center; gap: .3rem; white-space: nowrap; }
+.job-chart .chart-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+.job-chart .chart-legend i.running { margin-left: .4rem; }
+.job-chart .pending { fill: var(--muted); opacity: .55; background: var(--muted); }
+.job-chart .running { fill: var(--job); background: var(--job); }
+.job-chart-head .windows { display: flex; gap: 2px; }
+.job-chart-head .windows button { padding: .05rem .35rem; font-size: 11px; }
+.job-chart-head .windows button.active { border-color: var(--accent); color: var(--fg); background: var(--brand); }
+.job-chart-plot { display: block; width: 100%; height: 72px; background: var(--canvas); border: 1px solid var(--line); border-radius: 4px; }
+.job-chart-box { position: relative; cursor: crosshair; }
+.job-chart .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 3; }
+.job-chart .tick { position: absolute; left: 4px; transform: translateY(50%); font-size: 10px; line-height: 1; color: var(--muted); pointer-events: none; }
+.job-chart .cursor { position: absolute; top: 1px; bottom: 1px; width: 1px; background: var(--fg); opacity: .6; pointer-events: none; }
+.job-chart .tip { position: absolute; top: 4px; padding: .2rem .45rem; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; font-size: 11px; line-height: 1.35; white-space: nowrap; pointer-events: none; z-index: 2; }
+.job-chart .tip i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: .3rem; }
+.job-chart-axis { display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 2px; }
 .map-side .toolbar button { font-size: 12px; padding: .2rem .5rem; }
 .map-side .toolbar { margin-bottom: .6rem; }
 .map-side pre { white-space: pre-wrap; overflow-wrap: anywhere; }
