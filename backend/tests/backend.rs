@@ -275,7 +275,8 @@ external = 1
         .await
         .unwrap()
         .into_inner();
-    let schema: serde_json::Value = serde_json::from_str(&schema.schema_json().to_string()).unwrap();
+    let schema: serde_json::Value =
+        serde_json::from_str(&schema.schema_json().to_string()).unwrap();
     assert!(schema["properties"]["Detail"].is_object(), "{schema}");
     assert!(schema["$defs"]["LineInFileExpectedState"].is_object());
     let mut convert = api::ConvertAttributesRequest::new();
@@ -287,7 +288,11 @@ external = 1
         .await
         .unwrap()
         .into_inner();
-    assert!(converted.error().to_string().is_empty(), "{}", converted.error());
+    assert!(
+        converted.error().to_string().is_empty(),
+        "{}",
+        converted.error()
+    );
     let json: serde_json::Value = serde_json::from_str(&converted.json().to_string()).unwrap();
     assert_eq!(json[0]["Detail"]["LineInFile"]["FilePath"], "/etc/motd");
     let mut back = api::ConvertAttributesRequest::new();
