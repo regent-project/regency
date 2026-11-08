@@ -64,10 +64,11 @@ Pages:
   rail to bring it back), and "Hide panels" in the toolbar leaves only the
   map; the browser remembers the choice (local storage).
   A second display ("Display: areas", also remembered): each group is a
-  rectangle holding its hosts in a grid, worst first, with its card (same
+  rectangle holding its hosts in a grid, with its card (same
   counts, Assess/Reach, fold on click) in the top right corner; a host in
-  several inventories is drawn in each of them (no links). Host names show
-  once zoomed in enough for them to fit.
+  several inventories is drawn in each of them (no links). In both
+  displays hosts are in name order (they never move when a state changes),
+  and host names zoom with the hosts (size in map units) once readable.
   Rendering (`src/map.rs`, `src/canvas.rs`), for thousands of hosts: group
   cards are SVG; hosts and links are drawn on a canvas below them (redrawn
   only on change, only what is in view; no animation, so running jobs

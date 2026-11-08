@@ -21,6 +21,9 @@ use web_sys::CanvasRenderingContext2d as Ctx;
 
 use crate::map::{DOT, Layout, Rings, Tone, truncate};
 
+/// Height of host names, in map units (a dot is `2 * DOT` wide).
+const NAME_FONT: f64 = 4.0;
+
 /// Theme colours, read from the CSS variables of `style.css`.
 pub struct Palette {
     ok: String,
@@ -364,18 +367,19 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         ctx.stroke();
     }
 
-    // names, cut to the space between two hosts (24 map units in both
-    // displays; about 5.5 pixels per character at 9 px)
-    let room = (24.0 * vp.k / 5.5) as usize;
-    if f.names && room >= 6 {
+    // names, in map units like the dots (they grow and shrink with them),
+    // cut to the space between two hosts (24 map units in both displays;
+    // a character is about 0.61 em wide); shown once readable
+    if f.names && NAME_FONT * vp.k >= 7.0 {
+        let room = (24.0 / (NAME_FONT * 0.61)) as usize;
         ctx.set_fill_style_str(&palette.muted);
-        ctx.set_font(&format!("{}px system-ui, sans-serif", 9.0 / vp.k));
+        ctx.set_font(&format!("{NAME_FONT}px system-ui, sans-serif"));
         ctx.set_text_align("center");
         for p in &hosts {
             let _ = ctx.fill_text(
-                &truncate(&p.host_id, room.min(24)),
+                &truncate(&p.host_id, room),
                 p.x,
-                p.y + DOT + 11.0 / vp.k,
+                p.y + DOT + 1.0 + NAME_FONT,
             );
         }
     }

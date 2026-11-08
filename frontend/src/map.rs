@@ -2,8 +2,8 @@
 //! inventory (or assignment, label value, state) is a node (a card with its
 //! compliance and Assess/Reach buttons); its hosts are dots on rings around
 //! it, linked to it, colored by their compliance against their effective
-//! expected state (D23; grey: unassigned or outdated), the worst ones on
-//! the inner rings. Areas: each inventory is a rectangle holding its hosts
+//! expected state (D23; grey: unassigned or outdated), in name order from
+//! the inner ring outwards. Areas: each inventory is a rectangle holding its hosts
 //! in a grid, in name order (they never move when a state changes), its
 //! card in the top right corner; a host in several inventories is
 //! drawn in each of them. A host with a job
@@ -50,18 +50,6 @@ const GAP: f64 = 70.0;
 const CELL: f64 = 24.0;
 const AREA_PAD: f64 = 16.0;
 const AREA_GAP: f64 = 40.0;
-
-/// Severity used to put the worst hosts on the inner ring.
-fn severity(state: &str) -> u8 {
-    match state {
-        "error" | "reach_failed" => 5,
-        "not_compliant" => 4,
-        "invalid" | "aborted" => 3,
-        "unknown" | "outdated" => 2,
-        "reach_success" => 1,
-        _ => 0,
-    }
-}
 
 fn is_ok(state: &str) -> bool {
     matches!(state, "compliant" | "reach_success")
@@ -491,19 +479,9 @@ fn layout(
 ) -> Layout {
     let groups = |every| members(hosts, group_by, label_key, collapsed, every, assignments);
     let mut layout = match display {
-        Display::Graph => {
-            // the worst hosts on the inner rings, close to their card
-            let mut groups = groups(false);
-            for group in &mut groups {
-                group.hosts.sort_by(|a, b| {
-                    severity(host_state(b))
-                        .cmp(&severity(host_state(a)))
-                        .then(a.host_id.cmp(&b.host_id))
-                });
-            }
-            graph_layout(groups)
-        }
-        // name order: a host changing state stays where it is
+        // name order in both displays: a host changing state stays where it
+        // is
+        Display::Graph => graph_layout(groups(false)),
         Display::Areas => areas_layout(groups(true)),
     };
     if layout.groups.is_empty() {
@@ -1668,6 +1646,31 @@ mod tests {
                 .collect();
             cells.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
             let ids: Vec<&str> = cells.iter().map(|c| c.2).collect();
+            let mut sorted = ids.clone();
+            sorted.sort();
+            assert_eq!(ids, sorted, "{}", group.name);
+        }
+    }
+
+    #[test]
+    fn graph_keeps_hosts_in_name_order() {
+        // like areas: ring places follow names, not states
+        let hosts = fleet();
+        let map = layout(
+            &hosts,
+            Display::Graph,
+            GroupBy::Inventory,
+            "",
+            &BTreeSet::new(),
+            &selectors(),
+        );
+        for group in &map.groups {
+            let ids: Vec<&str> = map
+                .hosts
+                .iter()
+                .filter(|p| (p.gx, p.gy) == (group.x, group.y))
+                .map(|p| p.host_id.as_str())
+                .collect();
             let mut sorted = ids.clone();
             sorted.sort();
             assert_eq!(ids, sorted, "{}", group.name);

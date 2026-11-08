@@ -124,6 +124,9 @@ svg.map .btn:hover rect { filter: brightness(1.35); }
 .job-chart-axis { display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 2px; }
 .map-side .toolbar button { font-size: 12px; padding: .2rem .5rem; }
 .map-side .toolbar { margin-bottom: .6rem; }
+tr.expanded td { border-bottom: none; }
+tr.outcome-detail > td { padding-top: 0; }
+tr.outcome-detail pre { margin: 0; max-height: 60vh; white-space: pre-wrap; overflow-wrap: anywhere; }
 .map-side pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 button.small { font-size: 12px; padding: .05rem .45rem; }
 .map-side .host-head { display: flex; align-items: center; gap: .4rem; margin: 1.5rem 0 .5rem; }

@@ -326,7 +326,10 @@ pub fn HostPage() -> impl IntoView {
 
     // history
     let outcomes = RwSignal::new(Vec::<api::OutcomeSummary>::new());
-    let detail = RwSignal::new(None::<String>);
+    // expanded history rows: job id -> its outcome (None while loading),
+    // kept when collapsed so reopening needs no request
+    let expanded = RwSignal::new(BTreeMap::<String, Option<String>>::new());
+    let fetched = RwSignal::new(BTreeMap::<String, String>::new());
     let load_history = {
         let host_id = host_id.clone();
         move || {
@@ -353,8 +356,24 @@ pub fn HostPage() -> impl IntoView {
         }
     };
     load_history();
-    let show_outcome = move |job_id: String, month: String| {
+    let toggle_outcome = move |job_id: String, month: String| {
+        if expanded.with_untracked(|e| e.contains_key(&job_id)) {
+            expanded.update(|e| {
+                e.remove(&job_id);
+            });
+            return;
+        }
+        if let Some(json) = fetched.with_untracked(|f| f.get(&job_id).cloned()) {
+            expanded.update(|e| {
+                e.insert(job_id, Some(json));
+            });
+            return;
+        }
+        expanded.update(|e| {
+            e.insert(job_id.clone(), None);
+        });
         spawn_local(async move {
+            let key = job_id.clone();
             match client()
                 .get_outcome(authed(
                     api::GetOutcomeRequest { job_id, month },
@@ -367,9 +386,20 @@ pub fn HostPage() -> impl IntoView {
                     let pretty = serde_json::from_str::<serde_json::Value>(&json)
                         .and_then(|v| serde_json::to_string_pretty(&v))
                         .unwrap_or(json);
-                    let _ = detail.try_set(Some(pretty));
+                    let _ = fetched.try_update(|f| {
+                        f.insert(key.clone(), pretty.clone());
+                    });
+                    // only if still open (the user may have collapsed it)
+                    let _ = expanded.try_update(|e| {
+                        if let Some(slot) = e.get_mut(&key) {
+                            *slot = Some(pretty);
+                        }
+                    });
                 }
                 Err(status) => {
+                    let _ = expanded.try_update(|e| {
+                        e.remove(&key);
+                    });
                     let _ = error.try_set(Some(status.message().to_string()));
                 }
             }
@@ -473,24 +503,39 @@ pub fn HostPage() -> impl IntoView {
                 <For each=move || outcomes.get() key=|o| o.job_id.clone() let:outcome>
                     {
                         let (job_id, month) = (outcome.job_id.clone(), outcome.month.clone());
-                        let show = show_outcome;
+                        let toggle = toggle_outcome;
+                        let open = Memo::new({
+                            let job_id = job_id.clone();
+                            move |_| expanded.with(|e| e.contains_key(&job_id))
+                        });
+                        let body = Memo::new({
+                            let job_id = job_id.clone();
+                            move |_| expanded.with(|e| e.get(&job_id).cloned().flatten())
+                        });
                         view! {
-                            <tr>
+                            <tr class:expanded=open>
                                 <td>{format_ms(outcome.finished_at)}</td>
                                 <td>{job_label(outcome.job)} {outcome.one_shot.then(|| view! { <span class="tag" title="One-shot attribute: kept in history, does not set the host's state">"one-shot"</span> })}</td>
                                 <td>{badge(outcome.compliance.clone())} " " <span class="muted">{outcome.error.clone()}</span></td>
                                 <td class="muted">{outcome.origin.clone()}</td>
-                                <td><button on:click=move |_| show(job_id.clone(), month.clone())>"Details"</button></td>
+                                <td><button aria-expanded=move || open.get().to_string() on:click=move |_| toggle(job_id.clone(), month.clone())>
+                                    {move || if open.get() { "Hide" } else { "Details" }}</button></td>
                             </tr>
+                            <Show when=move || open.get()>
+                                <tr class="outcome-detail">
+                                    <td colspan="5">
+                                        {move || match body.get() {
+                                            Some(json) => view! { <pre>{json}</pre> }.into_any(),
+                                            None => view! { <p class="muted">"Loading…"</p> }.into_any(),
+                                        }}
+                                    </td>
+                                </tr>
+                            </Show>
                         }
                     }
                 </For>
             </tbody>
         </table>
-        <Show when=move || detail.get().is_some()>
-            <h2>"Outcome"</h2>
-            <pre>{move || detail.get()}</pre>
-        </Show>
     }
 }
 
