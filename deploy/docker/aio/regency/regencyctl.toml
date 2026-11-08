@@ -1,0 +1,40 @@
+# regencyctl init in the all-in-one image and package (admin credentials from the
+# environment, see aio.toml).
+rabbitmq_management_url = "http://rabbitmq:15672"
+pools = ["default"]
+
+[security]
+internal = 1
+
+[rabbitmq]
+url = "amqp://rabbitmq:5672"
+username = "regency"
+password = { SecRef = "RABBITMQ_ADMIN_PASSWORD", Provider = "env" }
+
+[couchdb]
+url = "http://couchdb:5984"
+username = "admin"
+password = { SecRef = "COUCHDB_ADMIN_PASSWORD", Provider = "env" }
+
+[bootstrap]
+name = "admin"
+password = { SecRef = "/var/lib/regency/secrets/bootstrap-admin" }
+
+[accounts.scheduler]
+rabbitmq_password = { SecRef = "/var/lib/regency/secrets/scheduler.rabbitmq" }
+couchdb_password = { SecRef = "/var/lib/regency/secrets/scheduler.couchdb" }
+[accounts.runner]
+rabbitmq_password = { SecRef = "/var/lib/regency/secrets/runner.rabbitmq" }
+couchdb_password = { SecRef = "/var/lib/regency/secrets/runner.couchdb" }
+[accounts.dbwriter]
+rabbitmq_password = { SecRef = "/var/lib/regency/secrets/dbwriter.rabbitmq" }
+couchdb_password = { SecRef = "/var/lib/regency/secrets/dbwriter.couchdb" }
+[accounts.backend]
+rabbitmq_password = { SecRef = "/var/lib/regency/secrets/backend.rabbitmq" }
+couchdb_password = { SecRef = "/var/lib/regency/secrets/backend.couchdb" }
+[accounts.endpoint]
+rabbitmq_password = { SecRef = "/var/lib/regency/secrets/endpoint.rabbitmq" }
+couchdb_password = { SecRef = "/var/lib/regency/secrets/endpoint.couchdb" }
+[accounts.sourcesync]
+rabbitmq_password = { SecRef = "/var/lib/regency/secrets/sourcesync.rabbitmq" }
+couchdb_password = { SecRef = "/var/lib/regency/secrets/sourcesync.couchdb" }

@@ -1,0 +1,37 @@
+# Local development infrastructure (D18): single-node RabbitMQ (streams
+# enabled) and CouchDB. Not HA, not for production.
+#
+#   docker compose -f dev/compose.yaml up -d
+#
+# Management UI: http://localhost:15672 (regency / regency)
+# CouchDB Fauxton: http://localhost:5984/_utils (admin / admin)
+name: regency-dev
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: regency
+      RABBITMQ_DEFAULT_PASS: regency
+    volumes:
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/90-regency.conf:ro
+    ports:
+      - "5672:5672"
+      - "5552:5552"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      retries: 30
+
+  couchdb:
+    image: couchdb:3.5
+    environment:
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: admin
+    command: ["/opt/couchdb/bin/couchdb"]
+    entrypoint: ["sh", "-c", "printf '[couchdb]\\nsingle_node=true\\n' > /opt/couchdb/etc/local.d/10-single.ini && exec tini -- /docker-entrypoint.sh /opt/couchdb/bin/couchdb"]
+    ports:
+      - "5984:5984"

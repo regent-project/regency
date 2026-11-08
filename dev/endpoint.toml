@@ -1,0 +1,39 @@
+# endpoint against dev/compose.yaml, with its own least-privilege accounts:
+#   cargo run -p endpoint -- --config dev/endpoint.toml      (from regency/)
+instance = "dev-endpoint"
+
+# D19: the dev stack is plain (no TLS) with credentials
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://localhost:5672"
+username = "regency-endpoint"
+password = { SecRef = "dev/secrets/endpoint.rabbitmq" }
+
+[couchdb]
+url = "http://localhost:5984"
+username = "regency-endpoint"
+password = { SecRef = "dev/secrets/endpoint.couchdb" }
+
+[health]
+listen = "127.0.0.1:9091"
+
+[log]
+format = "text"
+
+# TLS material: dev/tls/ (create it with your PKI, or `openssl`); the
+# built-in CA is enabled with dev/tls/ca.pem + key.
+[endpoint]
+listen = "127.0.0.1:8443"
+cert = "dev/tls/endpoint.pem"
+key = { SecRef = "dev/tls/endpoint.key" }
+
+[ca]
+cert = "dev/tls/ca.pem"
+key = { SecRef = "dev/tls/ca.key" }
+enrollment_key = { SecRef = "dev/secrets/enrollment-key" }
+
+[pinning]
+enabled = true

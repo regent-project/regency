@@ -1,0 +1,14 @@
+[book]
+title = "regency"
+description = "Fleet-scale configuration management with regent-sdk: concepts, architecture, deployment and operations"
+authors = ["regent-project"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/regent-project/regency"
+edit-url-template = "https://github.com/regent-project/regency/edit/main/book/{path}"
+site-url = "/regency/"
+
+[output.html.search]
+enable = true

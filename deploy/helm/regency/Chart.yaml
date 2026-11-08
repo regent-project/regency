@@ -1,0 +1,13 @@
+apiVersion: v2
+name: regency
+description: regency, fleet-scale control plane for regent-sdk (configuration management)
+type: application
+# chart version: follows the workspace version (D20); not released yet
+version: 0.1.0
+# informative: each service has its own image tag in values.yaml
+appVersion: "0.1.0"
+home: https://github.com/regent-project/regency
+sources:
+  - https://github.com/regent-project/regency
+license: Apache-2.0
+keywords: [configuration-management, gitops, compliance]

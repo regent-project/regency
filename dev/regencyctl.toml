@@ -1,0 +1,45 @@
+# regencyctl init against dev/compose.yaml:
+#   cargo run -p regencyctl -- --config dev/regencyctl.toml init
+rabbitmq_management_url = "http://localhost:15672"
+pools = ["default", "edge"]
+
+# D19: the dev stack is plain (no TLS) with credentials
+[security]
+internal = 1
+
+[rabbitmq]
+url = "amqp://localhost:5672"
+username = "regency"
+password = { SecRef = "dev/secrets/rabbitmq-admin" }
+
+[couchdb]
+url = "http://localhost:5984"
+username = "admin"
+password = { SecRef = "dev/secrets/couchdb-admin" }
+
+[log]
+format = "text"
+
+[bootstrap]
+name = "admin"
+password = { SecRef = "dev/secrets/bootstrap-admin" }
+
+[accounts.scheduler]
+rabbitmq_password = { SecRef = "dev/secrets/scheduler.rabbitmq" }
+couchdb_password = { SecRef = "dev/secrets/scheduler.couchdb" }
+[accounts.runner]
+rabbitmq_password = { SecRef = "dev/secrets/runner.rabbitmq" }
+# D21: runners read their central configuration (regency_config only)
+couchdb_password = { SecRef = "dev/secrets/runner.couchdb" }
+[accounts.endpoint]
+rabbitmq_password = { SecRef = "dev/secrets/endpoint.rabbitmq" }
+couchdb_password = { SecRef = "dev/secrets/endpoint.couchdb" }
+[accounts.dbwriter]
+rabbitmq_password = { SecRef = "dev/secrets/dbwriter.rabbitmq" }
+couchdb_password = { SecRef = "dev/secrets/dbwriter.couchdb" }
+[accounts.backend]
+rabbitmq_password = { SecRef = "dev/secrets/backend.rabbitmq" }
+couchdb_password = { SecRef = "dev/secrets/backend.couchdb" }
+[accounts.sourcesync]
+rabbitmq_password = { SecRef = "dev/secrets/sourcesync.rabbitmq" }
+couchdb_password = { SecRef = "dev/secrets/sourcesync.couchdb" }

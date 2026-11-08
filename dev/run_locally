@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# Run the whole regency application locally, all at once (development only):
+# RabbitMQ + CouchDB (docker compose), `regencyctl init`, the web client
+# (trunk), then every service with its dev config, logs prefixed in this
+# terminal and kept in dev/logs/<service>.log. Ctrl-C stops the services.
+# It starts a dozen runners (two of them in the `edge` pool), three
+# dbwriters (they absorb the dataset's write load) and, once
+# backend is ready, loads a representative dataset (backend/examples/
+# dataset.rs: thousands of hosts, all of them this machine under
+# /tmp/regency-dev, inventories, labels, expected states, recurring orders).
+#
+#   dev/run_locally [options]          (from anywhere)
+#
+#   --release       build and run release binaries
+#   --runners N     number of runners (default 12; the last 2 in pool `edge`)
+#   --dbwriters N   number of dbwriters (default 3)
+#   --hosts N       hosts of the dataset (default 3000)
+#   --no-dataset    do not load the dataset
+#   --no-frontend   do not (re)build the web client (frontend/dist)
+#   --no-endpoint   do not start the endpoint (started only if dev/tls/ exists)
+#   --down          also stop RabbitMQ and CouchDB on exit (data kept)
+#   --reset         wipe RabbitMQ and CouchDB data first (removes the containers)
+#   -h, --help      this help
+#
+# Web UI: http://127.0.0.1:8080, user `admin`, password in
+# dev/secrets/bootstrap-admin. See dev/README.md.
+set -euo pipefail
+
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
+
+profile=debug
+frontend=1
+endpoint=1
+down=0
+reset=0
+runners=12
+dbwriters=3
+hosts=3000
+dataset=1
+while (($#)); do
+  arg=$1
+  shift
+  case "$arg" in
+    --release) profile=release ;;
+    --runners|--dbwriters|--hosts)
+      [[ ${1:-} =~ ^[1-9][0-9]*$ ]] || { echo "$arg needs a positive number" >&2; exit 2; }
+      case "$arg" in
+        --runners) runners=$1 ;;
+        --dbwriters) dbwriters=$1 ;;
+        --hosts) hosts=$1 ;;
+      esac
+      shift ;;
+    --no-dataset) dataset=0 ;;
+    --no-frontend) frontend=0 ;;
+    --no-endpoint) endpoint=0 ;;
+    --down) down=1 ;;
+    --reset) reset=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+compose=(docker compose -f dev/compose.yaml)
+logs=dev/logs
+mkdir -p "$logs"
+
+say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+
+services=(dbwriter runner scheduler backend sourcesync)
+if [[ $endpoint == 1 ]]; then
+  if [[ -f dev/tls/endpoint.pem ]]; then
+    services+=(endpoint)
+  else
+    say "endpoint skipped: no TLS material in dev/tls/ (see dev/endpoint.toml)"
+  fi
+fi
+
+# --- infrastructure --------------------------------------------------------
+if [[ $reset == 1 ]]; then
+  say "wiping RabbitMQ and CouchDB data"
+  "${compose[@]}" down -v
+fi
+say "starting RabbitMQ and CouchDB"
+"${compose[@]}" up -d --wait
+
+# --- build ------------------------------------------------------------------
+cargo_flags=()
+[[ $profile == release ]] && cargo_flags+=(--release)
+packages=(-p regencyctl)
+for s in "${services[@]}"; do packages+=(-p "$s"); done
+say "building ${services[*]} and regencyctl ($profile)"
+cargo build "${cargo_flags[@]}" "${packages[@]}"
+if [[ $dataset == 1 ]]; then
+  cargo build "${cargo_flags[@]}" -p backend --example dataset
+fi
+bin="target/$profile"
+
+if [[ $frontend == 1 ]]; then
+  if command -v trunk >/dev/null; then
+    say "building the web client (trunk)"
+    # trunk needs a toolchain with the wasm32 std (rustup's stable here)
+    wasm_path="$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin"
+    (cd frontend && PATH="$wasm_path:$PATH" trunk build --release)
+  else
+    say "trunk not found: web client not built (install it, or use --no-frontend)"
+  fi
+fi
+
+# --- init (idempotent) --------------------------------------------------------
+say "regencyctl init"
+"$bin/regencyctl" --config dev/regencyctl.toml init
+
+# --- services -------------------------------------------------------------------
+colors=(32 33 35 36 34 31)
+pids=()
+
+# supervise NAME SERVICE COLOR [VAR=value...]: run one service (its dev
+# config, plus REGENCY_* overrides); restart it when it exits with status 3
+# (central configuration changed, D21), as systemd or Kubernetes would.
+supervise() {
+  local name=$1 service=$2 color=$3 child code
+  shift 3
+  local prefix
+  prefix=$(printf '\033[%sm%-10s\033[0m|' "$color" "$name")
+  trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit 0' TERM
+  while true; do
+    env "$@" "$bin/regency-$service" --config "dev/$service.toml" \
+      > >(tee -a "$logs/$name.log" | sed -u "s/^/$prefix /") 2>&1 &
+    child=$!
+    code=0
+    wait "$child" || code=$?
+    if [[ $code == 3 ]]; then
+      echo "$prefix restarting (configuration changed)"
+      continue
+    fi
+    echo "$prefix exited with status $code"
+    exit "$code"
+  done
+}
+
+stopping=0
+cleanup() {
+  [[ $stopping == 1 ]] && return
+  stopping=1
+  trap '' INT TERM
+  say "stopping the services"
+  for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+  wait "${pids[@]}" 2>/dev/null || true
+  if [[ $down == 1 ]]; then
+    # stop, not down: removed containers would lose their data
+    say "stopping RabbitMQ and CouchDB (data kept; --reset wipes it)"
+    "${compose[@]}" stop
+  else
+    say "RabbitMQ and CouchDB still running (docker compose -f dev/compose.yaml stop; down also deletes their data)"
+  fi
+}
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+# Wait for a health port's /readyz (ports of the dev configs).
+ready() { curl -fsS -o /dev/null "http://127.0.0.1:$1/readyz" 2>/dev/null; }
+
+i=0
+start() { # start NAME SERVICE [VAR=value...]
+  printf '\n--- %s ---\n' "$(date -Is)" >> "$logs/$1.log"
+  supervise "$1" "$2" "${colors[i % ${#colors[@]}]}" "${@:3}" &
+  pids+=($!)
+  i=$((i + 1))
+}
+
+# Runners: runner-01 is dev/runner.toml as is; the others get their own
+# instance name and health port (9121, 9122, …); the last two serve `edge`.
+edge=$(( runners >= 4 ? 2 : runners >= 2 ? 1 : 0 ))
+start_runners() {
+  local n name
+  for n in $(seq "$runners"); do
+    name=$(printf 'runner-%02d' "$n")
+    if [[ $n == 1 ]]; then
+      start "$name" runner
+    else
+      local pool=default
+      (( n > runners - edge )) && pool=edge
+      start "$name" runner REGENCY_INSTANCE="dev-$name" \
+        REGENCY_HEALTH_LISTEN="127.0.0.1:$((9119 + n))" REGENCY_RUNNER_POOL="$pool"
+    fi
+  done
+  say "$runners runners ($((runners - edge)) in pool default, $edge in pool edge)"
+  if (( edge == 0 && dataset == 1 )); then
+    say "no runner in pool edge: the dataset's edge hosts will stay pending"
+  fi
+}
+
+# dbwriters: dbwriter-1 is dev/dbwriter.toml as is (health port 9092), the
+# others get their own instance name and health port (9142, 9143, …).
+start_dbwriters() {
+  local n
+  start dbwriter-1 dbwriter
+  # first: it declares regency.status.dbwriter, without which the other
+  # services' first status messages are unroutable (warnings)
+  for _ in $(seq 60); do ready 9092 && break; sleep 1; done
+  for n in $(seq 2 "$dbwriters"); do
+    start "dbwriter-$n" dbwriter REGENCY_INSTANCE="dev-dbwriter-$n" \
+      REGENCY_HEALTH_LISTEN="127.0.0.1:$((9140 + n))"
+  done
+}
+
+for s in "${services[@]}"; do
+  case "$s" in
+    runner) start_runners ;;
+    dbwriter) start_dbwriters ;;
+    *) start "$s" "$s" ;;
+  esac
+done
+
+# Announce the UI once backend is ready (health port of dev/backend.toml).
+(
+  for _ in $(seq 120); do
+    # readyz first, then the API port itself (opened just after)
+    if ready 9095 && curl -s -o /dev/null http://127.0.0.1:8080/; then
+      if [[ $dataset == 1 ]]; then
+        say "loading the dataset ($hosts hosts)"
+        prefix=$(printf '\033[1m%-10s\033[0m|' dataset)
+        "$bin/examples/dataset" --hosts "$hosts" 2>&1 \
+          | tee -a "$logs/dataset.log" | sed -u "s/^/$prefix /" \
+          || say "dataset failed, see $logs/dataset.log"
+      fi
+      say "ready: http://127.0.0.1:8080 (admin / dev/secrets/bootstrap-admin), Ctrl-C to stop"
+      exit 0
+    fi
+    sleep 1
+  done
+  say "backend not ready after 120 s, see $logs/backend.log"
+) &
+
+# Stop everything as soon as one service dies (other than a D21 restart).
+code=0
+wait -n "${pids[@]}" || code=$?
+if [[ $stopping == 0 ]]; then
+  say "a service stopped (status $code, see above): shutting down the others"
+  cleanup
+  exit "$code"
+fi

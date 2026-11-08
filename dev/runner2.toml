@@ -1,0 +1,28 @@
+# runner against dev/compose.yaml, with its own least-privilege accounts:
+#   cargo run -p runner -- --config dev/runner.toml      (from regency/)
+instance = "dev-runner2"
+
+# D19: the dev stack is plain (no TLS) with credentials
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://localhost:5672"
+username = "regency-runner"
+password = { SecRef = "dev/secrets/runner.rabbitmq" }
+
+# D21: central configuration (regency_config, read-only)
+[couchdb]
+url = "http://localhost:5984"
+username = "regency-runner"
+password = { SecRef = "dev/secrets/runner.couchdb" }
+
+[health]
+listen = "127.0.0.1:9093"
+
+[log]
+format = "text"
+
+[runner]
+pool = "default"

@@ -1,0 +1,57 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  MSI of regency endpoint (D22), built by cargo-wix in the release workflow:
+    cargo wix, no build, package endpoint
+  The UpgradeCode must never change (it ties versions together for upgrades).
+-->
+<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else ?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+<?endif ?>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+  <Product Id='*' Name='regency endpoint' UpgradeCode='{D276964F-FCA7-4562-AD1E-D7F910A28689}' Manufacturer='regent-project'
+           Language='1033' Codepage='1252' Version='$(var.Version)'>
+    <Package Id='*' Keywords='Installer' Description='regency endpoint: gRPC gateway of proactive hosts' Manufacturer='regent-project'
+             InstallerVersion='500' Languages='1033' Compressed='yes' InstallScope='perMachine' SummaryCodepage='1252' />
+    <MajorUpgrade Schedule='afterInstallInitialize' DowngradeErrorMessage='A newer version of [ProductName] is already installed.' />
+    <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' />
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='$(var.PlatformProgramFilesFolder)'>
+        <Directory Id='APPLICATIONFOLDER' Name='regency'>
+          <Directory Id='Bin' Name='bin'>
+            <Component Id='binary' Guid='*'>
+              <File Id='exe' Name='regency-endpoint.exe' DiskId='1' Source='$(var.CargoTargetBinDir)\regency-endpoint.exe' KeyPath='yes' />
+              <!-- installed stopped and manual: edit the configuration first,
+                   then Set-Service regency-endpoint -StartupType Automatic; Start-Service regency-endpoint -->
+              <ServiceInstall Id='service' Name='regency-endpoint' DisplayName='regency endpoint'
+                              Description='regency endpoint: gRPC gateway of proactive hosts' Type='ownProcess' Start='demand'
+                              ErrorControl='normal' Account='NT AUTHORITY\NetworkService'
+                              Arguments='--windows-service --config "[CommonAppDataFolder]regency\endpoint.toml"'>
+                <!-- D21: a service exits to apply a new central configuration; restart it -->
+                <ServiceConfigFailureActions OnInstall='yes' OnReinstall='yes' ResetPeriod='86400'>
+                  <Failure Action='restartService' Delay='5000' />
+                  <Failure Action='restartService' Delay='5000' />
+                  <Failure Action='restartService' Delay='30000' />
+                </ServiceConfigFailureActions>
+              </ServiceInstall>
+              <ServiceControl Id='serviceControl' Name='regency-endpoint' Stop='both' Remove='uninstall' Wait='yes' />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+      <Directory Id='CommonAppDataFolder'>
+        <Directory Id='DataFolder' Name='regency'>
+          <!-- kept on upgrade and uninstall: it is the operator's file -->
+          <Component Id='config' Guid='{D0EFAC36-798A-4823-B576-1CBDFA7EAC92}' NeverOverwrite='yes' Permanent='yes'>
+            <File Id='configFile' Name='endpoint.toml' Source='..\packaging\windows\endpoint.toml' KeyPath='yes' />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id='Main' Level='1'>
+      <ComponentRef Id='binary' />
+      <ComponentRef Id='config' />
+    </Feature>
+  </Product>
+</Wix>

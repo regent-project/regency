@@ -1,0 +1,67 @@
+[package]
+name = "sourcesync"
+description = "regency sourcesync: syncs Git sources into the catalog (D11)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "regency-sourcesync"
+path = "src/main.rs"
+
+[dependencies]
+regencylib = { workspace = true }
+regent-sdk = { workspace = true }
+gix = { version = "0.90", features = ["blocking-network-client", "blocking-http-transport-reqwest", "blocking-http-transport-reqwest-rust-tls"] }
+lapin = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+yaml_serde = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+prometheus = { workspace = true }
+
+[dev-dependencies]
+regencylib = { workspace = true, features = ["testing"] }
+
+# Packages (D15, D20: one version, released with tag v<version>): cargo deb -p sourcesync / cargo generate-rpm -p sourcesync
+[package.metadata.deb]
+name = "regency-sourcesync"
+maintainer = "Romain SUZANNE <romzorus591@gmail.com>"
+copyright = "2026, Romain SUZANNE"
+license-file = ["../LICENSE", "0"]
+extended-description = "regency sourcesync: syncs Git sources into the catalog."
+depends = "$auto, systemd, adduser"
+section = "admin"
+priority = "optional"
+maintainer-scripts = "../packaging/debian/"
+conf-files = ["/etc/regency/sourcesync.toml"]
+assets = [
+    ["target/release/regency-sourcesync", "usr/bin/", "755"],
+    ["../packaging/systemd/regency-sourcesync.service", "lib/systemd/system/", "644"],
+    ["../packaging/config/sourcesync.toml", "etc/regency/", "640"],
+    ["../CHANGELOG.md", "usr/share/doc/regency-sourcesync/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "regency-sourcesync"
+summary = "regency sourcesync: syncs Git sources into the catalog"
+release = "1"
+assets = [
+    { source = "target/release/regency-sourcesync", dest = "/usr/bin/regency-sourcesync", mode = "755" },
+    { source = "../packaging/systemd/regency-sourcesync.service", dest = "/usr/lib/systemd/system/regency-sourcesync.service", mode = "644" },
+    { source = "../packaging/config/sourcesync.toml", dest = "/etc/regency/sourcesync.toml", mode = "640", config = "noreplace" },
+    { source = "../CHANGELOG.md", dest = "/usr/share/doc/regency-sourcesync/CHANGELOG.md", mode = "644", doc = true },
+]
+post_install_script = "../packaging/rpm/sourcesync/postinst"
+pre_uninstall_script = "../packaging/rpm/sourcesync/preun"
+post_uninstall_script = "../packaging/rpm/sourcesync/postun"
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"

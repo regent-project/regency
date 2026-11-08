@@ -1,0 +1,34 @@
+# backend in the all-in-one image and package. Levels: raise them with
+# REGENCY_SECURITY_INTERNAL / REGENCY_SECURITY_EXTERNAL (D19).
+instance = "aio-backend"
+
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://rabbitmq:5672"
+stream_host = "rabbitmq"
+username = "regency-backend"
+password = { SecRef = "/var/lib/regency/secrets/backend.rabbitmq" }
+
+[couchdb]
+url = "http://couchdb:5984"
+username = "regency-backend"
+password = { SecRef = "/var/lib/regency/secrets/backend.couchdb" }
+
+[health]
+listen = "127.0.0.1:9094"
+
+[log]
+format = "json"
+
+[central]
+restart_jitter_sec = 0
+
+[backend]
+listen = "0.0.0.0:8080"
+session_key = { SecRef = "/var/lib/regency/secrets/session-key" }
+bootstrap_admin = "admin"
+enrollment_key = { SecRef = "/var/lib/regency/secrets/enrollment-key" }
+frontend_dir = "/usr/share/regency/web"

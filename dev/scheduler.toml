@@ -1,0 +1,27 @@
+# scheduler against dev/compose.yaml, with its own least-privilege accounts:
+#   cargo run -p scheduler -- --config dev/scheduler.toml      (from regency/)
+instance = "dev-scheduler"
+
+# D19: the dev stack is plain (no TLS) with credentials
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://localhost:5672"
+username = "regency-scheduler"
+password = { SecRef = "dev/secrets/scheduler.rabbitmq" }
+
+[couchdb]
+url = "http://localhost:5984"
+username = "regency-scheduler"
+password = { SecRef = "dev/secrets/scheduler.couchdb" }
+
+[health]
+listen = "127.0.0.1:9094"
+
+[log]
+format = "text"
+
+[scheduler]
+bootstrap_admin = "admin"

@@ -1,0 +1,46 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  MSI of regencyctl (D22), built by cargo-wix in the release workflow:
+    cargo wix, no build, package regencyctl
+  The UpgradeCode must never change (it ties versions together for upgrades).
+-->
+<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else ?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+<?endif ?>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+  <Product Id='*' Name='regencyctl' UpgradeCode='{4FEA0649-027B-4F82-A67B-356150888CA3}' Manufacturer='regent-project'
+           Language='1033' Codepage='1252' Version='$(var.Version)'>
+    <Package Id='*' Keywords='Installer' Description='regencyctl: admin CLI of regency' Manufacturer='regent-project'
+             InstallerVersion='500' Languages='1033' Compressed='yes' InstallScope='perMachine' SummaryCodepage='1252' />
+    <MajorUpgrade Schedule='afterInstallInitialize' DowngradeErrorMessage='A newer version of [ProductName] is already installed.' />
+    <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' />
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='$(var.PlatformProgramFilesFolder)'>
+        <Directory Id='APPLICATIONFOLDER' Name='regency'>
+          <Directory Id='Bin' Name='bin'>
+            <Component Id='binary' Guid='*'>
+              <File Id='exe' Name='regencyctl.exe' DiskId='1' Source='$(var.CargoTargetBinDir)\regencyctl.exe' KeyPath='yes' />
+            </Component>
+            <Component Id='path' Guid='{7800FFE5-09B4-4C04-A4EB-96EC393B2653}' KeyPath='yes'>
+              <Environment Id='PATH' Name='PATH' Value='[Bin]' Permanent='no' Part='last' Action='set' System='yes' />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+      <Directory Id='CommonAppDataFolder'>
+        <Directory Id='DataFolder' Name='regency'>
+          <Component Id='config' Guid='{30E40C7B-328E-4E79-96B5-31B5ED17AC93}' NeverOverwrite='yes' Permanent='yes'>
+            <File Id='configFile' Name='regencyctl.toml' Source='..\packaging\windows\regencyctl.toml' KeyPath='yes' />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id='Main' Level='1'>
+      <ComponentRef Id='binary' />
+      <ComponentRef Id='path' />
+      <ComponentRef Id='config' />
+    </Feature>
+  </Product>
+</Wix>

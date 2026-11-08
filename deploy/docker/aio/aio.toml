@@ -1,0 +1,76 @@
+# regency-aio: every regency service in one container or on one host (D15:
+# the all-in-one image, and the regency-all-in-one package, which sets the
+# variables below in /etc/regency/all-in-one.env). Not HA. RabbitMQ and
+# CouchDB run outside (deploy/compose/quickstart.yaml for the image); point at them with REGENCY_RABBITMQ_URL, REGENCY_RABBITMQ_STREAM_HOST and
+# REGENCY_COUCHDB_URL (shared by every process). Admin credentials reach
+# regencyctl only:
+#   RABBITMQ_ADMIN_USER (default regency) / RABBITMQ_ADMIN_PASSWORD
+#   RABBITMQ_MANAGEMENT_URL (default http://rabbitmq:15672)
+#   COUCHDB_ADMIN_USER (default admin) / COUCHDB_ADMIN_PASSWORD
+#   REGENCY_ADMIN_PASSWORD: initial password of the bootstrap admin `admin`
+#     (generated and logged once when unset)
+# State (secrets, TLS material, Git clones): /var/lib/regency (a volume in
+# the image).
+
+grace_sec = 30
+
+[log]
+format = "json"
+
+[prepare]
+secrets_dir = "/var/lib/regency/secrets"
+secrets = [
+  "scheduler.rabbitmq", "scheduler.couchdb",
+  "runner.rabbitmq", "runner.couchdb",
+  "dbwriter.rabbitmq", "dbwriter.couchdb",
+  "backend.rabbitmq", "backend.couchdb",
+  "endpoint.rabbitmq", "endpoint.couchdb",
+  "sourcesync.rabbitmq", "sourcesync.couchdb",
+  "session-key", "enrollment-key",
+]
+from_env = { "bootstrap-admin" = "REGENCY_ADMIN_PASSWORD" }
+announce = ["bootstrap-admin"]
+
+[prepare.tls]
+dir = "/var/lib/regency/tls"
+names = ["localhost", "regency"]
+
+[[process]]
+name = "init"
+command = "/usr/bin/regencyctl"
+args = ["--config", "/etc/regency/regencyctl.toml", "init"]
+oneshot = true
+[process.env]
+REGENCY_RABBITMQ_USERNAME = "${RABBITMQ_ADMIN_USER:-regency}"
+REGENCY_COUCHDB_USERNAME = "${COUCHDB_ADMIN_USER:-admin}"
+REGENCY_RABBITMQ_MANAGEMENT_URL = "${RABBITMQ_MANAGEMENT_URL:-http://rabbitmq:15672}"
+
+[[process]]
+name = "dbwriter"
+command = "/usr/bin/regency-dbwriter"
+args = ["--config", "/etc/regency/dbwriter.toml"]
+
+[[process]]
+name = "scheduler"
+command = "/usr/bin/regency-scheduler"
+args = ["--config", "/etc/regency/scheduler.toml"]
+
+[[process]]
+name = "runner"
+command = "/usr/bin/regency-runner"
+args = ["--config", "/etc/regency/runner.toml"]
+
+[[process]]
+name = "backend"
+command = "/usr/bin/regency-backend"
+args = ["--config", "/etc/regency/backend.toml"]
+
+[[process]]
+name = "endpoint"
+command = "/usr/bin/regency-endpoint"
+args = ["--config", "/etc/regency/endpoint.toml"]
+
+[[process]]
+name = "sourcesync"
+command = "/usr/bin/regency-sourcesync"
+args = ["--config", "/etc/regency/sourcesync.toml"]

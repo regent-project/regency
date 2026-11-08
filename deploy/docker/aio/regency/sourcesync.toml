@@ -1,0 +1,30 @@
+# sourcesync in the all-in-one image and package. Levels: raise them with
+# REGENCY_SECURITY_INTERNAL / REGENCY_SECURITY_EXTERNAL (D19).
+instance = "aio-sourcesync"
+
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://rabbitmq:5672"
+stream_host = "rabbitmq"
+username = "regency-sourcesync"
+password = { SecRef = "/var/lib/regency/secrets/sourcesync.rabbitmq" }
+
+[couchdb]
+url = "http://couchdb:5984"
+username = "regency-sourcesync"
+password = { SecRef = "/var/lib/regency/secrets/sourcesync.couchdb" }
+
+[health]
+listen = "127.0.0.1:9096"
+
+[log]
+format = "json"
+
+[central]
+restart_jitter_sec = 0
+
+[sourcesync]
+workdir = "/var/lib/regency/sourcesync"

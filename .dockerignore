@@ -1,0 +1,6 @@
+target/
+frontend/dist/
+dev/secrets/
+dev/tls/
+**/*.secret
+.git/

@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+getent group regency >/dev/null || groupadd --system regency
+getent passwd regency >/dev/null || useradd --system --gid regency --home-dir /var/lib/regency --shell /sbin/nologin regency
+# the services run as regency: their configuration (640) must be readable
+chgrp regency /etc/regency/*.toml /etc/regency/all-in-one.env
+systemctl daemon-reload >/dev/null 2>&1 || true
+if [ "$1" -gt 1 ]; then
+    systemctl try-restart regency-all-in-one.service >/dev/null 2>&1 || true
+else
+    echo "regency-all-in-one: edit /etc/regency/all-in-one.env (RabbitMQ and CouchDB), then: systemctl enable --now regency-all-in-one"
+fi

@@ -1,0 +1,38 @@
+# endpoint in the all-in-one image and package. Levels: raise them with
+# REGENCY_SECURITY_INTERNAL / REGENCY_SECURITY_EXTERNAL (D19).
+instance = "aio-endpoint"
+
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://rabbitmq:5672"
+stream_host = "rabbitmq"
+username = "regency-endpoint"
+password = { SecRef = "/var/lib/regency/secrets/endpoint.rabbitmq" }
+
+[couchdb]
+url = "http://couchdb:5984"
+username = "regency-endpoint"
+password = { SecRef = "/var/lib/regency/secrets/endpoint.couchdb" }
+
+[health]
+listen = "127.0.0.1:9095"
+
+[log]
+format = "json"
+
+[central]
+restart_jitter_sec = 0
+
+[endpoint]
+listen = "0.0.0.0:8443"
+cert = "/var/lib/regency/tls/endpoint.pem"
+key = { SecRef = "/var/lib/regency/tls/endpoint.key" }
+
+# built-in CA + enrollment (D13), material generated at first start
+[ca]
+cert = "/var/lib/regency/tls/ca.pem"
+key = { SecRef = "/var/lib/regency/tls/ca.key" }
+enrollment_key = { SecRef = "/var/lib/regency/secrets/enrollment-key" }

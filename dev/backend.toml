@@ -1,0 +1,32 @@
+# backend against dev/compose.yaml, with its own least-privilege accounts:
+#   cargo run -p backend -- --config dev/backend.toml      (from regency/)
+instance = "dev-backend"
+
+# D19: the dev stack is plain (no TLS) with credentials
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://localhost:5672"
+username = "regency-backend"
+password = { SecRef = "dev/secrets/backend.rabbitmq" }
+
+[couchdb]
+url = "http://localhost:5984"
+username = "regency-backend"
+password = { SecRef = "dev/secrets/backend.couchdb" }
+
+[health]
+listen = "127.0.0.1:9095"
+
+[log]
+format = "text"
+
+[backend]
+listen = "127.0.0.1:8080"
+session_key = { SecRef = "dev/secrets/session-key" }
+bootstrap_admin = "admin"
+enrollment_key = { SecRef = "dev/secrets/enrollment-key" }
+# the web client (trunk build output), same origin: http://127.0.0.1:8080/
+frontend_dir = "frontend/dist"

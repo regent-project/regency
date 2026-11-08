@@ -1,0 +1,5340 @@
+{
+  "$defs": {
+    "AbsolutePath": {
+      "description": "Absolute path on the host (no trailing `/`, no line break)",
+      "type": "string"
+    },
+    "AgentVersion": {
+      "description": "Release of an agent: dot-separated numbers, e.g. `4.0.3` (quote it in YAML: `'1.10'` would\notherwise be read as a number)",
+      "pattern": "^[0-9]+(\\.[0-9]+)*$",
+      "type": "string"
+    },
+    "AlloyExpectedState": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Config": {
+              "description": "Whole content of `/etc/alloy/config.alloy`",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "CustomArgs": {
+              "description": "Command line flags, written to `CUSTOM_ARGS` in the environment file",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "State": {
+              "const": "Present",
+              "type": "string"
+            },
+            "Version": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AgentVersion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "State": {
+              "const": "Absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AppleMpsExpectedState": {
+      "description": "Desired state of the Apple MPS (Metal) prerequisites.\n\nType-system-first: each variant carries only the parameters that make\nsense for it. `Absent` removes the Xcode Command Line Tools — the only\nremovable MPS component, MPS itself is part of macOS — and needs no\nparameters. `Present` carries the requested prerequisite checks, each\noptional; with none set it simply asserts the host is a Mac (a hardware\n`Ping`).",
+      "oneOf": [
+        {
+          "description": "The Xcode Command Line Tools must be removed. MPS itself is part of\nmacOS and cannot be removed.",
+          "properties": {
+            "State": {
+              "const": "Absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "AppleSilicon": {
+              "description": "The host must run on Apple Silicon (`arm64`). Cannot be `false`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "CommandLineTools": {
+              "description": "The Xcode Command Line Tools (Metal toolchain) must be installed\n(`true`) or removed (`false`).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "MinMacosVersion": {
+              "description": "The host must run at least this macOS version (`13.5`, `14.0`, ...).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "State": {
+              "const": "Present",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ApptainerExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "Name": {
+          "$ref": "#/$defs/ContainerName",
+          "description": "The unit is `regent-apptainer-<name>.service`"
+        },
+        "State": {
+          "$ref": "#/$defs/ApptainerServiceState"
+        }
+      },
+      "required": [
+        "Name",
+        "State"
+      ],
+      "type": "object"
+    },
+    "ApptainerGpu": {
+      "oneOf": [
+        {
+          "const": "Nvidia",
+          "description": "NVIDIA GPUs, host libraries bound into the container (`--nv`)",
+          "type": "string"
+        },
+        {
+          "const": "NvidiaContainerCli",
+          "description": "NVIDIA GPUs set up by `nvidia-container-cli` (`--nv --nvccli`, implies `--writable-tmpfs`)",
+          "type": "string"
+        },
+        {
+          "const": "Rocm",
+          "description": "AMD GPUs (`--rocm`)",
+          "type": "string"
+        }
+      ]
+    },
+    "ApptainerImage": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Not managed: the file must be present",
+          "properties": {
+            "Local": {
+              "$ref": "#/$defs/AbsolutePath"
+            }
+          },
+          "required": [
+            "Local"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Pulled": {
+              "$ref": "#/$defs/ApptainerPulledImage"
+            }
+          },
+          "required": [
+            "Pulled"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ApptainerImageUri": {
+      "description": "Source of `apptainer pull`: `docker://`, `oras://`, `library://`, `shub://`, `http://`,\n`https://`, `docker-archive:`, `docker-daemon:` or `oci-archive:`",
+      "type": "string"
+    },
+    "ApptainerIsolation": {
+      "oneOf": [
+        {
+          "const": "Contain",
+          "description": "Minimal `/dev`, empty `/tmp` and home directory (`--contain`)",
+          "type": "string"
+        },
+        {
+          "const": "ContainAll",
+          "description": "Same, plus separate PID and IPC namespaces and a clean environment (`--containall`)",
+          "type": "string"
+        }
+      ]
+    },
+    "ApptainerProcess": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "`apptainer run`: the image's run script, with these arguments. For an image built from\na Docker image, the run script is `ENTRYPOINT` + `CMD`, and arguments replace `CMD`.",
+          "properties": {
+            "RunScript": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "RunScript"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`apptainer exec`: this command, with its arguments",
+          "properties": {
+            "Exec": {
+              "$ref": "#/$defs/ContainerCommand"
+            }
+          },
+          "required": [
+            "Exec"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ApptainerPulledImage": {
+      "additionalProperties": false,
+      "properties": {
+        "Path": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "SIF file to create (include the version in the file name: an existing file is never\npulled again)"
+        },
+        "Source": {
+          "$ref": "#/$defs/ApptainerImageUri"
+        }
+      },
+      "required": [
+        "Source",
+        "Path"
+      ],
+      "type": "object"
+    },
+    "ApptainerServiceConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "Binds": {
+          "items": {
+            "$ref": "#/$defs/BindMount"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "CleanEnv": {
+          "default": false,
+          "description": "Don't pass the host environment to the container (`--cleanenv`)",
+          "type": "boolean"
+        },
+        "Cpus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CpuCount"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Number of CPUs (`--cpus`)"
+        },
+        "Env": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Parameter"
+          },
+          "description": "Environment variables of the container (values can be secrets)",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "Fakeroot": {
+          "default": false,
+          "description": "Appear as root inside the container (`--fakeroot`)",
+          "type": "boolean"
+        },
+        "Gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApptainerGpu"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Image": {
+          "$ref": "#/$defs/ApptainerImage"
+        },
+        "Isolation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApptainerIsolation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Memory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemorySize"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Memory limit (`--memory`)"
+        },
+        "Process": {
+          "$ref": "#/$defs/ApptainerProcess",
+          "default": {
+            "RunScript": []
+          }
+        },
+        "RestartPolicy": {
+          "$ref": "#/$defs/UnitRestartPolicy",
+          "default": "OnFailure"
+        },
+        "WorkingDir": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbsolutePath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Working directory inside the container (`--pwd`)"
+        },
+        "WritableTmpfs": {
+          "default": false,
+          "description": "Writable, non-persistent root filesystem (`--writable-tmpfs`)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "Image"
+      ],
+      "type": "object"
+    },
+    "ApptainerServiceState": {
+      "oneOf": [
+        {
+          "enum": [
+            "Absent"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Running": {
+              "$ref": "#/$defs/ApptainerServiceConfig"
+            }
+          },
+          "required": [
+            "Running"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Stopped": {
+              "$ref": "#/$defs/ApptainerServiceConfig"
+            }
+          },
+          "required": [
+            "Stopped"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AptExpectedState": {
+      "anyOf": [
+        {
+          "const": "SystemUpToDate",
+          "description": "Perform a full system upgrade (apt-get update && apt-get upgrade)",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Package": {
+              "type": "string"
+            },
+            "State": {
+              "$ref": "#/$defs/PackageExpectedState"
+            }
+          },
+          "required": [
+            "Package",
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AptRepoExpectedState": {
+      "additionalProperties": false,
+      "description": "Configuration for an APT repository\n\nManages an APT repository source file in `/etc/apt/sources.list.d/`.\nSupports two formats:\n\n**Legacy** (.list): set `repo` to the full one-liner string\n  `repo: \"deb https://... focal main\"`\n\n**Deb822** (.sources): set `types`, `uris`, `suites` (and optionally `components`,\n  `signed_by`, `architectures`, `enabled`)\n\n`filename` (without extension) is required in both cases.",
+      "properties": {
+        "CacheUpToDate": {
+          "default": false,
+          "description": "Whether to run apt-get update after adding/removing repositories",
+          "type": "boolean"
+        },
+        "Filename": {
+          "description": "Filename (without extension) for the repository file in /etc/apt/sources.list.d/",
+          "type": "string"
+        },
+        "Format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AptRepoFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "State": {
+          "$ref": "#/$defs/RepoExpectedStatus"
+        }
+      },
+      "required": [
+        "Filename",
+        "State"
+      ],
+      "type": "object"
+    },
+    "AptRepoFormat": {
+      "anyOf": [
+        {
+          "properties": {
+            "Repo": {
+              "description": "Legacy one-liner format → writes to a `.list` file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "Repo"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "Architectures": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "Components": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "Enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "SignedBy": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "Suites": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "Types": {
+              "description": "Repository types for deb822 format → writes to a `.sources` file",
+              "items": {
+                "$ref": "#/$defs/AptRepoType"
+              },
+              "type": "array"
+            },
+            "Uris": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "Types",
+            "Uris",
+            "Suites"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AptRepoType": {
+      "enum": [
+        "Deb",
+        "DebSrc"
+      ],
+      "type": "string"
+    },
+    "AttributeDetail": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Apt": {
+              "$ref": "#/$defs/AptExpectedState"
+            }
+          },
+          "required": [
+            "Apt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "AptRepo": {
+              "$ref": "#/$defs/AptRepoExpectedState"
+            }
+          },
+          "required": [
+            "AptRepo"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "YumDnf": {
+              "$ref": "#/$defs/YumDnfExpectedState"
+            }
+          },
+          "required": [
+            "YumDnf"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "DnfRepo": {
+              "$ref": "#/$defs/DnfRepoExpectedState"
+            }
+          },
+          "required": [
+            "DnfRepo"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Dns": {
+              "$ref": "#/$defs/DnsExpectedState"
+            }
+          },
+          "required": [
+            "Dns"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Dhcp": {
+              "$ref": "#/$defs/DhcpExpectedState"
+            }
+          },
+          "required": [
+            "Dhcp"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Pacman": {
+              "$ref": "#/$defs/PacmanExpectedState"
+            }
+          },
+          "required": [
+            "Pacman"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "LineInFile": {
+              "$ref": "#/$defs/LineInFileExpectedState"
+            }
+          },
+          "required": [
+            "LineInFile"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Debug": {
+              "$ref": "#/$defs/DebugExpectedState"
+            }
+          },
+          "required": [
+            "Debug"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Ping": {
+              "$ref": "#/$defs/PingExpectedState"
+            }
+          },
+          "required": [
+            "Ping"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Service": {
+              "$ref": "#/$defs/ServiceExpectedState"
+            }
+          },
+          "required": [
+            "Service"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Command": {
+              "$ref": "#/$defs/CommandExpectedState"
+            }
+          },
+          "required": [
+            "Command"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "User": {
+              "$ref": "#/$defs/UserExpectedState"
+            }
+          },
+          "required": [
+            "User"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Group": {
+              "$ref": "#/$defs/GroupExpectedState"
+            }
+          },
+          "required": [
+            "Group"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Cron": {
+              "$ref": "#/$defs/CronExpectedState"
+            }
+          },
+          "required": [
+            "Cron"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Hostname": {
+              "$ref": "#/$defs/HostnameExpectedState"
+            }
+          },
+          "required": [
+            "Hostname"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Iptables": {
+              "$ref": "#/$defs/IptablesExpectedState"
+            }
+          },
+          "required": [
+            "Iptables"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Ollama": {
+              "$ref": "#/$defs/OllamaExpectedState"
+            }
+          },
+          "required": [
+            "Ollama"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Onnx": {
+              "$ref": "#/$defs/OnnxExpectedState"
+            }
+          },
+          "required": [
+            "Onnx"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Template": {
+              "$ref": "#/$defs/TemplateExpectedState"
+            }
+          },
+          "required": [
+            "Template"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Docker": {
+              "$ref": "#/$defs/DockerExpectedState"
+            }
+          },
+          "required": [
+            "Docker"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Podman": {
+              "$ref": "#/$defs/PodmanExpectedState"
+            }
+          },
+          "required": [
+            "Podman"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Apptainer": {
+              "$ref": "#/$defs/ApptainerExpectedState"
+            }
+          },
+          "required": [
+            "Apptainer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Enroot": {
+              "$ref": "#/$defs/EnrootExpectedState"
+            }
+          },
+          "required": [
+            "Enroot"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "NvidiaDriver": {
+              "$ref": "#/$defs/NvidiaDriverExpectedState"
+            }
+          },
+          "required": [
+            "NvidiaDriver"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "NvidiaContainerToolkit": {
+              "$ref": "#/$defs/NvidiaContainerToolkitExpectedState"
+            }
+          },
+          "required": [
+            "NvidiaContainerToolkit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "AppleMps": {
+              "$ref": "#/$defs/AppleMpsExpectedState"
+            }
+          },
+          "required": [
+            "AppleMps"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Storage": {
+              "$ref": "#/$defs/StorageExpectedState"
+            }
+          },
+          "required": [
+            "Storage"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "FluentBit": {
+              "$ref": "#/$defs/FluentBitExpectedState"
+            }
+          },
+          "required": [
+            "FluentBit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "NodeExporter": {
+              "$ref": "#/$defs/NodeExporterExpectedState"
+            }
+          },
+          "required": [
+            "NodeExporter"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "OtelCollector": {
+              "$ref": "#/$defs/OtelCollectorExpectedState"
+            }
+          },
+          "required": [
+            "OtelCollector"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Alloy": {
+              "$ref": "#/$defs/AlloyExpectedState"
+            }
+          },
+          "required": [
+            "Alloy"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BindMount": {
+      "description": "Host directory or file mounted in the container: `source[:target[:ro|rw]]`.\n\nBoth paths are absolute, the target defaults to the source and the mount is read-write\nunless `ro` is given. Paths can't contain `:`, `,` or whitespace, as the engines use them as\nseparators.",
+      "type": "string"
+    },
+    "Capability": {
+      "description": "Linux capability, normalized with the `CAP_` prefix (`CAP_NET_ADMIN`, `ALL`).\n`net_admin`, `NET_ADMIN` and `CAP_NET_ADMIN` are all accepted.",
+      "type": "string"
+    },
+    "CdiMode": {
+      "description": "How the CDI specification of the GPUs is generated",
+      "oneOf": [
+        {
+          "const": "Automatic",
+          "description": "`nvidia-cdi-refresh` systemd units (toolkit 1.18.0+), `/var/run/cdi/nvidia.yaml`",
+          "type": "string"
+        },
+        {
+          "const": "Static",
+          "description": "`nvidia-ctk cdi generate`, `/etc/cdi/nvidia.yaml`, automatic refresh disabled",
+          "type": "string"
+        }
+      ]
+    },
+    "CidrBlock": {
+      "description": "IPv4 or IPv6 address, with an optional prefix length (e.g. 10.0.0.0/8)",
+      "type": "string"
+    },
+    "CommandExpectedState": {
+      "additionalProperties": false,
+      "description": "Configuration for a shell command to execute\n\nThe command will be executed each time compliance is assessed. Use this for\nidempotent commands or one-time setup tasks.",
+      "properties": {
+        "Cmd": {
+          "$ref": "#/$defs/Parameter",
+          "description": "Command to execute. Can be a clear text string or a secret reference."
+        }
+      },
+      "required": [
+        "Cmd"
+      ],
+      "type": "object"
+    },
+    "ConnectionState": {
+      "description": "Connection tracking states (-m conntrack --ctstate)\n\nSerializes to YAML as `New`, `Established`, `Related`, `Invalid`, or `Untracked`.\nDisplays as `NEW`, `ESTABLISHED`, `RELATED`, `INVALID`, or `UNTRACKED` for command\ngeneration via `std::fmt::Display`.",
+      "enum": [
+        "New",
+        "Established",
+        "Related",
+        "Invalid",
+        "Untracked"
+      ],
+      "type": "string"
+    },
+    "ConntrackMatch": {
+      "description": "Connection tracking match specification (-m conntrack --ctstate)",
+      "properties": {
+        "States": {
+          "items": {
+            "$ref": "#/$defs/ConnectionState"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "States"
+      ],
+      "type": "object"
+    },
+    "ContainerCommand": {
+      "description": "Omit the command to use the image default",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "ContainerImage": {
+      "description": "Image reference (`[registry/]repository[:tag][@digest]`)",
+      "type": "string"
+    },
+    "ContainerName": {
+      "description": "Container name: `[a-zA-Z0-9][a-zA-Z0-9_.-]*`",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$",
+      "type": "string"
+    },
+    "ContainerRuntime": {
+      "description": "Container engine whose `nvidia` runtime is configured with `nvidia-ctk runtime configure`",
+      "enum": [
+        "Docker",
+        "Containerd",
+        "CriO"
+      ],
+      "type": "string"
+    },
+    "ContainerVolume": {
+      "description": "Volume, CLI syntax: `source:target[:options]` (bind mount or named volume) or\n`target` (anonymous volume). The target must be an absolute path.",
+      "type": "string"
+    },
+    "CpuCount": {
+      "description": "Number of CPUs, strictly positive (e.g. `1.5`)",
+      "format": "double",
+      "type": "number"
+    },
+    "CronCommand": {
+      "anyOf": [
+        {
+          "enum": [
+            "Any"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "CronExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "Command": {
+          "$ref": "#/$defs/CronCommand",
+          "description": "Command to execute"
+        },
+        "Name": {
+          "description": "Unique identifier for this cron job (used in marker comment)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Schedule": {
+          "$ref": "#/$defs/CronSchedule"
+        },
+        "State": {
+          "$ref": "#/$defs/CronExpectedStatus"
+        },
+        "Target": {
+          "$ref": "#/$defs/CronTarget"
+        }
+      },
+      "required": [
+        "Schedule",
+        "Command",
+        "State",
+        "Target"
+      ],
+      "type": "object"
+    },
+    "CronExpectedStatus": {
+      "enum": [
+        "Present",
+        "Absent"
+      ],
+      "type": "string"
+    },
+    "CronSchedule": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Custom": {
+              "properties": {
+                "day": {
+                  "description": "Day of month field (1-31, or * for any)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "hour": {
+                  "description": "Hour field (0-23, or * for any)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "minute": {
+                  "description": "Minute field (0-59, or * for any)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "month": {
+                  "description": "Month field (1-12, or * for any)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "weekday": {
+                  "description": "Weekday field (0-6, where 0 is Sunday, or * for any)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Custom"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "SpecialTime": {
+              "$ref": "#/$defs/CronSpecialTime"
+            }
+          },
+          "required": [
+            "SpecialTime"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CronSpecialTime": {
+      "description": "Special time strings for cron schedules\n\nThese are shortcuts for common scheduling patterns like @daily, @weekly, etc.",
+      "oneOf": [
+        {
+          "const": "Reboot",
+          "description": "Run at boot time",
+          "type": "string"
+        },
+        {
+          "const": "Yearly",
+          "description": "Run once a year at midnight on Jan 1",
+          "type": "string"
+        },
+        {
+          "const": "Annually",
+          "description": "Run once a year at midnight on Jan 1 (alias for Yearly)",
+          "type": "string"
+        },
+        {
+          "const": "Monthly",
+          "description": "Run once a month at midnight on the first day",
+          "type": "string"
+        },
+        {
+          "const": "Weekly",
+          "description": "Run once a week at midnight on Sunday",
+          "type": "string"
+        },
+        {
+          "const": "Daily",
+          "description": "Run once a day at midnight",
+          "type": "string"
+        },
+        {
+          "const": "Hourly",
+          "description": "Run once an hour at the beginning of the hour",
+          "type": "string"
+        }
+      ]
+    },
+    "CronTarget": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Crontab": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "Crontab"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "User to run the cron job as, and file to work on",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "type": "array"
+        }
+      ]
+    },
+    "CudaVersion": {
+      "description": "CUDA toolkit version `<major>.<minor>` (e.g. `12.8`, `13.0`)",
+      "type": "string"
+    },
+    "DebugExpectedState": {
+      "additionalProperties": false,
+      "description": "Configuration for a debug message",
+      "properties": {
+        "Msg": {
+          "description": "Debug message to output during compliance assessment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "Msg"
+      ],
+      "type": "object"
+    },
+    "DhcpCheckBehavior": {
+      "oneOf": [
+        {
+          "enum": [
+            "SimpleCheck"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "CheckResponseAndServer": {
+              "properties": {
+                "Response": {
+                  "$ref": "#/$defs/ExpectedDhcpResponse"
+                },
+                "RogueServerAllowed": {
+                  "type": "boolean"
+                },
+                "Server": {
+                  "format": "ip",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Response",
+                "Server",
+                "RogueServerAllowed"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CheckResponseAndServer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "CheckResponse": {
+              "properties": {
+                "Response": {
+                  "$ref": "#/$defs/ExpectedDhcpResponse"
+                }
+              },
+              "required": [
+                "Response"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CheckResponse"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "CheckServer": {
+              "properties": {
+                "RogueServerAllowed": {
+                  "type": "boolean"
+                },
+                "Server": {
+                  "format": "ip",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Server",
+                "RogueServerAllowed"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CheckServer"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DhcpExpectedState": {
+      "properties": {
+        "Check": {
+          "$ref": "#/$defs/DhcpCheckBehavior"
+        },
+        "MacAddress": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ParentInterface": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ParentInterface",
+        "Check"
+      ],
+      "type": "object"
+    },
+    "DnfRepoExpectedState": {
+      "description": "Manages a repository section inside a `.repo` file in `/etc/yum.repos.d/`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Present": {
+              "additionalProperties": false,
+              "properties": {
+                "Description": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "Enabled": {
+                  "default": null,
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "Exclude": {
+                  "default": null,
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
+                "File": {
+                  "default": null,
+                  "description": "Custom filename for the .repo file (overrides using `name`)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "Gpgcheck": {
+                  "default": null,
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "Gpgkey": {
+                  "default": null,
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
+                "Name": {
+                  "description": "Repository name (used as INI section header)",
+                  "type": "string"
+                },
+                "Priority": {
+                  "default": null,
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "Source": {
+                  "$ref": "#/$defs/DnfRepoSource"
+                },
+                "Sslverify": {
+                  "default": null,
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "Name",
+                "Source"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Present"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Absent": {
+              "additionalProperties": false,
+              "properties": {
+                "File": {
+                  "default": null,
+                  "description": "Custom filename for the .repo file (overrides using `name`)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "Name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Name"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Absent"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DnfRepoSource": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Baseurl": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "Baseurl"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Mirrorlist": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Mirrorlist"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Metalink": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Metalink"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DnsExpectedState": {
+      "anyOf": [
+        {
+          "properties": {
+            "DnsName": {
+              "type": "string"
+            },
+            "ExpectedResponse": {
+              "$ref": "#/$defs/DnsRecordType"
+            },
+            "Server": {
+              "format": "ip",
+              "type": "string"
+            }
+          },
+          "required": [
+            "DnsName",
+            "ExpectedResponse",
+            "Server"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "DnsName": {
+              "type": "string"
+            },
+            "ExpectedResponse": {
+              "$ref": "#/$defs/DnsRecordType"
+            }
+          },
+          "required": [
+            "DnsName",
+            "ExpectedResponse"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "DnsName": {
+              "type": "string"
+            },
+            "Server": {
+              "format": "ip",
+              "type": "string"
+            }
+          },
+          "required": [
+            "DnsName",
+            "Server"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "DnsName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "DnsName"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DnsRecordType": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "A": {
+              "format": "ip",
+              "type": "string"
+            }
+          },
+          "required": [
+            "A"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Aaaa": {
+              "format": "ip",
+              "type": "string"
+            }
+          },
+          "required": [
+            "Aaaa"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Cname": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Cname"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DockerAttachedNetworking": {
+      "additionalProperties": false,
+      "properties": {
+        "Networks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkList"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Ports": {
+          "items": {
+            "$ref": "#/$defs/PublishedPort"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DockerContainerConfig": {
+      "additionalProperties": false,
+      "description": "Every optional field left out is not managed (no regent's defaults here, only docker's)",
+      "properties": {
+        "CapAdd": {
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "CapDrop": {
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Command": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainerCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Cpus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CpuCount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Devices": {
+          "items": {
+            "$ref": "#/$defs/HostDevice"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Dns": {
+          "items": {
+            "format": "ip",
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Entrypoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Env": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Parameter"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "ExtraHosts": {
+          "items": {
+            "$ref": "#/$defs/ExtraHost"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Gpus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "GPUs (`--gpus`, requires the NVIDIA Container Toolkit)"
+        },
+        "HealthCheck": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HealthCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Hostname": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Image": {
+          "$ref": "#/$defs/ContainerImage"
+        },
+        "Init": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Ipc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IpcNamespace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "LogDriver": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "LogOptions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "Memory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemorySize"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Networking": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DockerNetworking"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Privileged": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Pull": {
+          "$ref": "#/$defs/PullPolicy",
+          "default": "Missing"
+        },
+        "ReadOnly": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "RestartPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RestartPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "User": {
+          "description": "User (`name|uid[:group|gid]`)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Volumes": {
+          "items": {
+            "$ref": "#/$defs/ContainerVolume"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "WorkingDir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "Image"
+      ],
+      "type": "object"
+    },
+    "DockerContainerState": {
+      "oneOf": [
+        {
+          "enum": [
+            "Absent"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Running": {
+              "$ref": "#/$defs/DockerContainerConfig"
+            }
+          },
+          "required": [
+            "Running"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Stopped": {
+              "$ref": "#/$defs/DockerContainerConfig"
+            }
+          },
+          "required": [
+            "Stopped"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DockerExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "Name": {
+          "$ref": "#/$defs/ContainerName"
+        },
+        "State": {
+          "$ref": "#/$defs/DockerContainerState"
+        }
+      },
+      "required": [
+        "Name",
+        "State"
+      ],
+      "type": "object"
+    },
+    "DockerNetworking": {
+      "oneOf": [
+        {
+          "const": "Host",
+          "description": "Share the host network stack (`--network host`), ports can't be published",
+          "type": "string"
+        },
+        {
+          "const": "Isolated",
+          "description": "No network at all (`--network none`), ports can't be published",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Attached to networks, with published ports",
+          "properties": {
+            "Attached": {
+              "$ref": "#/$defs/DockerAttachedNetworking"
+            }
+          },
+          "required": [
+            "Attached"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DriverBranch": {
+      "anyOf": [
+        {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "Driver branch of the open kernel modules: `Latest` or a branch number (e.g. `580`)"
+    },
+    "EnrootExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "Name": {
+          "$ref": "#/$defs/ContainerName",
+          "description": "The unit is `regent-enroot-<name>.service`"
+        },
+        "State": {
+          "$ref": "#/$defs/EnrootServiceState"
+        }
+      },
+      "required": [
+        "Name",
+        "State"
+      ],
+      "type": "object"
+    },
+    "EnrootImage": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Not managed: the file must be present",
+          "properties": {
+            "Local": {
+              "$ref": "#/$defs/AbsolutePath"
+            }
+          },
+          "required": [
+            "Local"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Imported": {
+              "$ref": "#/$defs/EnrootImportedImage"
+            }
+          },
+          "required": [
+            "Imported"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnrootImageUri": {
+      "description": "Source of `enroot import`: `docker://[USER@][REGISTRY#]IMAGE[:TAG]`, `dockerd://IMAGE[:TAG]`\nor `podman://IMAGE[:TAG]`",
+      "type": "string"
+    },
+    "EnrootImportedImage": {
+      "additionalProperties": false,
+      "properties": {
+        "Path": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "Squashfs file to create (include the version in the file name: an existing file is\nnever imported again)"
+        },
+        "Source": {
+          "$ref": "#/$defs/EnrootImageUri"
+        }
+      },
+      "required": [
+        "Source",
+        "Path"
+      ],
+      "type": "object"
+    },
+    "EnrootServiceConfig": {
+      "additionalProperties": false,
+      "description": "Fields of `EnrootServiceConfig` before the checks between them",
+      "properties": {
+        "Command": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainerCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Env": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Parameter"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "Gpus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Image": {
+          "$ref": "#/$defs/EnrootImage"
+        },
+        "Mounts": {
+          "items": {
+            "$ref": "#/$defs/BindMount"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "ReadWrite": {
+          "default": false,
+          "type": "boolean"
+        },
+        "RestartPolicy": {
+          "$ref": "#/$defs/UnitRestartPolicy",
+          "default": "OnFailure"
+        },
+        "Root": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "Image"
+      ],
+      "type": "object"
+    },
+    "EnrootServiceState": {
+      "oneOf": [
+        {
+          "enum": [
+            "Absent"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Running": {
+              "$ref": "#/$defs/EnrootServiceConfig"
+            }
+          },
+          "required": [
+            "Running"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Stopped": {
+              "$ref": "#/$defs/EnrootServiceConfig"
+            }
+          },
+          "required": [
+            "Stopped"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ExpectedDhcpResponse": {
+      "properties": {
+        "Dns": {
+          "items": {
+            "format": "ip",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "Ip": {
+          "format": "ip",
+          "type": "string"
+        },
+        "Mask": {
+          "format": "ip",
+          "type": "string"
+        }
+      },
+      "required": [
+        "Ip",
+        "Mask",
+        "Dns"
+      ],
+      "type": "object"
+    },
+    "ExtraHost": {
+      "description": "Custom host-to-IP mapping: `hostname:ip` (`ip` can also be `host-gateway`)",
+      "type": "string"
+    },
+    "FilterChain": {
+      "description": "Chains unique to the Filter table\n\nSerializes to YAML as `Input`, `Forward`, `Output`, or `Custom(\"name\")`.\nDisplays as `INPUT`, `FORWARD`, `OUTPUT`, or custom name for command generation via\n`std::fmt::Display`.",
+      "oneOf": [
+        {
+          "enum": [
+            "Input",
+            "Forward",
+            "Output"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Custom"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FluentBitConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "Content": {
+          "description": "The whole main configuration file",
+          "type": "string"
+        },
+        "Format": {
+          "$ref": "#/$defs/FluentBitConfigFormat"
+        }
+      },
+      "required": [
+        "Format",
+        "Content"
+      ],
+      "type": "object"
+    },
+    "FluentBitConfigFormat": {
+      "oneOf": [
+        {
+          "enum": [
+            "Yaml"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "Classic",
+          "description": "`[SERVICE]` / `[INPUT]` / `[OUTPUT]` sections",
+          "type": "string"
+        }
+      ]
+    },
+    "FluentBitExpectedState": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Config": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FluentBitConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "State": {
+              "const": "Present",
+              "type": "string"
+            },
+            "Version": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AgentVersion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "State": {
+              "const": "Absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "GpuId": {
+      "anyOf": [
+        {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "GPU identifier: an index (`0`), a GPU UUID (`GPU-<uuid>`) or a MIG device (`MIG-<uuid>`)\n\nIndexes can be written as YAML integers (`Devices: [0, 1]`)."
+    },
+    "GpuList": {
+      "items": {
+        "$ref": "#/$defs/GpuId"
+      },
+      "type": "array"
+    },
+    "GpuSelection": {
+      "description": "Requires the NVIDIA Container Toolkit on the host",
+      "oneOf": [
+        {
+          "enum": [
+            "All"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Devices": {
+              "$ref": "#/$defs/GpuList"
+            }
+          },
+          "required": [
+            "Devices"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "GroupExpectedState": {
+      "additionalProperties": false,
+      "description": "Configuration for a system group",
+      "properties": {
+        "Local": {
+          "description": "Whether to use local commands (lgroupadd/lgroupdel) instead of system commands",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Name": {
+          "type": "string"
+        },
+        "State": {
+          "$ref": "#/$defs/GroupExpectedStatus"
+        }
+      },
+      "required": [
+        "Name",
+        "State"
+      ],
+      "type": "object"
+    },
+    "GroupExpectedStatus": {
+      "description": "Desired state of a group",
+      "oneOf": [
+        {
+          "enum": [
+            "Absent"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Present": {
+              "properties": {
+                "Gid": {
+                  "description": "Group ID to assign (optional)",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "Members": {
+                  "description": "List of users that should be members of this group",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
+                "System": {
+                  "description": "Whether this is a system group (uses -r flag with groupadd)",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Present"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HealthCheck": {
+      "additionalProperties": false,
+      "description": "The test command runs inside the container through `/bin/sh -c`.",
+      "properties": {
+        "Interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HealthDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Retries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "StartInterval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HealthDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "StartPeriod": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HealthDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Test": {
+          "$ref": "#/$defs/HealthCheckTest"
+        },
+        "Timeout": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HealthDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "Test"
+      ],
+      "type": "object"
+    },
+    "HealthCheckTest": {
+      "type": "string"
+    },
+    "HealthDuration": {
+      "description": "Duration in the Go syntax of the Docker CLI (`30s`, `1m30s`, `500ms`), strictly positive",
+      "type": "string"
+    },
+    "HostDevice": {
+      "description": "Host device, CLI syntax: `host_path[:container_path[:permissions]]`\n(container path defaults to the host path, permissions to `rwm`)",
+      "type": "string"
+    },
+    "HostnameExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "Method": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostnameMethod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Method to use for setting the hostname (defaults to auto-detection)"
+        },
+        "Name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "Name"
+      ],
+      "type": "object"
+    },
+    "HostnameMethod": {
+      "oneOf": [
+        {
+          "const": "Systemd",
+          "description": "Uses hostnamectl set-hostname (systemd, persistent across reboots)",
+          "type": "string"
+        },
+        {
+          "const": "Generic",
+          "description": "Uses hostname command + writes /etc/hostname (non-systemd systems)",
+          "type": "string"
+        }
+      ]
+    },
+    "Invert": {
+      "description": "Wraps any match value to indicate whether it should be matched normally or inverted (!)\n\nSerializes to YAML as `{ Value: ..., Inverted: true/false }` when inverted is true,\nor just the inner value when inverted is false (due to `skip_serializing_if`).",
+      "properties": {
+        "Inverted": {
+          "type": "boolean"
+        },
+        "Value": {
+          "$ref": "#/$defs/CidrBlock"
+        }
+      },
+      "required": [
+        "Value"
+      ],
+      "type": "object"
+    },
+    "Invert2": {
+      "description": "Wraps any match value to indicate whether it should be matched normally or inverted (!)\n\nSerializes to YAML as `{ Value: ..., Inverted: true/false }` when inverted is true,\nor just the inner value when inverted is false (due to `skip_serializing_if`).",
+      "properties": {
+        "Inverted": {
+          "type": "boolean"
+        },
+        "Value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "Value"
+      ],
+      "type": "object"
+    },
+    "Invert3": {
+      "description": "Wraps any match value to indicate whether it should be matched normally or inverted (!)\n\nSerializes to YAML as `{ Value: ..., Inverted: true/false }` when inverted is true,\nor just the inner value when inverted is false (due to `skip_serializing_if`).",
+      "properties": {
+        "Inverted": {
+          "type": "boolean"
+        },
+        "Value": {
+          "$ref": "#/$defs/ConntrackMatch"
+        }
+      },
+      "required": [
+        "Value"
+      ],
+      "type": "object"
+    },
+    "Invert4": {
+      "description": "Wraps any match value to indicate whether it should be matched normally or inverted (!)\n\nSerializes to YAML as `{ Value: ..., Inverted: true/false }` when inverted is true,\nor just the inner value when inverted is false (due to `skip_serializing_if`).",
+      "properties": {
+        "Inverted": {
+          "type": "boolean"
+        },
+        "Value": {
+          "$ref": "#/$defs/OwnerMatch"
+        }
+      },
+      "required": [
+        "Value"
+      ],
+      "type": "object"
+    },
+    "IpVersion": {
+      "description": "IP version for iptables commands\n\nSerializes to YAML as `V4` or `V6`.\nDisplays as `iptables` or `ip6tables` for command generation via `std::fmt::Display`.",
+      "enum": [
+        "V4",
+        "V6"
+      ],
+      "type": "string"
+    },
+    "IpcNamespace": {
+      "description": "IPC namespace of the container (`--ipc`)\n\nInference servers (vLLM, PyTorch dataloaders, Triton) exchange tensors through shared\nmemory: either share the host IPC namespace, or give the container a bigger `/dev/shm`\n(64 MiB by default). The size of `/dev/shm` can only be set on a private namespace.",
+      "oneOf": [
+        {
+          "const": "Host",
+          "description": "Share the host IPC namespace and `/dev/shm` (`--ipc host`)",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Own IPC namespace (`--ipc private`)",
+          "properties": {
+            "Private": {
+              "$ref": "#/$defs/PrivateIpc"
+            }
+          },
+          "required": [
+            "Private"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Own IPC namespace which other containers can join (`--ipc shareable`)",
+          "properties": {
+            "Shareable": {
+              "$ref": "#/$defs/PrivateIpc"
+            }
+          },
+          "required": [
+            "Shareable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "IptablesExpectedState": {
+      "description": "Desired state for an iptables/ip6tables rule\n\nSerializes to YAML with a `State` tag (`Present` or `Absent`) and uses PascalCase for all\nfields. The `IpVersion` defaults to V4 and is omitted when V4.",
+      "oneOf": [
+        {
+          "description": "An enum representing a table, bundling ONLY valid chains for that table.\n\nSerializes to YAML with a `Table` tag and `Details` content using PascalCase for all fields.",
+          "oneOf": [
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/RawChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Raw",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/FilterChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Filter",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/NatChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Nat",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/MangleChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Mangle",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/SecurityChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Security",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            }
+          ],
+          "properties": {
+            "Action": {
+              "$ref": "#/$defs/IptablesInsertionAction"
+            },
+            "IpVersion": {
+              "$ref": "#/$defs/IpVersion"
+            },
+            "State": {
+              "const": "Present",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State",
+            "Action"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An enum representing a table, bundling ONLY valid chains for that table.\n\nSerializes to YAML with a `Table` tag and `Details` content using PascalCase for all fields.",
+          "oneOf": [
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/RawChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Raw",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/FilterChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Filter",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/NatChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Nat",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/MangleChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Mangle",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Details": {
+                  "properties": {
+                    "Chain": {
+                      "$ref": "#/$defs/SecurityChain"
+                    },
+                    "Criteria": {
+                      "$ref": "#/$defs/MatchCriteria"
+                    },
+                    "Target": {
+                      "$ref": "#/$defs/IptablesTarget"
+                    }
+                  },
+                  "required": [
+                    "Chain",
+                    "Criteria",
+                    "Target"
+                  ],
+                  "type": "object"
+                },
+                "Table": {
+                  "const": "Security",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Table",
+                "Details"
+              ],
+              "type": "object"
+            }
+          ],
+          "properties": {
+            "IpVersion": {
+              "$ref": "#/$defs/IpVersion",
+              "default": "V4"
+            },
+            "State": {
+              "const": "Absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "IptablesInsertionAction": {
+      "description": "Action for inserting a rule into a chain\n\nSerializes to YAML as `Append` or `Insert` with a `Position` field.",
+      "oneOf": [
+        {
+          "enum": [
+            "Append"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Insert": {
+              "properties": {
+                "Position": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "Position"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Insert"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "IptablesTarget": {
+      "description": "Target action for an iptables rule (-j, -g)\n\nSerializes to YAML as `Accept`, `Drop`, `Reject`, `Log`, `Return`, `Jump`, `Goto`, or `Custom`.\nThe `Reject` and `Log` variants support additional options.",
+      "oneOf": [
+        {
+          "enum": [
+            "Accept",
+            "Drop",
+            "Return"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Reject": {
+              "properties": {
+                "With": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/RejectWith"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Reject"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Log": {
+              "properties": {
+                "Level": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "Prefix": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Log"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Jump": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Jump"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Goto": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Goto"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Custom"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "KernelModules": {
+      "description": "Kernel module flavor, carrying the driver branch",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Open GPU kernel modules (`nvidia-open`): required on Blackwell, recommended from Turing on",
+          "properties": {
+            "Open": {
+              "$ref": "#/$defs/DriverBranch"
+            }
+          },
+          "required": [
+            "Open"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Proprietary kernel modules (`cuda-drivers`): needed by Maxwell, Pascal and Volta GPUs,\nonly available up to branch 610",
+          "properties": {
+            "Proprietary": {
+              "$ref": "#/$defs/ProprietaryBranch"
+            }
+          },
+          "required": [
+            "Proprietary"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Line": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The exact line to insert, or the replacement when regexp/search_string matches.",
+          "properties": {
+            "Raw": {
+              "$ref": "#/$defs/Parameter"
+            }
+          },
+          "required": [
+            "Raw"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Regex that selects the line(s) to replace (last match) or delete. Mutually exclusive with SearchString.",
+          "properties": {
+            "Regexp": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Regexp"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "RegexpWithBackrefs": {
+              "properties": {
+                "ContentToInsert": {
+                  "description": "The content to insert. It must contain backreferences like \\1, \\2, or \\g<1> to pull the captured text from the regexp match.",
+                  "type": "string"
+                },
+                "Regexp": {
+                  "description": "The regex to search for. You must include capture groups using parentheses () so the line parameter can reference them.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Regexp",
+                "ContentToInsert"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "RegexpWithBackrefs"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Fixed-string alternative to Regexp for matching whole lines. Mutually exclusive with Regexp.",
+          "properties": {
+            "SearchString": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "SearchString"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LineExpectedState": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Present": {
+              "properties": {
+                "Create": {
+                  "description": "Create the file if it does not exist (default: false).",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "Firstmatch": {
+                  "description": "When using InsertAfter/InsertBefore, match the first occurrence instead of the last.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "Position": {
+                  "$ref": "#/$defs/LinePosition",
+                  "default": {
+                    "InsertAfter": "EOF"
+                  }
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Present"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Absent": {
+              "properties": {
+                "FileMustExistAnyway": {
+                  "default": false,
+                  "description": "Line must be absent but file must be exists anyway. If set to false, no error will be triggered when trying to remove a line from a non-existing file.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Absent"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LineInFileExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "FilePath": {
+          "description": "Absolute path to the managed file.",
+          "type": "string"
+        },
+        "Line": {
+          "$ref": "#/$defs/Line"
+        },
+        "State": {
+          "$ref": "#/$defs/LineExpectedState",
+          "description": "Line to ensure is present or absent. Default state: Present."
+        }
+      },
+      "required": [
+        "FilePath",
+        "State",
+        "Line"
+      ],
+      "type": "object"
+    },
+    "LinePosition": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Insert the line after the last line matching this regex, or after \"EOF\" / \"BOF\". Mutually exclusive with InsertBefore.",
+          "properties": {
+            "InsertAfter": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "InsertAfter"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Insert the line before the last line matching this regex, or before \"BOF\". Mutually exclusive with InsertAfter.",
+          "properties": {
+            "InsertBefore": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "InsertBefore"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MangleChain": {
+      "description": "Chains available in Mangle table\n\nSerializes to YAML as `Prerouting`, `Input`, `Forward`, `Output`, `Postrouting`, or\n`Custom(\"name\")`.\nDisplays as `PREROUTING`, `INPUT`, `FORWARD`, `OUTPUT`, `POSTROUTING`, or custom name\nfor command generation via `std::fmt::Display`.",
+      "oneOf": [
+        {
+          "enum": [
+            "Prerouting",
+            "Input",
+            "Forward",
+            "Output",
+            "Postrouting"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Custom"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MatchCriteria": {
+      "description": "Match criteria for iptables rules\n\nContains all possible matching criteria for an iptables rule. All fields are optional\nand use `Invert` wrapper for fields that support negation with `!` in iptables syntax.",
+      "properties": {
+        "Comment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Conntrack": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Invert3"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Destination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Invert"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Fragment": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "NetworkInterfaceIn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Invert2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "NetworkInterfaceOut": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Invert2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Owner": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Invert4"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Protocol": {
+          "$ref": "#/$defs/Protocol"
+        },
+        "Source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Invert"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "Protocol"
+      ],
+      "type": "object"
+    },
+    "MemorySize": {
+      "description": "Memory size, CLI syntax (binary units, case-insensitive): `512m`, `1.5g`, `1048576`...",
+      "type": "string"
+    },
+    "NatChain": {
+      "description": "Chains unique to the Nat table\n\nSerializes to YAML as `Prerouting`, `Input`, `Output`, `Postrouting`, or `Custom(\"name\")`.\nDisplays as `PREROUTING`, `INPUT`, `OUTPUT`, `POSTROUTING`, or custom name for command\ngeneration via `std::fmt::Display`.",
+      "oneOf": [
+        {
+          "enum": [
+            "Prerouting",
+            "Input",
+            "Output",
+            "Postrouting"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Custom"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NetworkList": {
+      "description": "Non-empty list of networks (the first one is used at creation, the others are connected afterwards)",
+      "items": {
+        "$ref": "#/$defs/NetworkName"
+      },
+      "type": "array"
+    },
+    "NetworkName": {
+      "description": "Name of a network to attach the container to.\n\nNetwork modes (`host`, `none`, `container:...`, and Podman's `slirp4netns`, `pasta`,\n`private`, `ns:...`) are not network names: `host` and `none` are expressed with the `Host`\nand `Isolated` networking variants of each attribute, the others are not supported.",
+      "type": "string"
+    },
+    "NodeExporterExpectedState": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "DisabledCollectors": {
+              "default": [],
+              "description": "Collectors enabled by default to disable (`--no-collector.<name>`)",
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "EnabledCollectors": {
+              "default": [],
+              "description": "Collectors disabled by default to enable (`--collector.<name>`)",
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "ListenAddress": {
+              "description": "`--web.listen-address`, `:9100` when `None`",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "State": {
+              "const": "Present",
+              "type": "string"
+            },
+            "TextfileDirectory": {
+              "description": "`--collector.textfile.directory`, created if missing",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "Version": {
+              "$ref": "#/$defs/AgentVersion"
+            }
+          },
+          "required": [
+            "State",
+            "Version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "State": {
+              "const": "Absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NvidiaContainerToolkitConfig": {
+      "additionalProperties": false,
+      "description": "Optional fields left out are not managed.",
+      "properties": {
+        "Cdi": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CdiMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Runtimes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContainerRuntime"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "Version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolkitVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "NvidiaContainerToolkitExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "State": {
+          "$ref": "#/$defs/NvidiaContainerToolkitState"
+        }
+      },
+      "required": [
+        "State"
+      ],
+      "type": "object"
+    },
+    "NvidiaContainerToolkitState": {
+      "oneOf": [
+        {
+          "enum": [
+            "Absent"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Toolkit installed with this configuration",
+          "properties": {
+            "Present": {
+              "$ref": "#/$defs/NvidiaContainerToolkitConfig"
+            }
+          },
+          "required": [
+            "Present"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NvidiaDriverConfig": {
+      "additionalProperties": false,
+      "description": "Optional fields left out are not managed.",
+      "properties": {
+        "CudaToolkit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CudaVersion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "CUDA toolkit to install (`cuda-toolkit-<major>-<minor>`)"
+        },
+        "KernelModules": {
+          "$ref": "#/$defs/KernelModules",
+          "default": {
+            "Open": "Latest"
+          },
+          "description": "Kernel module flavor and driver branch (open modules, latest branch by default)"
+        },
+        "PersistenceMode": {
+          "description": "`nvidia-persistenced` service enabled and running (`true`) or disabled and stopped (`false`)",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "NvidiaDriverExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "State": {
+          "$ref": "#/$defs/NvidiaDriverState"
+        }
+      },
+      "required": [
+        "State"
+      ],
+      "type": "object"
+    },
+    "NvidiaDriverState": {
+      "oneOf": [
+        {
+          "enum": [
+            "Absent"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Driver installed and loaded with this configuration",
+          "properties": {
+            "Present": {
+              "$ref": "#/$defs/NvidiaDriverConfig"
+            }
+          },
+          "required": [
+            "Present"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OllamaApiConfig": {
+      "additionalProperties": false,
+      "description": "REST API and environment configuration for Ollama\n\nThese settings are written to `/etc/systemd/system/ollama.service.d/override.conf`\nand control the Ollama service behavior.",
+      "properties": {
+        "GpuLayers": {
+          "description": "OLLAMA_GPU_LAYERS - number of GPU layers to load (-1 for all available)",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "Host": {
+          "description": "OLLAMA_HOST env var - the address the server listens on, e.g. \"0.0.0.0:11434\"",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "KeepAlive": {
+          "description": "OLLAMA_KEEP_ALIVE - how long to keep models in memory, e.g. \"5m\", \"0\", \"24h\"",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "MaxLoadedModels": {
+          "description": "OLLAMA_MAX_LOADED_MODELS - maximum number of models to keep loaded in memory",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ModelsPath": {
+          "description": "OLLAMA_MODELS - custom model storage path",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "NumParallel": {
+          "description": "OLLAMA_NUM_PARALLEL - number of parallel requests to process",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "Origins": {
+          "description": "OLLAMA_ORIGINS - allowed origins for CORS, e.g. [\"*\"] or specific URLs",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OllamaExpectedState": {
+      "oneOf": [
+        {
+          "properties": {
+            "ApiConfig": {
+              "$ref": "#/$defs/OllamaApiConfig",
+              "description": "Written to the systemd override file"
+            },
+            "Models": {
+              "items": {
+                "$ref": "#/$defs/OllamaModel"
+              },
+              "type": "array"
+            },
+            "State": {
+              "const": "Present",
+              "type": "string"
+            },
+            "Version": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OllamaVersion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "State",
+            "ApiConfig",
+            "Models"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "State": {
+              "const": "Absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OllamaModel": {
+      "additionalProperties": false,
+      "properties": {
+        "Name": {
+          "description": "Name of the model (e.g., \"llama3\", \"mistral:7b\")",
+          "type": "string"
+        },
+        "State": {
+          "$ref": "#/$defs/OllamaModelState"
+        }
+      },
+      "required": [
+        "Name",
+        "State"
+      ],
+      "type": "object"
+    },
+    "OllamaModelState": {
+      "enum": [
+        "Present",
+        "Absent"
+      ],
+      "type": "string"
+    },
+    "OllamaVersion": {
+      "description": "`Latest`, or a version such as `0.5.4`",
+      "type": "string"
+    },
+    "OnnxExpectedState": {
+      "oneOf": [
+        {
+          "properties": {
+            "Python": {
+              "default": "python3",
+              "description": "Python interpreter to uninstall from. Defaults to `python3`.",
+              "type": "string"
+            },
+            "State": {
+              "const": "Absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "Runtime": {
+              "$ref": "#/$defs/OnnxRuntime"
+            },
+            "State": {
+              "const": "Present",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State",
+            "Runtime"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OnnxRuntime": {
+      "additionalProperties": false,
+      "properties": {
+        "Gpu": {
+          "description": "Manage `onnxruntime-gpu` (CUDA build) instead of `onnxruntime`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Providers": {
+          "description": "Execution providers the runtime must report\n(`CUDAExecutionProvider`, `CoreMLExecutionProvider`, ...). Asserted,\nnever remediated here: pair with `NvidiaDriver` /\n`NvidiaContainerToolkit` / `AppleMps` (gpu category).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Python": {
+          "default": "python3",
+          "description": "Python interpreter to use (a venv's `python`). Defaults to `python3`.",
+          "type": "string"
+        },
+        "Version": {
+          "description": "Exact wheel version to pin (`1.20.0`). `None` accepts any version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OtelCollectorDistribution": {
+      "oneOf": [
+        {
+          "const": "Core",
+          "description": "`otelcol`",
+          "type": "string"
+        },
+        {
+          "const": "Contrib",
+          "description": "`otelcol-contrib`",
+          "type": "string"
+        }
+      ]
+    },
+    "OtelCollectorExpectedState": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Config": {
+              "description": "Whole content of `/etc/<package>/config.yaml`",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "Distribution": {
+              "$ref": "#/$defs/OtelCollectorDistribution"
+            },
+            "State": {
+              "const": "Present",
+              "type": "string"
+            },
+            "Version": {
+              "$ref": "#/$defs/AgentVersion"
+            }
+          },
+          "required": [
+            "State",
+            "Distribution",
+            "Version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "State": {
+              "const": "Absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OwnerMatch": {
+      "description": "User/Group ownership matching (-m owner)\n\nSerializes to YAML as `UidOwner(\"username\")` or `GidOwner(\"groupname\")`.\nDisplays as `--uid-owner username` or `--gid-owner groupname` for command generation via\n`std::fmt::Display`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "UidOwner": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "UidOwner"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "GidOwner": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "GidOwner"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PackageExpectedState": {
+      "enum": [
+        "Present",
+        "Absent"
+      ],
+      "type": "string"
+    },
+    "PacmanExpectedState": {
+      "anyOf": [
+        {
+          "const": "SystemUpgrade",
+          "description": "Perform a full system upgrade (pacman -Syu)",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Package": {
+              "type": "string"
+            },
+            "State": {
+              "$ref": "#/$defs/PackageExpectedState"
+            }
+          },
+          "required": [
+            "Package",
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Parameter": {
+      "anyOf": [
+        {
+          "description": "A direct, non-secret value.",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/SecretReference",
+          "description": "A reference to a secret in a secret provider."
+        }
+      ],
+      "description": "A parameter that can be either a clear value or a secret reference.\n\nThis enum allows attributes to accept parameters that are either provided\ndirectly or retrieved from a secret provider.\n\n# Example\n\n```no_run\n\n// Clear parameter\nlet param1: Parameter<String> = Parameter::Clear(\"hello\".to_string());\n\n// Secret parameter\nlet param2: Parameter<String> = Parameter::Secret(\n    SecretReference::from(\"my_secret\", Some(\"files\".to_string()))\n);\n```"
+    },
+    "PingExpectedState": {
+      "additionalProperties": false,
+      "description": "Configuration for a host connectivity check\n\nThis attribute checks if the host is reachable by running a simple `id` command.\nIt does not require any additional parameters.",
+      "type": "object"
+    },
+    "PodName": {
+      "description": "Pod name: `[a-zA-Z0-9][a-zA-Z0-9_.-]*`",
+      "type": "string"
+    },
+    "PodmanAttachedNetworking": {
+      "additionalProperties": false,
+      "properties": {
+        "Dns": {
+          "items": {
+            "format": "ip",
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "ExtraHosts": {
+          "items": {
+            "$ref": "#/$defs/ExtraHost"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Networks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkList"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Ports": {
+          "items": {
+            "$ref": "#/$defs/PublishedPort"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PodmanContainerConfig": {
+      "additionalProperties": false,
+      "description": "Configuration of a container which must exist\n\nEvery optional field left out is not managed (not compared, not passed to `podman create`).",
+      "properties": {
+        "CapAdd": {
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "CapDrop": {
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Command": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainerCommand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Command and arguments (overrides the image `CMD`)"
+        },
+        "Cpus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CpuCount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Devices": {
+          "items": {
+            "$ref": "#/$defs/HostDevice"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Entrypoint": {
+          "description": "Entrypoint executable (overrides the image `ENTRYPOINT`, empty string to reset it)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Env": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Parameter"
+          },
+          "description": "Environment variables (values can be secrets)",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "Gpus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "GPUs, through the NVIDIA CDI specification (`--device nvidia.com/gpu=...`)"
+        },
+        "Image": {
+          "$ref": "#/$defs/ContainerImage",
+          "description": "Image reference (preferably fully qualified)"
+        },
+        "Init": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "LogDriver": {
+          "description": "Logging driver (`journald`, `k8s-file`, `none`, `passthrough`)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "LogOptions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "Memory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemorySize"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Placement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PodmanPlacement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Pod membership, or namespace options of a standalone container"
+        },
+        "Privileged": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Pull": {
+          "$ref": "#/$defs/PullPolicy",
+          "default": "Missing"
+        },
+        "ReadOnly": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "RestartPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RestartPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "User": {
+          "description": "User (`name|uid[:group|gid]`)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Volumes": {
+          "items": {
+            "$ref": "#/$defs/ContainerVolume"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "WorkingDir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "Image"
+      ],
+      "type": "object"
+    },
+    "PodmanContainerState": {
+      "oneOf": [
+        {
+          "enum": [
+            "Absent"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Running": {
+              "$ref": "#/$defs/PodmanContainerConfig"
+            }
+          },
+          "required": [
+            "Running"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Stopped": {
+              "$ref": "#/$defs/PodmanContainerConfig"
+            }
+          },
+          "required": [
+            "Stopped"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PodmanExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "Name": {
+          "$ref": "#/$defs/ContainerName"
+        },
+        "State": {
+          "$ref": "#/$defs/PodmanContainerState"
+        }
+      },
+      "required": [
+        "Name",
+        "State"
+      ],
+      "type": "object"
+    },
+    "PodmanNetworking": {
+      "oneOf": [
+        {
+          "const": "Host",
+          "description": "Share the host network stack (`--network host`)",
+          "type": "string"
+        },
+        {
+          "const": "Isolated",
+          "description": "No network at all (`--network none`)",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Attached to networks (or to the default network if `Networks` is omitted)",
+          "properties": {
+            "Attached": {
+              "$ref": "#/$defs/PodmanAttachedNetworking"
+            }
+          },
+          "required": [
+            "Attached"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PodmanPlacement": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Join an existing pod (`--pod`), sharing its network and UTS namespaces",
+          "properties": {
+            "Pod": {
+              "$ref": "#/$defs/PodName"
+            }
+          },
+          "required": [
+            "Pod"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Standalone": {
+              "$ref": "#/$defs/PodmanStandalone"
+            }
+          },
+          "required": [
+            "Standalone"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PodmanStandalone": {
+      "additionalProperties": false,
+      "description": "Namespace options of a container which is not in a pod",
+      "properties": {
+        "Hostname": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Ipc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IpcNamespace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Networking": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PodmanNetworking"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Userns": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PodmanUserNamespace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PodmanUserNamespace": {
+      "description": "User namespace mode (`--userns`)",
+      "oneOf": [
+        {
+          "const": "Host",
+          "description": "`host`: no user namespace",
+          "type": "string"
+        },
+        {
+          "const": "Private",
+          "description": "`private`: new user namespace",
+          "type": "string"
+        },
+        {
+          "const": "Auto",
+          "description": "`auto`: unique user namespace with automatically picked IDs",
+          "type": "string"
+        },
+        {
+          "const": "KeepId",
+          "description": "`keep-id`: map the current user to the same UID inside the container (rootless)",
+          "type": "string"
+        },
+        {
+          "const": "NoMap",
+          "description": "`nomap`: don't map the current user inside the container (rootless)",
+          "type": "string"
+        }
+      ]
+    },
+    "PortRange": {
+      "anyOf": [
+        {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "properties": {
+            "End": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "Start": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "Start",
+            "End"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Represents a single port or a contiguous port range (e.g., \"1024:65535\")\n\nSerializes to YAML as a single number or `{ Start: ..., End: ... }`.\nDisplays as `port` or `start:end` for command generation via `std::fmt::Display`."
+    },
+    "PortSpec": {
+      "anyOf": [
+        {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "properties": {
+            "End": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "Start": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "Start",
+            "End"
+          ],
+          "type": "object"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/PortRange"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "Represents either a single port match or a multiport list\n\nSerializes to YAML as a single number, a range object, or a list of port ranges.\nDisplays as a comma-separated list of ports/ranges for command generation via\n`std::fmt::Display`."
+    },
+    "PrivateIpc": {
+      "additionalProperties": false,
+      "properties": {
+        "ShmSize": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemorySize"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Size of `/dev/shm` (`--shm-size`, not managed if omitted)"
+        }
+      },
+      "type": "object"
+    },
+    "Privilege": {
+      "description": "Specifies the privilege level for command execution.\n\nThis enum determines how commands are executed on the target host,\nincluding whether privilege escalation is used.\n\n# Variants\n\n- `None`: Execute as the currently authenticated user\n- `WithSudo`: Execute with `sudo` for root privileges\n- `WithSudoRs`: Execute with `sudo-rs` for root privileges\n\n# Example\n\n```no_run\nuse regent_sdk::Privilege;\n\n// Execute as current user\nlet privilege = Privilege::None;\n\n// Execute with sudo\nlet privilege = Privilege::WithSudo;\n\n// Execute with sudo-rs\nlet privilege = Privilege::WithSudoRs;\n```",
+      "oneOf": [
+        {
+          "const": "None",
+          "description": "Run command as the current authenticated user (no privilege escalation).",
+          "type": "string"
+        },
+        {
+          "const": "WithSudo",
+          "description": "Run command with sudo for root privileges.",
+          "type": "string"
+        },
+        {
+          "const": "WithSudoRs",
+          "description": "Run command with sudo-rs for root privileges.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProprietaryBranch": {
+      "anyOf": [
+        {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "Branch of the proprietary kernel modules: from 570 to 610 (the last branch shipping them)"
+    },
+    "Protocol": {
+      "description": "Network protocol for iptables rule matching\n\nSerializes to YAML as `Tcp`, `Udp`, `Icmp`, or `All`.\nDisplays as `tcp`, `udp`, `icmp`, or `all` for command generation via `std::fmt::Display`.",
+      "oneOf": [
+        {
+          "enum": [
+            "All"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Tcp": {
+              "properties": {
+                "DestPort": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PortSpec"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "SourcePort": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PortSpec"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "TcpFlags": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/TcpFlagsMatch"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Tcp"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Udp": {
+              "properties": {
+                "DestPort": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PortSpec"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "SourcePort": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PortSpec"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Udp"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Icmp": {
+              "properties": {
+                "IcmpCode": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "IcmpType": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Icmp"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PublishedPort": {
+      "description": "Published port(s), CLI syntax: `[ip:][host_port:]container_port[/protocol]`.\nPort ranges (`8000-8010:8000-8010`) are supported.",
+      "type": "string"
+    },
+    "PullPolicy": {
+      "oneOf": [
+        {
+          "enum": [
+            "Missing"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "Never",
+          "description": "Never pull: a missing image makes the attribute non-compliant (fatal)",
+          "type": "string"
+        }
+      ]
+    },
+    "RateLimit": {
+      "description": "Rate limiting specification (-m limit)\n\nSerializes to YAML with `Rate`, `Unit`, and optional `Burst` fields.",
+      "properties": {
+        "Burst": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "Rate": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "Unit": {
+          "$ref": "#/$defs/RateUnit"
+        }
+      },
+      "required": [
+        "Rate",
+        "Unit"
+      ],
+      "type": "object"
+    },
+    "RateUnit": {
+      "description": "Rate unit for limit matching (-m limit)\n\nSerializes to YAML as `Second`, `Minute`, `Hour`, or `Day`.\nDisplays as `/second`, `/minute`, `/hour`, or `/day` for command generation via\n`std::fmt::Display`.",
+      "enum": [
+        "Second",
+        "Minute",
+        "Hour",
+        "Day"
+      ],
+      "type": "string"
+    },
+    "RawChain": {
+      "description": "Chains unique to the Raw table\n\nSerializes to YAML as `Prerouting`, `Output`, or `Custom(\"name\")`.\nDisplays as `PREROUTING`, `OUTPUT`, or custom name for command generation via\n`std::fmt::Display`.",
+      "oneOf": [
+        {
+          "enum": [
+            "Prerouting",
+            "Output"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Custom"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RejectWith": {
+      "description": "Rejection types for the REJECT target (--reject-with)\n\nSerializes to YAML as `IcmpPortUnreachable`, `IcmpNetUnreachable`, `TcpReset`, or `EchoReply`.\nDisplays as `icmp-port-unreachable`, `icmp-net-unreachable`, `tcp-reset`, or `echo-reply`\nfor command generation via `std::fmt::Display`.",
+      "enum": [
+        "IcmpPortUnreachable",
+        "IcmpNetUnreachable",
+        "TcpReset",
+        "EchoReply"
+      ],
+      "type": "string"
+    },
+    "RepoExpectedStatus": {
+      "enum": [
+        "Present",
+        "Absent"
+      ],
+      "type": "string"
+    },
+    "RestartPolicy": {
+      "description": "`--restart`",
+      "oneOf": [
+        {
+          "const": "No",
+          "description": "`no`",
+          "type": "string"
+        },
+        {
+          "const": "Always",
+          "description": "`always`",
+          "type": "string"
+        },
+        {
+          "const": "UnlessStopped",
+          "description": "`unless-stopped`",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`on-failure[:max-retries]` (0 means unlimited retries)",
+          "properties": {
+            "OnFailure": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "OnFailure"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SecretReference": {
+      "additionalProperties": false,
+      "description": "Reference to a secret in a secret provider.\n\nThis struct is used to identify secrets without containing the actual secret value.\nIt consists of a secret reference string and an optional provider name.\n\n# Example\n\n```no_run\nuse regent_sdk::secrets::SecretReference;\n\n// Reference to a secret in the default provider\nlet ref1 = SecretReference::from(\"my_secret\", None);\n\n// Reference to a secret in a specific provider\nlet ref2 = SecretReference::from(\"my_secret\", Some(\"aws\".to_string()));\n```",
+      "properties": {
+        "Provider": {
+          "description": "Optional name of the secret provider to use.\nIf `None`, the default provider will be used.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "SecRef": {
+          "description": "The reference/identifier for the secret (e.g., file path, env var name, secret name).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "SecRef"
+      ],
+      "type": "object"
+    },
+    "SecurityChain": {
+      "description": "Chains available in Security table\n\nSerializes to YAML as `Input`, `Forward`, `Output`, or `Custom(\"name\")`.\nDisplays as `INPUT`, `FORWARD`, `OUTPUT`, or custom name for command generation via\n`std::fmt::Display`.",
+      "oneOf": [
+        {
+          "enum": [
+            "Input",
+            "Forward",
+            "Output"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Custom"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ServiceAction": {
+      "enum": [
+        "Restarted",
+        "Reloaded"
+      ],
+      "type": "string"
+    },
+    "ServiceExpectedState": {
+      "anyOf": [
+        {
+          "description": "Manage the service's running state and/or boot enablement\n\nNote: The `enabled` field is only present in this variant to respect the semantics\nthat enabled state is managed alongside running state.",
+          "properties": {
+            "Enabled": {
+              "description": "Whether the service should be enabled at boot",
+              "type": "boolean"
+            },
+            "Name": {
+              "description": "Name of the service",
+              "type": "string"
+            },
+            "State": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ServiceExpectedStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Desired running state of the service (optional - can be omitted for enabled-only config)"
+            }
+          },
+          "required": [
+            "Name",
+            "Enabled"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Manage unconditional actions (restart/reload)",
+          "properties": {
+            "Action": {
+              "$ref": "#/$defs/ServiceAction",
+              "description": "Action to perform on the service"
+            },
+            "Name": {
+              "description": "Name of the service",
+              "type": "string"
+            }
+          },
+          "required": [
+            "Name",
+            "Action"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Configuration for a system service\n\nThis enum represents the desired state for a system service, supporting configurations:\n- `State`: Manage the service's running state (started/stopped) and/or boot enablement\n- `Action`: Manage unconditional actions (restart/reload)\n\n# YAML Representation\n\n## State with enabled:\n```yaml\nName: httpd\nState: Started\nEnabled: true\n```\n\n## State only:\n```yaml\nName: nginx\nState: Started\n```\n\n## Enabled only:\n```yaml\nName: mysql\nEnabled: true\n```\n\n## Action only:\n```yaml\nName: nginx\nAction: Restarted\n```"
+    },
+    "ServiceExpectedStatus": {
+      "enum": [
+        "Started",
+        "Stopped"
+      ],
+      "type": "string"
+    },
+    "StorageExpectedState": {
+      "description": "Expected state for storage monitoring on a filesystem or mount point.\n\nWhen the storage usage breaches the configured [`Threshold`], the optional\ncleanup commands are executed one by one to free up space.",
+      "properties": {
+        "Cleanup": {
+          "description": "List of shell commands, executed sequentially, to clean up storage",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Target": {
+          "$ref": "#/$defs/StorageTarget"
+        },
+        "Threshold": {
+          "$ref": "#/$defs/Threshold"
+        }
+      },
+      "required": [
+        "Target",
+        "Threshold"
+      ],
+      "type": "object"
+    },
+    "StorageTarget": {
+      "description": "Target of the storage watch: either a filesystem path or a mount point.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A filesystem path (e.g. `/`, `/var`).",
+          "properties": {
+            "FileSystem": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "FileSystem"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A mount point path (e.g. `/mnt/data`).",
+          "properties": {
+            "MountPoint": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "MountPoint"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TcpFlag": {
+      "description": "TCP Flag matching options\n\nSerializes to YAML as `Syn`, `Ack`, `Fin`, `Rst`, `Psh`, `Urg`, `FinRst`, `All`, or `None`.\nDisplays as `SYN`, `ACK`, `FIN`, `RST`, `PSH`, `URG`, `FIN,RST`, `ALL`, or `NONE` for command\ngeneration via `std::fmt::Display`.",
+      "enum": [
+        "Syn",
+        "Ack",
+        "Fin",
+        "Rst",
+        "Psh",
+        "Urg",
+        "FinRst",
+        "All",
+        "None"
+      ],
+      "type": "string"
+    },
+    "TcpFlagsMatch": {
+      "description": "TCP flags match specification (-m tcp --tcp-flags)\n\n`mask` specifies which flags to check, and `comp` specifies which of those must be set.",
+      "properties": {
+        "Comp": {
+          "items": {
+            "$ref": "#/$defs/TcpFlag"
+          },
+          "type": "array"
+        },
+        "Mask": {
+          "items": {
+            "$ref": "#/$defs/TcpFlag"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "Mask",
+        "Comp"
+      ],
+      "type": "object"
+    },
+    "TemplateExpectedState": {
+      "additionalProperties": false,
+      "properties": {
+        "Context": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "Destination": {
+          "type": "string"
+        },
+        "Template": {
+          "$ref": "#/$defs/TemplateOrigin"
+        }
+      },
+      "required": [
+        "Template",
+        "Destination"
+      ],
+      "type": "object"
+    },
+    "TemplateOrigin": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "File": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "File"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "InLine": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "InLine"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Threshold": {
+      "description": "Threshold that triggers the storage watch when breached.\n\nValues are compared against `df --output=pcent,used,avail` results.\n`used` and `avail` are expressed in 1K blocks.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "`PercentUsed(95)` triggers when 95% or more of the storage is used",
+          "properties": {
+            "PercentUsed": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "PercentUsed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Trigger when the used space (in 1K blocks, from `df --output=used`) is greater than or equal to this value.",
+          "properties": {
+            "AbsoluteUsed": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "AbsoluteUsed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Trigger when the percentage of the remaining available space is less than or equal to this value.",
+          "properties": {
+            "PercentAvailable": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "PercentAvailable"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Trigger when the remaining available space (in 1K blocks, from `df --output=avail`) is less than or equal to this value.",
+          "properties": {
+            "AbsoluteAvailable": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "AbsoluteAvailable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ToolkitVersion": {
+      "description": "Toolkit package version: `<major>.<minor>.<patch>-<release>` (e.g. `1.20.1-1`)",
+      "type": "string"
+    },
+    "UnitRestartPolicy": {
+      "description": "`Restart=`",
+      "enum": [
+        "No",
+        "OnFailure",
+        "Always"
+      ],
+      "type": "string"
+    },
+    "UserDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "Append": {
+          "description": "Whether to append to existing supplementary groups instead of replacing them",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Comment": {
+          "description": "GECOS comment field",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "CreateHome": {
+          "description": "Whether to create home directory when creating user",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Group": {
+          "description": "Primary group name",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Groups": {
+          "description": "Supplementary groups the user should belong to",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "Home": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Password": {
+          "description": "Hashed password",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "Shell": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "System": {
+          "description": "Whether this is a system user (no login shell, no home directory by default)",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "Uid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "UserExpectedState": {
+      "additionalProperties": false,
+      "description": "Configuration for a user account\n\nThe `append` field controls whether supplementary groups are appended to existing groups\nor replaced entirely.",
+      "properties": {
+        "Name": {
+          "type": "string"
+        },
+        "State": {
+          "$ref": "#/$defs/UserExpectedStatus",
+          "description": "Desired state of the user (defaults to Present if not specified)"
+        }
+      },
+      "required": [
+        "Name",
+        "State"
+      ],
+      "type": "object"
+    },
+    "UserExpectedStatus": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Absent": {
+              "properties": {
+                "remove_home": {
+                  "description": "Whether to remove home directory when deleting user",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Absent"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Present": {
+              "properties": {
+                "Details": {
+                  "$ref": "#/$defs/UserDetails"
+                }
+              },
+              "required": [
+                "Details"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Present"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "YumDnfExpectedState": {
+      "anyOf": [
+        {
+          "const": "SystemUpToDate",
+          "description": "Perform a full system upgrade (dnf/yum update)",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Package": {
+              "type": "string"
+            },
+            "State": {
+              "$ref": "#/$defs/PackageExpectedState"
+            }
+          },
+          "required": [
+            "Package",
+            "State"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "Detail": {
+      "$ref": "#/$defs/AttributeDetail"
+    },
+    "Name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "Privilege": {
+      "$ref": "#/$defs/Privilege"
+    },
+    "Timeout": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "Privilege",
+    "Detail"
+  ],
+  "title": "Attribute",
+  "type": "object"
+}

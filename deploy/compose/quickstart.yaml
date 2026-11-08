@@ -1,0 +1,65 @@
+# regency quick start: the all-in-one image + single-node RabbitMQ and CouchDB.
+# NOT for production (single node, plain HTTP, generated secrets).
+#
+#   docker compose -f deploy/compose/quickstart.yaml up -d
+#   docker compose -f deploy/compose/quickstart.yaml logs regency | grep bootstrap-admin
+#
+# Web UI: http://localhost:8080 (user `admin`; password = REGENCY_ADMIN_PASSWORD
+# below, or the generated one printed once in the logs)
+# Proactive hosts (regops, D5): https://localhost:8443 (built-in CA in the
+# `regency` volume: /var/lib/regency/tls/ca.pem)
+name: regency-quickstart
+
+x-admin: &admin
+  RABBITMQ_ADMIN_PASSWORD: ${RABBITMQ_ADMIN_PASSWORD:-change-me-rabbitmq}
+  COUCHDB_ADMIN_PASSWORD: ${COUCHDB_ADMIN_PASSWORD:-change-me-couchdb}
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: regency
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_ADMIN_PASSWORD:-change-me-rabbitmq}
+    volumes:
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/90-regency.conf:ro
+      - rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      retries: 60
+
+  couchdb:
+    image: couchdb:3.5
+    environment:
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: ${COUCHDB_ADMIN_PASSWORD:-change-me-couchdb}
+    entrypoint: ["sh", "-c", "printf '[couchdb]\\nsingle_node=true\\n' > /opt/couchdb/etc/local.d/10-single.ini && exec tini -- /docker-entrypoint.sh /opt/couchdb/bin/couchdb"]
+    volumes:
+      - couchdb:/opt/couchdb/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5984/_up"]
+      interval: 5s
+      retries: 60
+
+  regency:
+    image: ${REGENCY_AIO_IMAGE:-ghcr.io/regent-project/regency-aio:latest}
+    environment:
+      <<: *admin
+      REGENCY_ADMIN_PASSWORD: ${REGENCY_ADMIN_PASSWORD:-}
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    volumes:
+      - regency:/var/lib/regency
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      couchdb:
+        condition: service_healthy
+
+volumes:
+  rabbitmq:
+  couchdb:
+  regency:

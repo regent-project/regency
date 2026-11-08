@@ -1,0 +1,47 @@
+# /etc/regency/regencyctl.toml — admin credentials: keep this file private.
+#   regencyctl init   (idempotent: RabbitMQ vhost/users/permissions/topology,
+#                      CouchDB databases/users/security, settings, bootstrap admin)
+rabbitmq_management_url = "https://rabbitmq.example.internal:15671"
+pools = ["default"]
+
+[security]
+internal = 3
+
+[rabbitmq]
+url = "amqps://rabbitmq.example.internal:5671"
+username = "admin"
+password = { SecRef = "/etc/regency/secrets/rabbitmq-admin" }
+ca_file = "/etc/regency/tls/ca.pem"
+cert_file = "/etc/regency/tls/regencyctl.pem"
+key = { SecRef = "/etc/regency/tls/regencyctl.key" }
+
+[couchdb]
+url = "https://couchdb.example.internal:6984"
+username = "admin"
+password = { SecRef = "/etc/regency/secrets/couchdb-admin" }
+ca_file = "/etc/regency/tls/ca.pem"
+cert_file = "/etc/regency/tls/regencyctl.pem"
+key = { SecRef = "/etc/regency/tls/regencyctl.key" }
+
+[bootstrap]
+name = "admin"
+password = { SecRef = "/etc/regency/secrets/bootstrap-admin" }
+
+[accounts.scheduler]
+rabbitmq_password = { SecRef = "/etc/regency/secrets/scheduler.rabbitmq" }
+couchdb_password = { SecRef = "/etc/regency/secrets/scheduler.couchdb" }
+[accounts.runner]
+rabbitmq_password = { SecRef = "/etc/regency/secrets/runner.rabbitmq" }
+couchdb_password = { SecRef = "/etc/regency/secrets/runner.couchdb" }
+[accounts.dbwriter]
+rabbitmq_password = { SecRef = "/etc/regency/secrets/dbwriter.rabbitmq" }
+couchdb_password = { SecRef = "/etc/regency/secrets/dbwriter.couchdb" }
+[accounts.backend]
+rabbitmq_password = { SecRef = "/etc/regency/secrets/backend.rabbitmq" }
+couchdb_password = { SecRef = "/etc/regency/secrets/backend.couchdb" }
+[accounts.endpoint]
+rabbitmq_password = { SecRef = "/etc/regency/secrets/endpoint.rabbitmq" }
+couchdb_password = { SecRef = "/etc/regency/secrets/endpoint.couchdb" }
+[accounts.sourcesync]
+rabbitmq_password = { SecRef = "/etc/regency/secrets/sourcesync.rabbitmq" }
+couchdb_password = { SecRef = "/etc/regency/secrets/sourcesync.couchdb" }

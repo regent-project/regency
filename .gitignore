@@ -1,0 +1,5 @@
+/target/
+/frontend/dist/
+/book/book/
+/dev/logs/
+/dev/secrets

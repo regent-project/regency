@@ -1,0 +1,53 @@
+[package]
+name = "frontend"
+description = "regency production frontend (Leptos, client-side rendering, gRPC-Web)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# WASM only: built by trunk (see README.md), not part of the default members.
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = "0.8"
+prost = "0.14"
+tonic = { version = "0.14", default-features = false, features = ["codegen"] }
+tonic-prost = "0.14"
+tonic-web-wasm-client = "0.9"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "1.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Storage", "Window", "Document", "Element", "HtmlMetaElement", "Location", "DomRect", "HtmlCanvasElement", "CanvasRenderingContext2d", "CssStyleDeclaration", "MouseEvent"] }
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+# Packages (D20): web client files for backend's frontend_dir. Build the files
+# first (trunk build --release), then: cargo deb -p frontend --no-build /
+# cargo generate-rpm -p frontend
+[package.metadata.deb]
+name = "regency-frontend"
+maintainer = "Romain SUZANNE <romzorus591@gmail.com>"
+copyright = "2026, Romain SUZANNE"
+license-file = ["../LICENSE", "0"]
+extended-description = "regency web client (static files), served by regency-backend (frontend_dir) or any web server."
+depends = ""
+section = "admin"
+priority = "optional"
+assets = [
+    ["dist/*", "usr/share/regency/web/", "644"],
+    ["../CHANGELOG.md", "usr/share/doc/regency-frontend/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "regency-frontend"
+summary = "regency web client (static files)"
+release = "1"
+assets = [
+    { source = "dist/*", dest = "/usr/share/regency/web/", mode = "644" },
+    { source = "../CHANGELOG.md", dest = "/usr/share/doc/regency-frontend/CHANGELOG.md", mode = "644", doc = true },
+]

@@ -1,0 +1,39 @@
+# regencyctl init (D15): idempotent setup of RabbitMQ and CouchDB, at every
+# install and upgrade. Services retry until it is done.
+{{- $full := include "regency.fullname" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $full }}-init-{{ .Release.Revision }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 30
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/name: regencyctl
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: init
+          image: "{{ .Values.image.registry }}/regency-regencyctl:{{ .Values.regencyctl.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["init"]
+          volumeMounts:
+            - { name: config, mountPath: /etc/regency/regencyctl.toml, subPath: regencyctl.toml, readOnly: true }
+            - { name: secrets, mountPath: /etc/regency/secrets, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: {{ $full }}-config }
+        - name: secrets
+          secret: { secretName: {{ include "regency.secretName" . }}, defaultMode: 0400 }

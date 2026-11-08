@@ -1,0 +1,88 @@
+[package]
+name = "backend"
+description = "regency backend: gRPC/gRPC-Web gateway for the live view and commands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "regency-backend"
+path = "src/main.rs"
+
+[dependencies]
+regencylib = { workspace = true, features = ["api"] }
+regent-sdk = { workspace = true, features = ["grpc", "schema"] }
+protobuf = { workspace = true }
+tonic = { workspace = true, features = ["server", "router", "tls-aws-lc"] }
+tonic-web = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower-layer = "0.3"
+http = "1"
+lapin = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+futures = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+yaml_serde = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+prometheus = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+anyhow = { workspace = true }
+argon2 = { workspace = true }
+regent-sdk = { workspace = true }
+regencylib = { workspace = true, features = ["testing", "api"] }
+tonic = { workspace = true, features = ["channel"] }
+lapin = { workspace = true }
+
+# Packages (D15, D20: one version, released with tag v<version>): cargo deb -p backend / cargo generate-rpm -p backend
+[package.metadata.deb]
+name = "regency-backend"
+maintainer = "Romain SUZANNE <romzorus591@gmail.com>"
+copyright = "2026, Romain SUZANNE"
+license-file = ["../LICENSE", "0"]
+extended-description = "regency backend: gRPC/gRPC-Web API, live views and web client."
+depends = "$auto, systemd, adduser"
+section = "admin"
+priority = "optional"
+maintainer-scripts = "../packaging/debian/"
+conf-files = ["/etc/regency/backend.toml"]
+assets = [
+    ["target/release/regency-backend", "usr/bin/", "755"],
+    ["../packaging/systemd/regency-backend.service", "lib/systemd/system/", "644"],
+    ["../packaging/config/backend.toml", "etc/regency/", "640"],
+    ["../CHANGELOG.md", "usr/share/doc/regency-backend/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "regency-backend"
+summary = "regency backend: gRPC/gRPC-Web API, live views and web client"
+release = "1"
+assets = [
+    { source = "target/release/regency-backend", dest = "/usr/bin/regency-backend", mode = "755" },
+    { source = "../packaging/systemd/regency-backend.service", dest = "/usr/lib/systemd/system/regency-backend.service", mode = "644" },
+    { source = "../packaging/config/backend.toml", dest = "/etc/regency/backend.toml", mode = "640", config = "noreplace" },
+    { source = "../CHANGELOG.md", dest = "/usr/share/doc/regency-backend/CHANGELOG.md", mode = "644", doc = true },
+]
+post_install_script = "../packaging/rpm/backend/postinst"
+pre_uninstall_script = "../packaging/rpm/backend/preun"
+post_uninstall_script = "../packaging/rpm/backend/postun"
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"

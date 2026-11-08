@@ -1,0 +1,10 @@
+regency {{ .Chart.Version }} installed as {{ include "regency.fullname" . }}.
+
+Web UI and API (gRPC-Web): {{ if .Values.ingress.enabled }}http{{ if .Values.ingress.tlsSecret }}s{{ end }}://{{ .Values.ingress.host }}{{ else }}kubectl port-forward svc/{{ include "regency.fullname" . }}-backend 8080 → http://localhost:8080{{ end }}
+Login: admin, password:
+  kubectl get secret {{ include "regency.secretName" . }} -n {{ .Release.Namespace }} -o jsonpath='{.data.bootstrap-admin}' | base64 -d
+
+Proactive hosts (regops) report to the endpoint service {{ include "regency.fullname" . }}-endpoint:{{ .Values.services.endpoint.service.port }}
+(built-in CA: secret {{ include "regency.fullname" . }}-endpoint-tls, key ca.pem).
+
+Security levels: internal {{ .Values.security.internal }}, external {{ .Values.security.external }} (values.security).

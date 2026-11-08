@@ -1,0 +1,171 @@
+{{- if .Values.rabbitmq.enabled }}
+{{- $full := include "regency.fullname" . }}
+{{- $name := printf "%s-rabbitmq" $full }}
+{{- $headless := printf "%s-rabbitmq-headless" $full }}
+# Bundled RabbitMQ cluster (D15): quorum queues and streams need >= 3 nodes;
+# nodes find each other through the Kubernetes API (peer discovery k8s).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [endpoints]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+data:
+  enabled_plugins: |
+    [rabbitmq_management,rabbitmq_stream,rabbitmq_stream_management,rabbitmq_peer_discovery_k8s].
+  rabbitmq.conf: |
+    cluster_formation.peer_discovery_backend = k8s
+    cluster_formation.k8s.host = kubernetes.default.svc.cluster.local
+    cluster_formation.k8s.address_type = hostname
+    cluster_formation.k8s.service_name = {{ $headless }}
+    cluster_formation.k8s.hostname_suffix = .{{ $headless }}.{{ .Release.Namespace }}.svc.cluster.local
+    cluster_formation.node_cleanup.only_log_warning = true
+    # D3: a minority partition stops serving
+    cluster_partition_handling = pause_minority
+    queue_leader_locator = balanced
+    loopback_users.guest = false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $headless }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/name: rabbitmq
+  ports:
+    - { name: epmd, port: 4369 }
+    - { name: cluster, port: 25672 }
+    - { name: amqp, port: 5672 }
+    - { name: stream, port: 5552 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/name: rabbitmq
+  ports:
+    - { name: amqp, port: 5672 }
+    - { name: stream, port: 5552 }
+    - { name: management, port: 15672 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ $headless }}
+  replicas: {{ .Values.rabbitmq.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: rabbitmq
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/name: rabbitmq
+    spec:
+      serviceAccountName: {{ $name }}
+      terminationGracePeriodSeconds: 120
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/instance: {{ .Release.Name }}
+                    app.kubernetes.io/name: rabbitmq
+      containers:
+        - name: rabbitmq
+          image: {{ .Values.rabbitmq.image }}
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            # long node names: streams advertise this resolvable FQDN
+            - { name: RABBITMQ_USE_LONGNAME, value: "true" }
+            - name: RABBITMQ_NODENAME
+              value: rabbit@$(POD_NAME).{{ $headless }}.{{ .Release.Namespace }}.svc.cluster.local
+            - { name: RABBITMQ_DEFAULT_USER, value: admin }
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom: { secretKeyRef: { name: {{ include "regency.secretName" . }}, key: rabbitmq-admin } }
+            - name: RABBITMQ_ERLANG_COOKIE
+              valueFrom: { secretKeyRef: { name: {{ include "regency.secretName" . }}, key: erlang-cookie } }
+          ports:
+            - { name: amqp, containerPort: 5672 }
+            - { name: stream, containerPort: 5552 }
+            - { name: management, containerPort: 15672 }
+            - { name: epmd, containerPort: 4369 }
+            - { name: cluster, containerPort: 25672 }
+          readinessProbe:
+            exec: { command: [rabbitmq-diagnostics, -q, check_port_connectivity] }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            exec: { command: [rabbitmq-diagnostics, -q, status] }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 20
+          resources: {{- toYaml .Values.rabbitmq.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/rabbitmq }
+            - { name: config, mountPath: /etc/rabbitmq/enabled_plugins, subPath: enabled_plugins }
+            - { name: config, mountPath: /etc/rabbitmq/conf.d/90-regency.conf, subPath: rabbitmq.conf }
+      volumes:
+        - name: config
+          configMap: { name: {{ $name }} }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.rabbitmq.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.rabbitmq.storage }}
+{{- end }}

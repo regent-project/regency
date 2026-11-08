@@ -1,0 +1,78 @@
+[package]
+name = "endpoint"
+description = "regency's gRPC gateway for proactive hosts (regops)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "regency-endpoint"
+path = "src/main.rs"
+
+[dependencies]
+regencylib = { workspace = true }
+regent-sdk = { workspace = true, features = ["grpc"] }
+protobuf = { workspace = true }
+tonic = { workspace = true, features = ["server", "router", "tls-aws-lc"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rcgen = { workspace = true }
+x509-parser = { workspace = true }
+sha2 = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+time = "0.3"
+rand = { workspace = true }
+lapin = { workspace = true }
+prometheus = { workspace = true }
+
+[dev-dependencies]
+regencylib = { workspace = true, features = ["testing"] }
+tonic = { workspace = true, features = ["channel", "tls-aws-lc"] }
+reqwest = { workspace = true }
+
+# Packages (D15, D20: one version, released with tag v<version>): cargo deb -p endpoint / cargo generate-rpm -p endpoint
+[package.metadata.deb]
+name = "regency-endpoint"
+maintainer = "Romain SUZANNE <romzorus591@gmail.com>"
+copyright = "2026, Romain SUZANNE"
+license-file = ["../LICENSE", "0"]
+extended-description = "regency endpoint: gRPC gateway of proactive hosts (regops)."
+depends = "$auto, systemd, adduser"
+section = "admin"
+priority = "optional"
+maintainer-scripts = "../packaging/debian/"
+conf-files = ["/etc/regency/endpoint.toml"]
+assets = [
+    ["target/release/regency-endpoint", "usr/bin/", "755"],
+    ["../packaging/systemd/regency-endpoint.service", "lib/systemd/system/", "644"],
+    ["../packaging/config/endpoint.toml", "etc/regency/", "640"],
+    ["../CHANGELOG.md", "usr/share/doc/regency-endpoint/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "regency-endpoint"
+summary = "regency endpoint: gRPC gateway of proactive hosts (regops)"
+release = "1"
+assets = [
+    { source = "target/release/regency-endpoint", dest = "/usr/bin/regency-endpoint", mode = "755" },
+    { source = "../packaging/systemd/regency-endpoint.service", dest = "/usr/lib/systemd/system/regency-endpoint.service", mode = "644" },
+    { source = "../packaging/config/endpoint.toml", dest = "/etc/regency/endpoint.toml", mode = "640", config = "noreplace" },
+    { source = "../CHANGELOG.md", dest = "/usr/share/doc/regency-endpoint/CHANGELOG.md", mode = "644", doc = true },
+]
+post_install_script = "../packaging/rpm/endpoint/postinst"
+pre_uninstall_script = "../packaging/rpm/endpoint/preun"
+post_uninstall_script = "../packaging/rpm/endpoint/postun"
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"

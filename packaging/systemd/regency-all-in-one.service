@@ -1,0 +1,33 @@
+[Unit]
+Description=regency all-in-one (every regency service on this host; not HA)
+Documentation=https://github.com/regent-project/regency
+After=network-online.target rabbitmq-server.service couchdb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=regency
+Group=regency
+# RabbitMQ and CouchDB addresses and admin credentials
+EnvironmentFile=/etc/regency/all-in-one.env
+# regency-aio starts every service, restarts crashed ones (and the planned
+# exits of D21) and stops them all on SIGTERM
+ExecStart=/usr/bin/regency-aio --config /etc/regency/aio.toml
+KillMode=mixed
+TimeoutStopSec=60
+Restart=always
+RestartSec=5
+StateDirectory=regency
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/regency
+ConfigurationDirectory=regency
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

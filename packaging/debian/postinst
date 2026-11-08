@@ -1,0 +1,29 @@
+#!/bin/sh
+# Shared by every regency package: the unit is named after the package.
+set -e
+unit="${DPKG_MAINTSCRIPT_PACKAGE}.service"
+case "$1" in
+    configure)
+        getent group regency >/dev/null || addgroup --system regency
+        getent passwd regency >/dev/null || adduser --system --ingroup regency \
+            --home /var/lib/regency --no-create-home --shell /usr/sbin/nologin regency
+        # the services run as regency: their configuration (640) must be readable
+        if [ "$DPKG_MAINTSCRIPT_PACKAGE" = regency-all-in-one ]; then
+            chgrp regency /etc/regency/*.toml /etc/regency/all-in-one.env
+            todo="edit /etc/regency/all-in-one.env (RabbitMQ and CouchDB)"
+        else
+            conf="/etc/regency/${DPKG_MAINTSCRIPT_PACKAGE#regency-}.toml"
+            if [ -f "$conf" ]; then chgrp regency "$conf"; fi
+            todo="edit $conf"
+        fi
+        if [ -f "/lib/systemd/system/$unit" ]; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            if [ -n "$2" ]; then
+                # upgrade: restart if running
+                systemctl try-restart "$unit" >/dev/null 2>&1 || true
+            else
+                echo "${DPKG_MAINTSCRIPT_PACKAGE}: $todo, then: systemctl enable --now $unit"
+            fi
+        fi
+        ;;
+esac

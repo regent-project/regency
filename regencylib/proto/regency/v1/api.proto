@@ -1,0 +1,493 @@
+// backend gRPC API (D17), served as gRPC and gRPC-Web (D14). Used by the
+// frontend, regencyctl and external API clients.
+//
+// Authentication: `authorization: Bearer <token>` metadata on every call but
+// Login, where <token> is a session token (from Login), an API token of a
+// service account (`rgt_…`), or an OIDC token of a configured provider (D12).
+//
+// Commands answer "accepted" once published; their effects show up in the
+// live view (D10). Every command carries a client-chosen `command_id`, reused
+// on retry.
+//
+// Complex SDK structures (expected states, host definitions, outcomes) are
+// carried as JSON text in their serde form (`*_json` fields).
+//
+// Wire-compatibility rules: never reuse or renumber a field.
+
+syntax = "proto3";
+
+package regency.v1;
+
+service Regency {
+  // --- authentication
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+
+  // --- live view: snapshot, then updates (server streaming)
+  rpc WatchHosts(WatchHostsRequest) returns (stream HostEvent);
+  rpc WatchJobs(WatchJobsRequest) returns (stream JobEvent);
+
+  // --- reads
+  rpc ListOutcomes(ListOutcomesRequest) returns (ListOutcomesResponse);
+  rpc GetOutcome(GetOutcomeRequest) returns (GetOutcomeResponse);
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+  rpc ListCatalog(ListCatalogRequest) returns (ListCatalogResponse);
+  rpc GetEffectiveState(GetEffectiveStateRequest) returns (GetEffectiveStateResponse);
+  // Attribute builder (D23 one-shot): the JSON Schema of an attribute, and
+  // conversions between the YAML and JSON forms (checked with the SDK).
+  rpc GetAttributeSchema(GetAttributeSchemaRequest) returns (GetAttributeSchemaResponse);
+  rpc ConvertAttributes(ConvertAttributesRequest) returns (ConvertAttributesResponse);
+  rpc GetSettings(GetSettingsRequest) returns (GetSettingsResponse);
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+
+  // --- commands
+  rpc RunNow(RunNowRequest) returns (Accepted);
+  rpc AbortJob(AbortJobRequest) returns (Accepted);
+  rpc UpsertOrder(UpsertOrderRequest) returns (Accepted);
+  rpc DeleteOrder(DeleteOrderRequest) returns (Accepted);
+  rpc SetSettings(SetSettingsRequest) returns (Accepted);
+  rpc DeleteHost(DeleteHostRequest) returns (Accepted);
+  rpc ApproveCertificate(ApproveCertificateRequest) returns (Accepted);
+  rpc UpsertCatalogItem(UpsertCatalogItemRequest) returns (Accepted);
+  rpc DeleteCatalogItem(DeleteCatalogItemRequest) returns (Accepted);
+  rpc RefreshSource(RefreshSourceRequest) returns (Accepted);
+  rpc UpsertUser(UpsertUserRequest) returns (Accepted);
+  rpc DeleteUser(DeleteUserRequest) returns (Accepted);
+  rpc CreateApiToken(CreateApiTokenRequest) returns (CreateApiTokenResponse);
+  rpc UpsertPolicy(UpsertPolicyRequest) returns (Accepted);
+  rpc DeletePolicy(DeletePolicyRequest) returns (Accepted);
+
+  // --- service configuration and instances (D21)
+  rpc ListInstances(ListInstancesRequest) returns (ListInstancesResponse);
+  rpc GetServiceConfig(GetServiceConfigRequest) returns (GetServiceConfigResponse);
+  rpc SetServiceConfig(SetServiceConfigRequest) returns (Accepted);
+
+  // --- built-in CA (D13): not a command, backend signs the token itself
+  rpc IssueEnrollmentToken(IssueEnrollmentTokenRequest) returns (IssueEnrollmentTokenResponse);
+}
+
+// ------------------------------------------------------------ common
+
+message Accepted {
+  string command_id = 1;
+}
+
+// D16 host selector: union of ids, inventories (`source/name`) and hosts
+// carrying all the labels.
+message HostSelector {
+  repeated string hosts = 1;
+  repeated string inventories = 2;
+  map<string, string> labels = 3;
+}
+
+enum JobKind {
+  JOB_KIND_UNSPECIFIED = 0;
+  JOB_KIND_ASSESS = 1;
+  JOB_KIND_REACH = 2;
+}
+
+// ------------------------------------------------------------ auth
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string token = 1;
+  int64 expires_at = 2;  // Unix seconds
+}
+
+message WhoAmIRequest {}
+
+message WhoAmIResponse {
+  string principal = 1;  // e.g. User::"alice"
+  repeated string groups = 2;
+  bool bootstrap_admin = 3;
+}
+
+// ------------------------------------------------------------ live view
+
+message HostSummary {
+  string host_id = 1;
+  string compliance = 2;  // compliant, not_compliant, reach_success, reach_failed, aborted, error, unknown
+  int64 state_at = 3;     // Unix ms of the outcome, 0 if none
+  int64 first_seen = 4;
+  int64 last_seen = 5;
+  string error = 6;
+  string items_json = 7;  // remediations / actions (JSON array)
+  string last_assess_job = 8;
+  string last_reach_job = 9;
+  repeated string pending_fingerprints = 10;
+  string pinned_fingerprint = 11;
+  map<string, string> labels = 12;
+  repeated string inventories = 13;
+  bool conflicting = 14;  // defined differently by several sources (D11)
+  // D23: assignments layered into the host's effective expected state,
+  // lowest priority first (`source/name`); empty = unassigned.
+  repeated string assignments = 15;
+  // Revision of the current effective state; empty if none can be composed.
+  string effective_revision = 16;
+  // Revision the current `compliance` was checked against; empty = unknown.
+  // Differs from `effective_revision`: the state is outdated.
+  string state_revision = 17;
+  // Why the assignments cannot be composed (e.g. a conflict), if so.
+  string assignment_error = 18;
+}
+
+message WatchHostsRequest {
+  HostSelector selector = 1;  // empty = every host the caller may read
+}
+
+message HostEvent {
+  oneof event {
+    HostSummary upsert = 1;
+    string removed = 2;  // host id
+    bool snapshot_done = 3;
+  }
+}
+
+message JobSummary {
+  string job_id = 1;
+  string host_id = 2;
+  JobKind job = 3;
+  string origin = 4;
+  string state = 5;  // PENDING … FAILED (D7)
+  int64 created_at = 6;
+  int64 updated_at = 7;
+  string compliance = 8;
+  string error = 9;
+  string outcome_month = 10;
+  string states_json = 11;  // {"STARTED": "2026-…", …}
+}
+
+message WatchJobsRequest {
+  oneof filter {
+    string job_id = 1;
+    string origin = 2;  // command id or order id
+    HostSelector hosts = 3;
+  }
+  // only jobs created in the last `since_hours` (default 24)
+  uint32 since_hours = 4;
+}
+
+message JobEvent {
+  oneof event {
+    JobSummary upsert = 1;
+    bool snapshot_done = 2;
+  }
+}
+
+// ------------------------------------------------------------ reads
+
+message ListOutcomesRequest {
+  oneof filter {
+    string host_id = 1;
+    string origin = 2;
+  }
+  uint32 page_size = 3;
+  string page_token = 4;
+}
+
+message OutcomeSummary {
+  string job_id = 1;
+  string host_id = 2;
+  JobKind job = 3;
+  string origin = 4;
+  int64 started_at = 5;
+  int64 finished_at = 6;
+  string compliance = 7;
+  string error = 8;
+  string month = 9;
+  bool one_shot = 10;         // D23: history only, never the host's state
+  string state_revision = 11; // effective state revision checked (D23)
+}
+
+message ListOutcomesResponse {
+  repeated OutcomeSummary outcomes = 1;
+  string next_page_token = 2;
+}
+
+message GetOutcomeRequest {
+  string job_id = 1;
+  string month = 2;  // YYYYMM, from the job; empty = search retained months
+}
+
+message GetOutcomeResponse {
+  OutcomeSummary summary = 1;
+  string result_json = 2;  // RegentTaskResult (serde JSON of the writer's SDK)
+  bytes result_proto = 3;  // original regent.v1.RegentTaskResult bytes (D6)
+  string publisher = 4;
+}
+
+message ListOrdersRequest {}
+
+message Order {
+  string order_id = 1;
+  oneof schedule {
+    uint64 every_seconds = 2;
+    CronSchedule cron = 3;
+  }
+  reserved 4, 5;  // former selector, expected_state (D23)
+  string assignment = 11;     // source/name (D23)
+  JobKind job = 6;
+  string pool = 7;            // empty = from host definitions (D16)
+  bool enabled = 8;
+  string author = 9;          // set by backend
+  string rev = 10;            // CouchDB revision (read only)
+}
+
+message CronSchedule {
+  string expression = 1;
+  string timezone = 2;  // IANA, default UTC
+}
+
+message ListOrdersResponse {
+  repeated Order orders = 1;
+}
+
+message ListCatalogRequest {
+  string source_id = 1;  // empty = all
+  string type = 2;       // source, inventory, hostdef, expected_state, assignment; empty = all
+}
+
+message CatalogEntry {
+  string doc_id = 1;
+  string item_json = 2;  // CatalogItem (D11)
+}
+
+message ListCatalogResponse {
+  repeated CatalogEntry items = 1;
+}
+
+// D23: a host's effective expected state, composed from its assignments.
+message GetEffectiveStateRequest {
+  string host_id = 1;
+}
+
+message AssignmentLayer {
+  string assignment = 1;      // source/name
+  int32 priority = 2;
+  string expected_state = 3;  // source/name
+}
+
+// JSON Schema of one regent-sdk Attribute (regent_sdk::schema::attribute()).
+message GetAttributeSchemaRequest {}
+message GetAttributeSchemaResponse {
+  string schema_json = 1;
+  string sdk_version = 2;
+}
+
+// One attribute, a list of attributes or an expected state, as YAML (the
+// SDK's, with tags) or JSON (a list of attributes, serde's form).
+message ConvertAttributesRequest {
+  oneof input {
+    string yaml = 1;
+    string json = 2;
+  }
+}
+message ConvertAttributesResponse {
+  string yaml = 1;   // list of attributes, SDK YAML
+  string json = 2;   // list of attributes, JSON
+  // Why the input is not a valid attribute list (then yaml/json are empty),
+  // or why it would be refused (inline credentials, D9; yaml/json are set).
+  string error = 3;
+}
+
+message GetEffectiveStateResponse {
+  repeated AssignmentLayer layers = 1;  // lowest priority first; empty = unassigned
+  string state_json = 2;                // ExpectedState (SDK JSON); empty if none
+  string revision = 3;
+  repeated string origins = 4;          // assignment of each attribute
+  string error = 5;                     // why the layers cannot be composed
+}
+
+message GetSettingsRequest {}
+
+message GetSettingsResponse {
+  string settings_json = 1;  // {"retention_months": 3, …}
+}
+
+message ListPoliciesRequest {}
+
+message Policy {
+  string policy_id = 1;
+  string text = 2;
+  string description = 3;
+  bool builtin = 4;
+}
+
+message ListPoliciesResponse {
+  repeated Policy policies = 1;
+}
+
+message ListUsersRequest {}
+
+message User {
+  string name = 1;
+  bool service_account = 2;
+  repeated string groups = 3;
+  bool disabled = 4;
+  bool bootstrap = 5;
+  repeated string token_ids = 6;
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+}
+
+// ------------------------------------------------------------ commands
+
+message RunNowRequest {
+  string command_id = 1;
+  HostSelector selector = 2;
+  reserved 3;  // former expected_state: hosts run their effective state (D23)
+  JobKind job = 4;
+  string pool = 5;            // optional override (D16)
+  // D23 one-shot: hand-written attributes (YAML: one attribute, a list of
+  // attributes, or an expected state) run as is on the selected hosts;
+  // history only. Empty = each host runs its effective expected state.
+  string one_shot_yaml = 6;
+}
+
+message AbortJobRequest {
+  string command_id = 1;
+  string job_id = 2;
+}
+
+message UpsertOrderRequest {
+  string command_id = 1;
+  Order order = 2;
+}
+
+message DeleteOrderRequest {
+  string command_id = 1;
+  string order_id = 2;
+}
+
+message SetSettingsRequest {
+  string command_id = 1;
+  string key = 2;
+  string value_json = 3;
+}
+
+message DeleteHostRequest {
+  string command_id = 1;
+  string host_id = 2;
+}
+
+message ApproveCertificateRequest {
+  string command_id = 1;
+  string host_id = 2;
+  string fingerprint = 3;
+}
+
+message UpsertCatalogItemRequest {
+  string command_id = 1;
+  string item_json = 2;  // CatalogItem of an API/frontend source (D11)
+}
+
+message DeleteCatalogItemRequest {
+  string command_id = 1;
+  string doc_id = 2;
+  string source_id = 3;
+}
+
+message RefreshSourceRequest {
+  string command_id = 1;
+  string source_id = 2;
+}
+
+message UpsertUserRequest {
+  string command_id = 1;
+  string name = 2;
+  bool service_account = 3;
+  // New password (hashed by backend before publishing, D12); empty = keep.
+  string password = 4;
+  repeated string groups = 5;
+  bool disabled = 6;
+}
+
+message DeleteUserRequest {
+  string command_id = 1;
+  string name = 2;
+}
+
+message CreateApiTokenRequest {
+  string command_id = 1;
+  string account = 2;
+}
+
+message CreateApiTokenResponse {
+  string token = 1;  // shown once
+  string token_id = 2;
+}
+
+message UpsertPolicyRequest {
+  string command_id = 1;
+  string policy_id = 2;
+  string text = 3;
+  string description = 4;
+}
+
+message DeletePolicyRequest {
+  string command_id = 1;
+  string policy_id = 2;
+}
+
+message IssueEnrollmentTokenRequest {
+  string host_id = 1;
+  uint32 ttl_sec = 2;  // default 3600
+}
+
+message IssueEnrollmentTokenResponse {
+  string token = 1;
+  int64 expires_at = 2;
+}
+
+// ------------------------------------------------------------ D21
+
+message ListInstancesRequest {}
+
+message Instance {
+  string service = 1;
+  string instance = 2;
+  string version = 3;
+  string sdk_version = 4;
+  string pool = 5;
+  int64 started_at = 6;      // Unix ms
+  int64 last_seen = 7;       // Unix ms
+  bool ready = 8;
+  bool gone = 9;             // unseen for 2 minutes
+  uint32 security_internal = 10;
+  uint32 security_external = 11;
+  string config_error = 12;
+  bool restart_pending = 13;
+  // full status: effective config, origin of each key, readiness checks,
+  // applied central revisions
+  string status_json = 14;
+}
+
+message ListInstancesResponse {
+  repeated Instance instances = 1;
+}
+
+message GetServiceConfigRequest {
+  string service = 1;
+  string pool = 2;           // runners only; empty = all pools
+}
+
+message GetServiceConfigResponse {
+  string settings_json = 1;  // {} when no central document
+  string revision = 2;
+  string updated_by = 3;
+  int64 updated_at = 4;      // Unix ms, 0 when unknown
+}
+
+message SetServiceConfigRequest {
+  string command_id = 1;
+  string service = 2;
+  string pool = 3;
+  string settings_json = 4;  // replaces the document; {} removes it
+}

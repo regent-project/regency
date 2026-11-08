@@ -1,0 +1,47 @@
+# C:\ProgramData\regency\regencyctl.toml — admin credentials: keep this file private.
+#   regencyctl init   (idempotent: RabbitMQ vhost/users/permissions/topology,
+#                      CouchDB databases/users/security, settings, bootstrap admin)
+rabbitmq_management_url = "https://rabbitmq.example.internal:15671"
+pools = ["default"]
+
+[security]
+internal = 3
+
+[rabbitmq]
+url = "amqps://rabbitmq.example.internal:5671"
+username = "admin"
+password = { SecRef = 'C:\ProgramData\regency\secrets\rabbitmq-admin' }
+ca_file = 'C:\ProgramData\regency\tls\ca.pem'
+cert_file = 'C:\ProgramData\regency\tls\regencyctl.pem'
+key = { SecRef = 'C:\ProgramData\regency\tls\regencyctl.key' }
+
+[couchdb]
+url = "https://couchdb.example.internal:6984"
+username = "admin"
+password = { SecRef = 'C:\ProgramData\regency\secrets\couchdb-admin' }
+ca_file = 'C:\ProgramData\regency\tls\ca.pem'
+cert_file = 'C:\ProgramData\regency\tls\regencyctl.pem'
+key = { SecRef = 'C:\ProgramData\regency\tls\regencyctl.key' }
+
+[bootstrap]
+name = "admin"
+password = { SecRef = 'C:\ProgramData\regency\secrets\bootstrap-admin' }
+
+[accounts.scheduler]
+rabbitmq_password = { SecRef = 'C:\ProgramData\regency\secrets\scheduler.rabbitmq' }
+couchdb_password = { SecRef = 'C:\ProgramData\regency\secrets\scheduler.couchdb' }
+[accounts.runner]
+rabbitmq_password = { SecRef = 'C:\ProgramData\regency\secrets\runner.rabbitmq' }
+couchdb_password = { SecRef = 'C:\ProgramData\regency\secrets\runner.couchdb' }
+[accounts.dbwriter]
+rabbitmq_password = { SecRef = 'C:\ProgramData\regency\secrets\dbwriter.rabbitmq' }
+couchdb_password = { SecRef = 'C:\ProgramData\regency\secrets\dbwriter.couchdb' }
+[accounts.backend]
+rabbitmq_password = { SecRef = 'C:\ProgramData\regency\secrets\backend.rabbitmq' }
+couchdb_password = { SecRef = 'C:\ProgramData\regency\secrets\backend.couchdb' }
+[accounts.endpoint]
+rabbitmq_password = { SecRef = 'C:\ProgramData\regency\secrets\endpoint.rabbitmq' }
+couchdb_password = { SecRef = 'C:\ProgramData\regency\secrets\endpoint.couchdb' }
+[accounts.sourcesync]
+rabbitmq_password = { SecRef = 'C:\ProgramData\regency\secrets\sourcesync.rabbitmq' }
+couchdb_password = { SecRef = 'C:\ProgramData\regency\secrets\sourcesync.couchdb' }

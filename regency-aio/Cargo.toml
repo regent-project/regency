@@ -1,0 +1,114 @@
+[package]
+name = "regency-aio"
+description = "Supervisor of regency's all-in-one image (not for production)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "regency-aio"
+path = "src/main.rs"
+
+[dependencies]
+regencylib = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true }
+time = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Package regency-all-in-one (D15, D20): every regency binary, the web client
+# and their configuration on one host, under one systemd unit running this
+# supervisor. RabbitMQ and CouchDB are external (/etc/regency/all-in-one.env).
+# Build the binaries and the web client first:
+#   cargo build --release && (cd frontend && trunk build --release)
+#   cargo deb --no-build -p regency-aio / cargo generate-rpm -p regency-aio
+[package.metadata.deb]
+name = "regency-all-in-one"
+maintainer = "Romain SUZANNE <romzorus591@gmail.com>"
+copyright = "2026, Romain SUZANNE"
+license-file = ["../LICENSE", "0"]
+extended-description = """\
+Every regency service (scheduler, runner, dbwriter, backend, endpoint, \
+sourcesync), regencyctl and the web client on one host, supervised by one \
+systemd unit. Not highly available. RabbitMQ and CouchDB are not included: \
+set their addresses and admin credentials in /etc/regency/all-in-one.env."""
+depends = "$auto, systemd, adduser"
+conflicts = "regency-scheduler, regency-runner, regency-dbwriter, regency-backend, regency-endpoint, regency-sourcesync, regencyctl, regency-frontend"
+section = "admin"
+priority = "optional"
+maintainer-scripts = "../packaging/debian/"
+conf-files = [
+    "/etc/regency/all-in-one.env",
+    "/etc/regency/aio.toml",
+    "/etc/regency/scheduler.toml",
+    "/etc/regency/runner.toml",
+    "/etc/regency/dbwriter.toml",
+    "/etc/regency/backend.toml",
+    "/etc/regency/endpoint.toml",
+    "/etc/regency/sourcesync.toml",
+    "/etc/regency/regencyctl.toml",
+]
+assets = [
+    ["target/release/regency-aio", "usr/bin/", "755"],
+    ["target/release/regency-scheduler", "usr/bin/", "755"],
+    ["target/release/regency-runner", "usr/bin/", "755"],
+    ["target/release/regency-dbwriter", "usr/bin/", "755"],
+    ["target/release/regency-backend", "usr/bin/", "755"],
+    ["target/release/regency-endpoint", "usr/bin/", "755"],
+    ["target/release/regency-sourcesync", "usr/bin/", "755"],
+    ["target/release/regencyctl", "usr/bin/", "755"],
+    ["../frontend/dist/*", "usr/share/regency/web/", "644"],
+    ["../packaging/systemd/regency-all-in-one.service", "lib/systemd/system/", "644"],
+    ["../packaging/all-in-one/all-in-one.env", "etc/regency/", "640"],
+    ["../deploy/docker/aio/aio.toml", "etc/regency/", "640"],
+    ["../deploy/docker/aio/regency/*.toml", "etc/regency/", "640"],
+    ["../CHANGELOG.md", "usr/share/doc/regency-all-in-one/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "regency-all-in-one"
+summary = "regency all-in-one: every regency service on one host (not HA)"
+release = "1"
+assets = [
+    { source = "target/release/regency-aio", dest = "/usr/bin/regency-aio", mode = "755" },
+    { source = "target/release/regency-scheduler", dest = "/usr/bin/regency-scheduler", mode = "755" },
+    { source = "target/release/regency-runner", dest = "/usr/bin/regency-runner", mode = "755" },
+    { source = "target/release/regency-dbwriter", dest = "/usr/bin/regency-dbwriter", mode = "755" },
+    { source = "target/release/regency-backend", dest = "/usr/bin/regency-backend", mode = "755" },
+    { source = "target/release/regency-endpoint", dest = "/usr/bin/regency-endpoint", mode = "755" },
+    { source = "target/release/regency-sourcesync", dest = "/usr/bin/regency-sourcesync", mode = "755" },
+    { source = "target/release/regencyctl", dest = "/usr/bin/regencyctl", mode = "755" },
+    { source = "../frontend/dist/*", dest = "/usr/share/regency/web/", mode = "644" },
+    { source = "../packaging/systemd/regency-all-in-one.service", dest = "/usr/lib/systemd/system/regency-all-in-one.service", mode = "644" },
+    { source = "../packaging/all-in-one/all-in-one.env", dest = "/etc/regency/all-in-one.env", mode = "640", config = "noreplace" },
+    { source = "../deploy/docker/aio/aio.toml", dest = "/etc/regency/aio.toml", mode = "640", config = "noreplace" },
+    { source = "../deploy/docker/aio/regency/*.toml", dest = "/etc/regency/", mode = "640", config = "noreplace" },
+    { source = "../CHANGELOG.md", dest = "/usr/share/doc/regency-all-in-one/CHANGELOG.md", mode = "644", doc = true },
+]
+post_install_script = "../packaging/rpm/all-in-one/postinst"
+pre_uninstall_script = "../packaging/rpm/all-in-one/preun"
+post_uninstall_script = "../packaging/rpm/all-in-one/postun"
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"
+
+[package.metadata.generate-rpm.conflicts]
+regency-scheduler = "*"
+regency-runner = "*"
+regency-dbwriter = "*"
+regency-backend = "*"
+regency-endpoint = "*"
+regency-sourcesync = "*"
+regencyctl = "*"
+regency-frontend = "*"

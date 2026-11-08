@@ -1,0 +1,59 @@
+[package]
+name = "regencylib"
+description = "Types and building blocks shared by regency's services"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[features]
+# backend gRPC API stubs (D17), for backend and its clients (regencyctl).
+api = ["regent-sdk/grpc", "dep:tonic", "dep:tonic-build"]
+# test infrastructure in containers (D18)
+testing = ["dep:testcontainers"]
+
+[dependencies]
+regent-sdk = { workspace = true }
+protobuf = { workspace = true }
+tonic = { workspace = true, optional = true, features = ["codegen"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+cron = { workspace = true }
+xxhash-rust = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+lapin = { workspace = true }
+rabbitmq-stream-client = { workspace = true }
+reqwest = { workspace = true }
+axum = { workspace = true }
+prometheus = { workspace = true }
+cedar-policy = { workspace = true }
+jsonwebtoken = { workspace = true }
+argon2 = { workspace = true }
+url = { workspace = true }
+testcontainers = { workspace = true, optional = true }
+
+[build-dependencies]
+protobuf-codegen = { workspace = true }
+tonic-build = { workspace = true, optional = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+regencylib = { path = ".", features = ["testing"] }
+reqwest = { workspace = true }
+yaml_serde = { workspace = true }
+
+# D22: run as a Windows service (Service Control Manager)
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"

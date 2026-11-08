@@ -1,0 +1,30 @@
+# runner in the all-in-one image and package. Levels: raise them with
+# REGENCY_SECURITY_INTERNAL / REGENCY_SECURITY_EXTERNAL (D19).
+instance = "aio-runner"
+
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://rabbitmq:5672"
+stream_host = "rabbitmq"
+username = "regency-runner"
+password = { SecRef = "/var/lib/regency/secrets/runner.rabbitmq" }
+
+[couchdb]
+url = "http://couchdb:5984"
+username = "regency-runner"
+password = { SecRef = "/var/lib/regency/secrets/runner.couchdb" }
+
+[health]
+listen = "127.0.0.1:9093"
+
+[log]
+format = "json"
+
+[central]
+restart_jitter_sec = 0
+
+[runner]
+pool = "default"

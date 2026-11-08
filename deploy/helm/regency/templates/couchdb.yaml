@@ -1,0 +1,122 @@
+{{- if .Values.couchdb.enabled }}
+{{- $full := include "regency.fullname" . }}
+{{- $name := printf "%s-couchdb" $full }}
+{{- $headless := printf "%s-couchdb-headless" $full }}
+# Bundled CouchDB cluster (D15): nodes join through the seedlist; n = 3
+# copies of every shard.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+data:
+  90-regency.ini: |
+    [cluster]
+    n = {{ min 3 .Values.couchdb.replicas }}
+    seedlist = {{ range $i, $e := until (int .Values.couchdb.replicas) }}{{ if $i }},{{ end }}couchdb@{{ $name }}-{{ $i }}.{{ $headless }}.{{ $.Release.Namespace }}.svc.cluster.local{{ end }}
+
+    [chttpd]
+    bind_address = any
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $headless }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/name: couchdb
+  ports:
+    - { name: http, port: 5984 }
+    - { name: epmd, port: 4369 }
+    - { name: dist, port: 9100 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/name: couchdb
+  ports:
+    - { name: http, port: 5984 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ $headless }}
+  replicas: {{ .Values.couchdb.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: couchdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/name: couchdb
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/instance: {{ .Release.Name }}
+                    app.kubernetes.io/name: couchdb
+      containers:
+        - name: couchdb
+          image: {{ .Values.couchdb.image }}
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: NODENAME
+              value: $(POD_NAME).{{ $headless }}.{{ .Release.Namespace }}.svc.cluster.local
+            - { name: COUCHDB_USER, value: admin }
+            - name: COUCHDB_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "regency.secretName" . }}, key: couchdb-admin } }
+            - name: COUCHDB_SECRET
+              valueFrom: { secretKeyRef: { name: {{ include "regency.secretName" . }}, key: couchdb-cookie } }
+            - name: COUCHDB_ERLANG_COOKIE
+              valueFrom: { secretKeyRef: { name: {{ include "regency.secretName" . }}, key: erlang-cookie } }
+            - { name: ERL_FLAGS, value: "-kernel inet_dist_listen_min 9100 -kernel inet_dist_listen_max 9100" }
+          ports:
+            - { name: http, containerPort: 5984 }
+            - { name: epmd, containerPort: 4369 }
+            - { name: dist, containerPort: 9100 }
+          readinessProbe:
+            httpGet: { path: /_up, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 30
+          resources: {{- toYaml .Values.couchdb.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /opt/couchdb/data }
+            - { name: config, mountPath: /opt/couchdb/etc/local.d/90-regency.ini, subPath: 90-regency.ini }
+      volumes:
+        - name: config
+          configMap: { name: {{ $name }} }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.couchdb.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.couchdb.storage }}
+{{- end }}

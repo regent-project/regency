@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+getent group regency >/dev/null || groupadd --system regency
+getent passwd regency >/dev/null || useradd --system --gid regency --home-dir /var/lib/regency --shell /sbin/nologin regency
+# the service runs as regency: its configuration (640) must be readable
+chgrp regency /etc/regency/runner.toml
+systemctl daemon-reload >/dev/null 2>&1 || true
+if [ "$1" -gt 1 ]; then
+    systemctl try-restart regency-runner.service >/dev/null 2>&1 || true
+else
+    echo "regency-runner: edit /etc/regency/runner.toml, then: systemctl enable --now regency-runner"
+fi

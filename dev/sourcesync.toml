@@ -1,0 +1,29 @@
+# sourcesync against dev/compose.yaml, with its own least-privilege accounts:
+#   cargo run -p sourcesync -- --config dev/sourcesync.toml      (from regency/)
+instance = "dev-sourcesync"
+
+# D19: the dev stack is plain (no TLS) with credentials
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://localhost:5672"
+username = "regency-sourcesync"
+password = { SecRef = "dev/secrets/sourcesync.rabbitmq" }
+
+[couchdb]
+url = "http://localhost:5984"
+username = "regency-sourcesync"
+password = { SecRef = "dev/secrets/sourcesync.couchdb" }
+
+[health]
+listen = "127.0.0.1:9096"
+
+[log]
+format = "text"
+
+[sourcesync]
+workdir = "/tmp/regency-sourcesync"
+shards = 4
+lock_retry_sec = 1

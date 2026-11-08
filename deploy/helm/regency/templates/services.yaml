@@ -1,0 +1,133 @@
+{{- $root := . }}
+{{- $full := include "regency.fullname" . }}
+{{- range $svc := list "scheduler" "runner" "dbwriter" "backend" "endpoint" "sourcesync" }}
+{{- $v := index $root.Values.services $svc }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-{{ $svc }}
+  labels:
+    {{- include "regency.labels" $root | nindent 4 }}
+    app.kubernetes.io/name: regency-{{ $svc }}
+    app.kubernetes.io/version: {{ $v.tag | quote }}
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/name: regency-{{ $svc }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ $root.Release.Name }}
+        app.kubernetes.io/name: regency-{{ $svc }}
+      annotations:
+        checksum/config: {{ include (print $root.Template.BasePath "/configmap.yaml") $root | sha256sum }}
+    spec:
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/instance: {{ $root.Release.Name }}
+                    app.kubernetes.io/name: regency-{{ $svc }}
+      # D21: a service exits (status 3) to apply a new central configuration;
+      # Kubernetes restarts the container
+      terminationGracePeriodSeconds: {{ if eq $svc "runner" }}90{{ else }}30{{ end }}
+      containers:
+        - name: {{ $svc }}
+          image: "{{ $root.Values.image.registry }}/regency-{{ $svc }}:{{ $v.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          env:
+            # instance name = pod name (logs, status, consumer tags)
+            - name: REGENCY_INSTANCE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- range $key, $value := $v.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          ports:
+            - { name: health, containerPort: 9090 }
+            {{- if eq $svc "backend" }}
+            - { name: http, containerPort: 8080 }
+            {{- end }}
+            {{- if eq $svc "endpoint" }}
+            - { name: grpc, containerPort: 8443 }
+            {{- end }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            periodSeconds: 5
+          resources: {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/regency/{{ $svc }}.toml, subPath: {{ $svc }}.toml, readOnly: true }
+            - { name: secrets, mountPath: /etc/regency/secrets, readOnly: true }
+            - { name: state, mountPath: /var/lib/regency }
+            - { name: tmp, mountPath: /tmp }
+            {{- if eq $svc "endpoint" }}
+            - { name: tls, mountPath: /etc/regency/tls, readOnly: true }
+            {{- end }}
+            {{- if and (eq $svc "runner") $v.hostSecrets }}
+            - { name: host-secrets, mountPath: /etc/regency/host-secrets, readOnly: true }
+            {{- end }}
+      volumes:
+        - name: config
+          configMap: { name: {{ $full }}-config }
+        - name: secrets
+          secret: { secretName: {{ include "regency.secretName" $root }}, defaultMode: 0400 }
+        - name: state
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        {{- if eq $svc "endpoint" }}
+        - name: tls
+          projected:
+            defaultMode: 0400
+            sources:
+              {{- if or $v.tlsSecret $v.caSecret }}
+              {{- with $v.tlsSecret }}
+              - secret: { name: {{ . }}, items: [{ key: tls.crt, path: endpoint.pem }, { key: tls.key, path: endpoint.key }] }
+              {{- end }}
+              {{- with $v.caSecret }}
+              - secret: { name: {{ . }}, items: [{ key: tls.crt, path: ca.pem }, { key: tls.key, path: ca.key }] }
+              {{- end }}
+              {{- else }}
+              - secret: { name: {{ $full }}-endpoint-tls }
+              {{- end }}
+        {{- end }}
+        {{- if and (eq $svc "runner") $v.hostSecrets }}
+        - name: host-secrets
+          secret: { secretName: {{ $v.hostSecrets }}, defaultMode: 0400 }
+        {{- end }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $full }}-{{ $svc }}
+  labels: {{- include "regency.labels" $root | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/name: regency-{{ $svc }}
+{{- end }}

@@ -1,0 +1,32 @@
+name: setup
+description: Rust toolchain, protoc 36.1 (D6) and the cargo cache
+inputs:
+  targets:
+    description: extra rustup targets
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ inputs.targets }}
+        components: rustfmt, clippy
+    - name: protoc 36.1
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=36.1
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64) asset=linux-x86_64 ;;
+          Linux-ARM64) asset=linux-aarch_64 ;;
+          Windows-X64) asset=win64 ;;
+          macOS-ARM64) asset=osx-aarch_64 ;;
+          *) echo "unsupported runner ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+        esac
+        curl -fsSL -o "${RUNNER_TEMP}/protoc.zip" \
+          "https://github.com/protocolbuffers/protobuf/releases/download/v${version}/protoc-${version}-${asset}.zip"
+        mkdir -p "${RUNNER_TEMP}/protoc"
+        unzip -q -o "${RUNNER_TEMP}/protoc.zip" -d "${RUNNER_TEMP}/protoc"
+        echo "${RUNNER_TEMP}/protoc/bin" >> "${GITHUB_PATH}"
+    - uses: Swatinem/rust-cache@v2

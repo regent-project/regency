@@ -1,0 +1,67 @@
+[package]
+name = "scheduler"
+description = "regency scheduler: turns orders and run commands into RegentTasks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "regency-scheduler"
+path = "src/main.rs"
+
+[dependencies]
+regencylib = { workspace = true }
+regent-sdk = { workspace = true }
+lapin = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+prometheus = { workspace = true }
+
+[dev-dependencies]
+regencylib = { workspace = true, features = ["testing"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
+
+# Packages (D15, D20: one version, released with tag v<version>): cargo deb -p scheduler / cargo generate-rpm -p scheduler
+[package.metadata.deb]
+name = "regency-scheduler"
+maintainer = "Romain SUZANNE <romzorus591@gmail.com>"
+copyright = "2026, Romain SUZANNE"
+license-file = ["../LICENSE", "0"]
+extended-description = "regency scheduler: fires recurring orders and expands run commands into tasks."
+depends = "$auto, systemd, adduser"
+section = "admin"
+priority = "optional"
+maintainer-scripts = "../packaging/debian/"
+conf-files = ["/etc/regency/scheduler.toml"]
+assets = [
+    ["target/release/regency-scheduler", "usr/bin/", "755"],
+    ["../packaging/systemd/regency-scheduler.service", "lib/systemd/system/", "644"],
+    ["../packaging/config/scheduler.toml", "etc/regency/", "640"],
+    ["../CHANGELOG.md", "usr/share/doc/regency-scheduler/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "regency-scheduler"
+summary = "regency scheduler: fires recurring orders and expands run commands into tasks"
+release = "1"
+assets = [
+    { source = "target/release/regency-scheduler", dest = "/usr/bin/regency-scheduler", mode = "755" },
+    { source = "../packaging/systemd/regency-scheduler.service", dest = "/usr/lib/systemd/system/regency-scheduler.service", mode = "644" },
+    { source = "../packaging/config/scheduler.toml", dest = "/etc/regency/scheduler.toml", mode = "640", config = "noreplace" },
+    { source = "../CHANGELOG.md", dest = "/usr/share/doc/regency-scheduler/CHANGELOG.md", mode = "644", doc = true },
+]
+post_install_script = "../packaging/rpm/scheduler/postinst"
+pre_uninstall_script = "../packaging/rpm/scheduler/preun"
+post_uninstall_script = "../packaging/rpm/scheduler/postun"
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"

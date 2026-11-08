@@ -1,0 +1,43 @@
+# C:\ProgramData\regency\dbwriter.toml (Windows service regency-dbwriter) — every key can also be set by an environment
+# variable REGENCY_<SECTION>_<KEY> (D15) or, except local-only keys, by the
+# central configuration edited in the web UI (D21). Secrets are always secret
+# references: { SecRef = "/path/to/file" } (files) or
+# { SecRef = "VAR", Provider = "env" }.
+#
+# Security levels (D19, both default to 3 = hardened): the service refuses to
+# start, listing what is missing, when this file is weaker than its levels.
+# See https://github.com/regent-project/regency (book: Security levels).
+
+[security]
+internal = 3
+external = 3
+
+[rabbitmq]
+url = "amqps://rabbitmq.example.internal:5671"
+stream_host = "rabbitmq.example.internal"
+stream_port = 5551
+username = "regency-dbwriter"
+password = { SecRef = 'C:\ProgramData\regency\secrets\dbwriter.rabbitmq' }
+ca_file = 'C:\ProgramData\regency\tls\ca.pem'
+cert_file = 'C:\ProgramData\regency\tls\dbwriter.pem'
+key = { SecRef = 'C:\ProgramData\regency\tls\dbwriter.key' }
+
+[couchdb]
+url = "https://couchdb.example.internal:6984"
+username = "regency-dbwriter"
+password = { SecRef = 'C:\ProgramData\regency\secrets\dbwriter.couchdb' }
+ca_file = 'C:\ProgramData\regency\tls\ca.pem'
+cert_file = 'C:\ProgramData\regency\tls\dbwriter.pem'
+key = { SecRef = 'C:\ProgramData\regency\tls\dbwriter.key' }
+
+[health]
+# /healthz, /readyz, /metrics: never authenticated, keep it private
+listen = "127.0.0.1:9091"
+
+[log]
+format = "json"
+# a Windows service has no console
+file = 'C:\ProgramData\regency\logs\dbwriter.log'
+
+[dbwriter]
+# prefetch = 32

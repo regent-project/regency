@@ -1,0 +1,55 @@
+[package]
+name = "regencyctl"
+description = "regency admin CLI: the swiss-army knife of regency's distributed architecture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "regencyctl"
+path = "src/main.rs"
+
+[dependencies]
+regencylib = { workspace = true }
+regent-sdk = { workspace = true }
+lapin = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+regex = "1"
+regencylib = { workspace = true, features = ["testing"] }
+
+# Packages (D15, D20: one version, released with tag v<version>): cargo deb -p regencyctl / cargo generate-rpm -p regencyctl
+[package.metadata.deb]
+name = "regencyctl"
+maintainer = "Romain SUZANNE <romzorus591@gmail.com>"
+copyright = "2026, Romain SUZANNE"
+license-file = ["../LICENSE", "0"]
+extended-description = "Admin CLI of regency: init (broker and database setup) and more."
+depends = "$auto"
+section = "admin"
+priority = "optional"
+conf-files = ["/etc/regency/regencyctl.toml"]
+assets = [
+    ["target/release/regencyctl", "usr/bin/", "755"],
+    ["../packaging/config/regencyctl.toml", "etc/regency/", "600"],
+    ["../CHANGELOG.md", "usr/share/doc/regencyctl/", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Admin CLI of regency"
+release = "1"
+assets = [
+    { source = "target/release/regencyctl", dest = "/usr/bin/regencyctl", mode = "755" },
+    { source = "../packaging/config/regencyctl.toml", dest = "/etc/regency/regencyctl.toml", mode = "600", config = "noreplace" },
+    { source = "../CHANGELOG.md", dest = "/usr/share/doc/regencyctl/CHANGELOG.md", mode = "644", doc = true },
+]

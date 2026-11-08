@@ -1,0 +1,34 @@
+// Regency envelope around an outcome (D2, D6), published on the
+// `regency.outcomes` exchange by runners and the endpoint.
+//
+// Wire-compatibility rules: never reuse or renumber a field; mark removed
+// fields `reserved`.
+
+syntax = "proto3";
+
+package regency.v1;
+
+message OutcomeEnvelope {
+  // Envelope layout version (currently 1).
+  uint32 schema_version = 1;
+  // Job creation time, Unix milliseconds (D8): set once by the job's creator
+  // and copied by every event of the job; picks the monthly databases.
+  int64 created_at_ms = 2;
+  // What created the job (D10): command id, order id, or "regops".
+  string origin = 3;
+  // regent-sdk's `regent.v1.RegentTaskResult`, as serialized by its producer.
+  // Declared as bytes (same wire format as an embedded message) so that the
+  // producer's bytes are forwarded unchanged, unknown fields included (D6).
+  bytes result = 4;
+  // regent-sdk's `regent.v1.ReporterInfo` for proactive hosts (empty for
+  // runners), forwarded unchanged.
+  bytes reporter = 5;
+  // Which component published it: "runner/<instance>", "endpoint/<instance>".
+  string publisher = 6;
+  // Revision of the host's effective expected state the job checked (D23);
+  // empty when unknown (e.g. regops pulling its state from Git).
+  string state_revision = 7;
+  // A one-shot raw attribute (D23): kept in history, never sets the host's
+  // state.
+  bool one_shot = 8;
+}

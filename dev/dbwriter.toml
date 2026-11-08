@@ -1,0 +1,24 @@
+# dbwriter against dev/compose.yaml, with its own least-privilege accounts:
+#   cargo run -p dbwriter -- --config dev/dbwriter.toml      (from regency/)
+instance = "dev-dbwriter"
+
+# D19: the dev stack is plain (no TLS) with credentials
+[security]
+internal = 1
+external = 1
+
+[rabbitmq]
+url = "amqp://localhost:5672"
+username = "regency-dbwriter"
+password = { SecRef = "dev/secrets/dbwriter.rabbitmq" }
+
+[couchdb]
+url = "http://localhost:5984"
+username = "regency-dbwriter"
+password = { SecRef = "dev/secrets/dbwriter.couchdb" }
+
+[health]
+listen = "127.0.0.1:9092"
+
+[log]
+format = "text"

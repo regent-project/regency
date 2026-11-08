@@ -1,0 +1,61 @@
+{{- $full := include "regency.fullname" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-backend
+  labels: {{- include "regency.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.services.backend.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/name: regency-backend
+  ports:
+    - { name: http, port: {{ .Values.services.backend.service.port }}, targetPort: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-endpoint
+  labels: {{- include "regency.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.services.endpoint.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/name: regency-endpoint
+  ports:
+    # mTLS end to end (D13): no TLS-terminating proxy in front of the endpoint
+    - { name: grpc, port: {{ .Values.services.endpoint.service.port }}, targetPort: grpc }
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}
+  labels: {{- include "regency.labels" . | nindent 4 }}
+  annotations:
+    # live views are long-lived gRPC-Web streams
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tlsSecret }}
+  tls:
+    - hosts: [{{ $.Values.ingress.host | quote }}]
+      secretName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-backend
+                port: { name: http }
+{{- end }}

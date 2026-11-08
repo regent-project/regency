@@ -1,0 +1,66 @@
+[package]
+name = "runner"
+description = "regency runner: executes RegentTasks against passive hosts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "regency-runner"
+path = "src/main.rs"
+
+[dependencies]
+regencylib = { workspace = true }
+regent-sdk = { workspace = true }
+lapin = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+prometheus = { workspace = true }
+
+[dev-dependencies]
+regencylib = { workspace = true, features = ["testing"] }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+
+# Packages (D15, D20: one version, released with tag v<version>): cargo deb -p runner / cargo generate-rpm -p runner
+[package.metadata.deb]
+name = "regency-runner"
+maintainer = "Romain SUZANNE <romzorus591@gmail.com>"
+copyright = "2026, Romain SUZANNE"
+license-file = ["../LICENSE", "0"]
+extended-description = "regency runner: runs assessment/remediation tasks against passive hosts."
+depends = "$auto, systemd, adduser"
+section = "admin"
+priority = "optional"
+maintainer-scripts = "../packaging/debian/"
+conf-files = ["/etc/regency/runner.toml"]
+assets = [
+    ["target/release/regency-runner", "usr/bin/", "755"],
+    ["../packaging/systemd/regency-runner.service", "lib/systemd/system/", "644"],
+    ["../packaging/config/runner.toml", "etc/regency/", "640"],
+    ["../CHANGELOG.md", "usr/share/doc/regency-runner/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "regency-runner"
+summary = "regency runner: runs assessment/remediation tasks against passive hosts"
+release = "1"
+assets = [
+    { source = "target/release/regency-runner", dest = "/usr/bin/regency-runner", mode = "755" },
+    { source = "../packaging/systemd/regency-runner.service", dest = "/usr/lib/systemd/system/regency-runner.service", mode = "644" },
+    { source = "../packaging/config/runner.toml", dest = "/etc/regency/runner.toml", mode = "640", config = "noreplace" },
+    { source = "../CHANGELOG.md", dest = "/usr/share/doc/regency-runner/CHANGELOG.md", mode = "644", doc = true },
+]
+post_install_script = "../packaging/rpm/runner/postinst"
+pre_uninstall_script = "../packaging/rpm/runner/preun"
+post_uninstall_script = "../packaging/rpm/runner/postun"
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"

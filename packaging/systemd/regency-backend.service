@@ -1,0 +1,29 @@
+[Unit]
+Description=regency backend (gRPC/gRPC-Web API and web client)
+Documentation=https://github.com/regent-project/regency
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=regency
+Group=regency
+ExecStart=/usr/bin/regency-backend --config /etc/regency/backend.toml
+# D21: a service exits to apply a new central configuration (status 3) and
+# must be started again; status 2 = configuration refused, do not loop
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=2
+StateDirectory=regency/backend
+WorkingDirectory=/var/lib/regency/backend
+ConfigurationDirectory=regency
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
