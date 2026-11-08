@@ -1,0 +1,41 @@
+# The book (book/, mdBook) on GitHub Pages: https://regent-project.github.io/regency/
+# Every push to main that touches it. Repository settings: Pages → Source =
+# GitHub Actions. ci.yml still checks that the book builds on pull requests.
+name: book
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "book/**"
+      - "RELEASING.md"
+      - "dev/README.md"
+      - ".github/workflows/book.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.4.52"
+      - run: mdbook build book
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: book/book
+      - id: deployment
+        uses: actions/deploy-pages@v4
