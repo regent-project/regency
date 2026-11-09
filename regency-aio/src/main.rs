@@ -98,6 +98,12 @@ struct ProcessConfig {
     /// Run to success (retried), then start the following processes.
     #[serde(default)]
     oneshot: bool,
+    /// Variables of the supervisor's environment not passed to the process:
+    /// those `[prepare] from_env` consumes (secrets; and a `REGENCY_*` name
+    /// would read as a configuration override, e.g. `REGENCY_ADMIN_PASSWORD`
+    /// as an unknown `[admin]` section).
+    #[serde(skip)]
+    env_remove: Vec<String>,
 }
 
 fn default_grace() -> u64 {
@@ -170,7 +176,11 @@ fn spawn(process: &ProcessConfig, out: &Arc<Mutex<tokio::io::Stdout>>) -> std::i
         .iter()
         .map(|(k, v)| (k.clone(), prepare::expand(v)))
         .collect();
-    let mut child = Command::new(&process.command)
+    let mut command = Command::new(&process.command);
+    for name in &process.env_remove {
+        command.env_remove(name);
+    }
+    let mut child = command
         .args(&args)
         .envs(env)
         .stdin(Stdio::null())
@@ -312,7 +322,9 @@ async fn main() {
     }
     let grace = Duration::from_secs(config.grace_sec);
     let mut running = Vec::new();
-    for process in config.process {
+    let consumed: Vec<String> = config.prepare.from_env.values().cloned().collect();
+    for mut process in config.process {
+        process.env_remove = consumed.clone();
         if stop.is_cancelled() {
             break;
         }
@@ -340,6 +352,30 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Variables consumed by `[prepare] from_env` never reach the children.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn consumed_variables_are_not_inherited() {
+        // HOME: inherited from the test environment (no set_var needed); unlike
+        // PATH, shells do not give it a default value
+        assert!(std::env::var_os("HOME").is_some());
+        let out = Arc::new(Mutex::new(tokio::io::stdout()));
+        let mut process = ProcessConfig {
+            name: "check".into(),
+            command: "/bin/sh".into(),
+            // not `${..}`: the supervisor expands that in args
+            args: vec!["-c".into(), r#"test -z "$HOME""#.into()],
+            env: BTreeMap::new(),
+            oneshot: true,
+            env_remove: vec![],
+        };
+        let inherited = spawn(&process, &out).unwrap().wait().await.unwrap();
+        assert!(!inherited.success(), "HOME should be inherited by default");
+        process.env_remove = vec!["HOME".into()];
+        let removed = spawn(&process, &out).unwrap().wait().await.unwrap();
+        assert!(removed.success(), "HOME should not be inherited");
+    }
 
     #[test]
     fn json_passes_text_is_wrapped() {

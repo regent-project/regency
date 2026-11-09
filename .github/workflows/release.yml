@@ -6,7 +6,8 @@
 #   - one .deb and one .rpm per component (amd64): regency-scheduler,
 #     regency-runner, regency-dbwriter, regency-backend, regency-endpoint,
 #     regency-sourcesync, regencyctl, regency-frontend;
-#   - regency-all-in-one (.deb and .rpm): everything on one host.
+#   - regency-all-in-one (.deb and .rpm): everything on one host;
+#   - install.sh (the one-line installer of the all-in-one) and SHA256SUMS.
 # OCI images and the Helm chart are not released yet.
 name: release
 
@@ -65,6 +66,10 @@ jobs:
           # exactly one deb and one rpm per component
           test "$(ls dist/*.deb | wc -l)" = 9
           test "$(ls dist/*.rpm | wc -l)" = 9
+          # the one-line installer (releases/latest/download/install.sh) and
+          # the checksums it verifies
+          cp install.sh dist/
+          (cd dist && sha256sum *.deb *.rpm install.sh > SHA256SUMS)
 
       - uses: softprops/action-gh-release@v2
         with:

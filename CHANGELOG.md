@@ -7,6 +7,58 @@ change." for a component that did not change); it becomes the GitHub release
 notes. Changes waiting for the next release go under `# Unreleased` (see
 RELEASING.md).
 
+# Release v0.3.0
+
+A one-line installer turns a Linux machine into a complete regency, RabbitMQ
+and CouchDB included; and a fix for the all-in-one's initial admin password.
+
+## scheduler
+
+No change.
+
+## runner
+
+No change.
+
+## dbwriter
+
+No change.
+
+## backend
+
+No change.
+
+## endpoint
+
+No change.
+
+## sourcesync
+
+No change.
+
+## regencyctl
+
+No change.
+
+## frontend
+
+No change.
+
+## all-in-one
+
+- One-line installer for Linux: `curl -fsSL
+  https://github.com/regent-project/regency/releases/latest/download/install.sh | sh`
+  installs RabbitMQ and CouchDB (from their projects' repositories, localhost
+  only), the `regency-all-in-one` package of the release, fills
+  `/etc/regency/all-in-one.env` and starts regency. Debian 13+, Ubuntu
+  24.04+, RHEL 10 and compatibles, Fedora 40+ (best effort). Releases now
+  also publish `install.sh` and `SHA256SUMS` (checked by the installer).
+- Fix: `REGENCY_ADMIN_PASSWORD` (initial password of `admin`) stopped every
+  service from starting (it reads as a configuration override of an unknown
+  `[admin]` section); regency-aio no longer passes the variables it consumes
+  to the services. Also affected the Docker quick start, which sets it
+  (empty) by default.
+
 # Release v0.2.0
 
 Web client improvements: a chart of jobs in progress, a steadier map, and outcome
