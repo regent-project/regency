@@ -7,6 +7,48 @@ change." for a component that did not change); it becomes the GitHub release
 notes. Changes waiting for the next release go under `# Unreleased` (see
 RELEASING.md).
 
+# Release v0.3.2
+
+Fix of the Windows build: v0.3.1 did not compile on Windows after all (a
+type error in the Windows service entry point, code compiled on Windows
+only). Linux packages are unchanged.
+
+## scheduler
+
+- Windows: builds again (Windows service entry point, see all-in-one).
+
+## runner
+
+- Windows: builds again (Windows service entry point).
+
+## dbwriter
+
+- Windows: builds again (Windows service entry point).
+
+## backend
+
+- Windows: builds again (Windows service entry point).
+
+## endpoint
+
+- Windows: builds again (Windows service entry point).
+
+## sourcesync
+
+- Windows: builds again (Windows service entry point).
+
+## regencyctl
+
+- Windows: builds again (Windows service entry point).
+
+## frontend
+
+No change.
+
+## all-in-one
+
+No change.
+
 # Release v0.3.1
 
 Fixes of the one-line installer, and regent-sdk 0.23.1, whose SSHOQ client

@@ -95,7 +95,8 @@ mod windows {
         let Some(main) = MAIN.lock().expect("main").take() else {
             return;
         };
-        let handle = std::sync::Arc::new(Mutex::new(None));
+        let handle: std::sync::Arc<Mutex<Option<service_control_handler::ServiceStatusHandle>>> =
+            std::sync::Arc::new(Mutex::new(None));
         let for_handler = handle.clone();
         let registered = service_control_handler::register(&name, move |control| match control {
             ServiceControl::Stop | ServiceControl::Shutdown => {
