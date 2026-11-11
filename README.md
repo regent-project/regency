@@ -29,7 +29,7 @@ password, or a release, with options:
 
 ```bash
 curl -fsSL https://github.com/regent-project/regency/releases/latest/download/install.sh \
-  | sh -s -- --admin-password 'choose-a-password' --version 0.3.0
+  | sh -s -- --admin-password 'choose-a-password' --version 0.3.1
 ```
 
 Running it again is safe (it upgrades regency). This is a single-node setup

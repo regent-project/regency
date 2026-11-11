@@ -149,23 +149,29 @@ detect_system() {
 Use the Docker quick start instead: https://github.com/$REPO/blob/main/deploy/compose/quickstart.yaml"
     [ -r /etc/os-release ] || die "cannot identify the distribution (/etc/os-release)."
 
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    OS_ID="${ID:-}"; OS_LIKE="${ID_LIKE:-}"; OS_VERSION="${VERSION_ID:-0}"
+    # Read os-release in a subshell: sourcing it here would overwrite the
+    # script's own variables (it defines VERSION, NAME, ...).
+    os_field() { # <name>: value of one os-release field, empty if absent
+        # shellcheck disable=SC1091
+        (. /etc/os-release; eval "printf '%s' \"\${$1:-}\"")
+    }
+    OS_ID="$(os_field ID)"; OS_LIKE="$(os_field ID_LIKE)"
+    OS_VERSION_ID="$(os_field VERSION_ID)"; OS_VERSION="${OS_VERSION_ID:-0}"
     OS_MAJOR="${OS_VERSION%%.*}"
-    OS_CODENAME="${VERSION_CODENAME:-}"
+    OS_CODENAME="$(os_field VERSION_CODENAME)"
+    OS_PRETTY_NAME="$(os_field PRETTY_NAME)"
 
     case " $OS_ID $OS_LIKE " in
         *" ubuntu "*)
             FAMILY=deb; DISTRO=ubuntu
-            [ "$OS_ID" = ubuntu ] || OS_CODENAME="${UBUNTU_CODENAME:-$OS_CODENAME}"
+            [ "$OS_ID" = ubuntu ] || OS_CODENAME="$(os_field UBUNTU_CODENAME)"; OS_CODENAME="${OS_CODENAME:-$(os_field VERSION_CODENAME)}"
             if [ "$OS_ID" = ubuntu ] && [ "$OS_MAJOR" -lt 24 ]; then
                 die "Ubuntu 24.04 or newer is required (regency needs glibc 2.39)."
             fi ;;
         *" debian "*)
             FAMILY=deb; DISTRO=debian
             # testing/unstable have no VERSION_ID
-            if [ "$OS_ID" = debian ] && [ -n "${VERSION_ID:-}" ] && [ "$OS_MAJOR" -lt 13 ]; then
+            if [ "$OS_ID" = debian ] && [ -n "$OS_VERSION_ID" ] && [ "$OS_MAJOR" -lt 13 ]; then
                 die "Debian 13 or newer is required (regency needs glibc 2.39)."
             fi ;;
         *" fedora "*)
@@ -191,7 +197,11 @@ setup_privileges() {
         have sudo || die "run this script as root, or install sudo."
         SUDO=sudo
         say "Root privileges are needed: you may be asked for your password (sudo)."
-        sudo -v || die "sudo failed."
+        # Not `sudo -v`: it asks for a password unless *every* sudoers rule of
+        # the user is NOPASSWD, so it prompts on cloud images (ubuntu user:
+        # NOPASSWD:ALL plus the password rule of group sudo) and fails
+        # without a terminal, while running a command would not need one.
+        sudo true || die "sudo failed."
     fi
 }
 
@@ -628,7 +638,7 @@ main() {
         [ "$status" = 0 ] || printf "%sInstallation failed (above). Fix the cause and run the script again: it resumes.%s\n" "$RED" "$RESET" >&2' EXIT
     trap 'exit 130' INT TERM
 
-    say "Installing regency all-in-one on ${PRETTY_NAME:-$OS_ID}"
+    say "Installing regency all-in-one on ${OS_PRETTY_NAME:-$OS_ID}"
     install_prerequisites
     # first: its env file keeps the credentials created below
     install_regency

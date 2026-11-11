@@ -17,8 +17,8 @@ The [one-line installer](../getting-started/quick-start.md#on-a-linux-machine-on
 does all of this, RabbitMQ and CouchDB included. By hand:
 
 ```bash
-sudo apt install ./regency-all-in-one_0.3.0-1_amd64.deb    # or:
-sudo dnf install ./regency-all-in-one-0.3.0-1.x86_64.rpm
+sudo apt install ./regency-all-in-one_0.3.1-1_amd64.deb    # or:
+sudo dnf install ./regency-all-in-one-0.3.1-1.x86_64.rpm
 ```
 
 It installs every binary, the web client and a ready configuration, run by
@@ -45,8 +45,8 @@ security level 1; the configuration of each service is in
 ## One package per service
 
 ```bash
-sudo apt install ./regency-backend_0.3.0-1_amd64.deb ./regency-frontend_0.3.0-1_all.deb
-sudo dnf install ./regency-runner-0.3.0-1.x86_64.rpm
+sudo apt install ./regency-backend_0.3.1-1_amd64.deb ./regency-frontend_0.3.1-1_all.deb
+sudo dnf install ./regency-runner-0.3.1-1.x86_64.rpm
 ```
 
 A package installs:

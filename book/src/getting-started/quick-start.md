@@ -39,7 +39,7 @@ Options go after `sh -s --`:
 
 ```bash
 curl -fsSL https://github.com/regent-project/regency/releases/latest/download/install.sh \
-  | sh -s -- --version 0.3.0 --admin-password 'choose-a-password'
+  | sh -s -- --version 0.3.1 --admin-password 'choose-a-password'
 ```
 
 | Option | Environment variable | Meaning |

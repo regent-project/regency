@@ -7,6 +7,58 @@ change." for a component that did not change); it becomes the GitHub release
 notes. Changes waiting for the next release go under `# Unreleased` (see
 RELEASING.md).
 
+# Release v0.3.1
+
+Fixes of the one-line installer, and regent-sdk 0.23.1, whose SSHOQ client
+(now the `sshoq` crate, 0.1.3) builds on Windows: the Windows builds of every
+service and of `regencyctl` compile again.
+
+## scheduler
+
+- Built on regent-sdk 0.23.1 (same API and task format as 0.23.0; during a
+  rolling upgrade, runners refuse tasks of the other SDK version and record
+  why: upgrade scheduler and runners together).
+
+## runner
+
+- Built on regent-sdk 0.23.1 (see scheduler); SSHOQ connections now go
+  through the `sshoq` crate 0.1.3.
+
+## dbwriter
+
+No change.
+
+## backend
+
+- Built on regent-sdk 0.23.1 (attribute schema and conversions unchanged).
+
+## endpoint
+
+No change.
+
+## sourcesync
+
+No change.
+
+## regencyctl
+
+No change.
+
+## frontend
+
+No change.
+
+## all-in-one
+
+- Installer fix: the release to install (latest, or `--version` /
+  `REGENCY_VERSION`) was replaced by the distribution's version, because
+  reading `/etc/os-release` overwrote the installer's own variables, so the
+  v0.3.0 installer looked for a release that does not exist on Debian, Ubuntu,
+  RHEL and Fedora. It now reads `/etc/os-release` in a subshell.
+- Installer fix: on cloud images whose user has passwordless sudo (e.g. the
+  `ubuntu` user), the installer asked for a password, or failed without a
+  terminal (`curl … | sh`); it no longer runs `sudo -v`.
+
 # Release v0.3.0
 
 A one-line installer turns a Linux machine into a complete regency, RabbitMQ

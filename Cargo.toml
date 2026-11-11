@@ -27,7 +27,7 @@ default-members = [
 
 [workspace.package]
 # One version for every crate and package: a release is the tag v<version> (RELEASING.md)
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/regent-project/regency"
@@ -36,7 +36,7 @@ repository = "https://github.com/regent-project/regency"
 # Exact pin: the serde layout of SDK types is version-dependent (D2).
 # `proto`: outcomes travel as regent-sdk's protobuf messages (D6); needs protoc 36.1.
 # Members needing the gRPC Reporting service (endpoint) add `features = ["grpc"]`.
-regent-sdk = { version = "=0.23.0", features = ["proto"] }
+regent-sdk = { version = "=0.23.1", features = ["proto"] }
 regencylib = { path = "regencylib" }
 
 # Google protobuf v4 runtime, same exact version as regent-sdk's (D6).
