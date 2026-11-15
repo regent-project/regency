@@ -1,6 +1,6 @@
 //! The `regency.v1.Regency` service (D10, D12, D17).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,9 +16,9 @@ use regencylib::messages::{
 };
 use regencylib::model::{
     AccountKind, CatalogBody, CatalogItem, DB_ORDERS, DB_SETTINGS, JOBS_PREFIX, JobDoc,
-    OUTCOME_ATTACHMENT, OUTCOMES_PREFIX, Order, OutcomeDoc, PolicyDoc, SETTINGS_DOC_ID,
-    SettingsDoc, TokenHash, UserDoc, assignment_doc_id, job_doc_id, jobs_db, month_offset,
-    outcome_doc_id, outcomes_db,
+    OUTCOME_ATTACHMENT, OUTCOMES_PREFIX, Order, OutcomeDoc, PolicyDoc, RUN_LOG_ATTACHMENT,
+    SETTINGS_DOC_ID, SettingsDoc, TokenHash, UserDoc, assignment_doc_id, job_doc_id, jobs_db,
+    month_offset, outcome_doc_id, outcomes_db,
 };
 use regencylib::policy::{Authorizer, DecisionCache, Resource, TEMPLATES, job_action};
 use regencylib::proto as api;
@@ -40,6 +40,8 @@ type EventStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'sta
 
 pub struct Api {
     pub view: Arc<View>,
+    /// D24: recent live updates of running jobs.
+    pub live: Arc<crate::live::LiveHub>,
     pub auth: Arc<Authenticator>,
     pub publisher: PublisherLink,
     pub publish_wait: Duration,
@@ -259,6 +261,7 @@ impl JobFilter {
 impl Regency for Api {
     type WatchHostsStream = EventStream<api::HostEvent>;
     type WatchJobsStream = EventStream<api::JobEvent>;
+    type WatchLiveStream = EventStream<api::LiveEvent>;
 
     async fn login(
         &self,
@@ -472,18 +475,50 @@ impl Regency for Api {
                             .into_iter()
                             .filter_map(|row| row.doc.and_then(|d| serde_json::from_value(d).ok()))
                             .collect(),
-                        JobFilter::Hosts(_) => view
-                            .couch
-                            .find::<JobDoc>(
-                                &db,
-                                json!({"type": "job", "created_at": {"$gte": since}}),
-                                5000,
-                                None,
-                                None,
-                            )
-                            .await
-                            .map(|(docs, _)| docs.into_iter().map(|s| s.doc).collect())
-                            .unwrap_or_default(),
+                        JobFilter::Hosts(_) => {
+                            // jobs in progress first (by_state view): the
+                            // capped find below may miss them on a busy
+                            // fleet, and the live view (D24) needs them
+                            let mut docs: Vec<JobDoc> = Vec::new();
+                            for state in ["PENDING", "STARTED", "ABORT_REQUIRED"] {
+                                docs.extend(
+                                    view.couch
+                                        .view::<Value, Value>(
+                                            &db,
+                                            "regency",
+                                            "by_state",
+                                            &[
+                                                ("startkey", json!([state, since])),
+                                                ("endkey", json!([state, {}])),
+                                                ("include_docs", json!(true)),
+                                                ("limit", json!(5000)),
+                                            ],
+                                        )
+                                        .await
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .filter_map(|row| {
+                                            row.doc.and_then(|d| serde_json::from_value(d).ok())
+                                        }),
+                                );
+                            }
+                            docs.extend(
+                                view.couch
+                                    .find::<JobDoc>(
+                                        &db,
+                                        json!({"type": "job", "created_at": {"$gte": since}}),
+                                        5000,
+                                        None,
+                                        None,
+                                    )
+                                    .await
+                                    .map(|(docs, _)| {
+                                        docs.into_iter().map(|s| s.doc).collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default(),
+                            );
+                            docs
+                        }
                     };
                     for doc in docs {
                         if doc.created_at < since
@@ -541,6 +576,165 @@ impl Regency for Api {
         Ok(Response::new(Box::pin(
             tokio_stream::wrappers::ReceiverStream::new(rx),
         )))
+    }
+
+    async fn watch_live(
+        &self,
+        request: Request<api::WatchLiveRequest>,
+    ) -> Result<Response<Self::WatchLiveStream>, Status> {
+        use crate::live::Target;
+        use api::watch_live_request::TargetOneof;
+        let span = rpc_span("WatchLive");
+        let caller = self.caller(&request).instrument(span.clone()).await?;
+        let target = match request.get_ref().target() {
+            TargetOneof::JobId(id) if !id.is_empty() => Target::Job(id.to_string()),
+            TargetOneof::HostId(id) if !id.is_empty() => Target::Host(id.to_string()),
+            _ => return Err(Status::invalid_argument("job_id or host_id is required")),
+        };
+        let host_id = match &target {
+            Target::Host(id) => id.clone(),
+            Target::Job(id) => match self.live.host_of(id) {
+                Some(host) => host,
+                None => self
+                    .find_job(id)
+                    .instrument(span.clone())
+                    .await?
+                    .map(|job| job.host_id)
+                    .ok_or_else(|| Status::not_found("no such job"))?,
+            },
+        };
+        // D24: whoever may read a host may follow its jobs
+        span.in_scope(|| self.allow(&caller, "read", &self.host_resource(&host_id)))?;
+        let (tx, rx) = mpsc::channel::<Result<api::LiveEvent, Status>>(1024);
+        let hub = self.live.clone();
+        tokio::spawn(until_shutdown(
+            self.shutdown.clone(),
+            async move {
+                let event = |set: &dyn Fn(&mut api::LiveEvent)| {
+                    let mut event = api::LiveEvent::new();
+                    set(&mut event);
+                    event
+                };
+                // subscribe first, then the snapshot: what arrives in between
+                // is in both, and skipped below
+                let mut updates = hub.updates.subscribe();
+                let (snapshot, trimmed) = hub.snapshot(&target);
+                let mut last: HashMap<String, (u64, i64)> = HashMap::new();
+                if trimmed > 0 && tx.send(Ok(event(&|e| e.set_lost(trimmed)))).await.is_err() {
+                    return;
+                }
+                for entry in snapshot {
+                    last.insert(entry.job_id().to_string(), (entry.seq(), entry.at()));
+                    let entry = (*entry).clone();
+                    let mut message = api::LiveEvent::new();
+                    message.set_entry(entry);
+                    if tx.send(Ok(message)).await.is_err() {
+                        return;
+                    }
+                }
+                if tx
+                    .send(Ok(event(&|e| e.set_snapshot_done(true))))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                loop {
+                    let next = tokio::select! {
+                        _ = tx.closed() => return,
+                        next = updates.recv() => next,
+                    };
+                    let entry = match next {
+                        Ok(entry) => entry,
+                        Err(broadcast::error::RecvError::Lagged(missed)) => {
+                            if tx.send(Ok(event(&|e| e.set_lost(missed)))).await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    };
+                    if !target.matches(&entry) {
+                        continue;
+                    }
+                    if entry.kind() != "dropped" {
+                        let previous = last.get(&entry.job_id().to_string()).copied();
+                        if previous.is_some_and(|(seq, at)| entry.seq() <= seq && entry.at() <= at)
+                        {
+                            continue;
+                        }
+                        last.insert(entry.job_id().to_string(), (entry.seq(), entry.at()));
+                    }
+                    let mut message = api::LiveEvent::new();
+                    message.set_entry((*entry).clone());
+                    if tx.send(Ok(message)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            .instrument(span),
+        ));
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+
+    async fn get_run_log(
+        &self,
+        request: Request<api::GetRunLogRequest>,
+    ) -> Result<Response<api::GetRunLogResponse>, Status> {
+        let started = Instant::now();
+        async {
+            let caller = self.caller(&request).await?;
+            let job_id = request.get_ref().job_id().to_string();
+            require(&job_id, "job_id")?;
+            let month = request.get_ref().month().to_string();
+            let months = if month.is_empty() {
+                self.outcome_months().await?
+            } else {
+                vec![month]
+            };
+            for month in months {
+                let db = outcomes_db(&month);
+                let id = outcome_doc_id(&job_id);
+                let Some(stored) = self
+                    .view
+                    .couch
+                    .get::<OutcomeDoc>(&db, &id)
+                    .await
+                    .map_err(internal)?
+                else {
+                    continue;
+                };
+                self.allow(&caller, "read", &self.host_resource(&stored.doc.host_id))?;
+                let mut response = api::GetRunLogResponse::new();
+                let Some(summary) = &stored.doc.run_log else {
+                    return Ok(Response::new(response));
+                };
+                let Some(bytes) = self
+                    .view
+                    .couch
+                    .get_attachment(&db, &id, RUN_LOG_ATTACHMENT)
+                    .await
+                    .map_err(internal)?
+                else {
+                    return Ok(Response::new(response));
+                };
+                let log = regent_sdk::hosts::live::RunLog::from_proto_bytes(&bytes)
+                    .map_err(|e| Status::data_loss(format!("unreadable run log: {e}")))?;
+                let mut converter = crate::live::Converter::default();
+                for update in log.updates() {
+                    response.entries_mut().push(converter.entry(update));
+                }
+                response.set_found(true);
+                response.set_info(crate::live::run_log_info(summary));
+                return Ok(Response::new(response));
+            }
+            Err(Status::not_found("no such outcome within retention"))
+        }
+        .instrument(rpc_span("GetRunLog"))
+        .await
+        .pipe(|r| self.done("GetRunLog", started, r))
     }
 
     async fn list_outcomes(
@@ -1193,6 +1387,11 @@ impl Regency for Api {
             if key == "retention_months" && value.as_i64().is_none_or(|m| m < 1) {
                 return Err(Status::invalid_argument(
                     "retention_months must be an integer >= 1",
+                ));
+            }
+            if key == regencylib::model::RUN_LOG_MAX_BYTES_KEY && value.as_u64().is_none() {
+                return Err(Status::invalid_argument(
+                    "run_log_max_bytes must be an integer >= 0 (0 = no log kept)",
                 ));
             }
             self.allow(&caller, "settings.set", &Resource::Settings)?;

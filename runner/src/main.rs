@@ -126,6 +126,19 @@ async fn run(
             },
         ));
     }
+    // D24: live views (stream) and the run log limit (settings)
+    let live = config.runner.live.then(|| {
+        regencylib::live::LiveLink::spawn(
+            config.common.rabbitmq.clone(),
+            secrets.clone(),
+            drain.clone(),
+        )
+    });
+    let run_log_limit = regencylib::live::RunLogLimit::default();
+    run_log_limit.spawn_follower(
+        regencylib::couch::Couch::from_config(&config.common.couchdb, &secrets).await?,
+        drain.clone(),
+    );
     let metrics = Arc::new(Metrics {
         tasks: counter(
             &health,
@@ -185,6 +198,8 @@ async fn run(
             pool.clone(),
             metrics.clone(),
             config.common.security.external,
+            live.clone(),
+            run_log_limit.clone(),
         ));
         let session = consuming.child_token();
         let (assess_name, assess_tag) = (assess_queue(&pool), format!("{name}/assess"));

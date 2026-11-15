@@ -15,6 +15,7 @@ use regencylib::testing::{infra, unique};
 use regencylib::topology::{self, EX_LIFECYCLE, EX_OUTCOMES, EX_TASKS, TopologyConfig};
 use regent_sdk::ExpectedState;
 use regent_sdk::hosts::handlers::{ConnectionMethod, TargetUser};
+use regent_sdk::hosts::live::{LiveEvent, LiveUpdate};
 use regent_sdk::hosts::managed_host::ManagedHostBuilder;
 use regent_sdk::task::{Job, RegentTask};
 
@@ -24,6 +25,22 @@ fn task(host: &str, job: Job, key: &str, user: TargetUser) -> TaskEnvelope {
     let builder =
         ManagedHostBuilder::new(host, "localhost", Some(ConnectionMethod::Localhost(user)));
     let task = RegentTask::from(builder, ExpectedState::new(), job).with_idempotency_key(key);
+    TaskEnvelope::new(task, chrono::Utc::now(), "c-test")
+}
+
+/// A task printing a line, to watch it live (D24).
+fn live_task(host: &str, key: &str) -> TaskEnvelope {
+    let builder = ManagedHostBuilder::new(
+        host,
+        "localhost",
+        Some(ConnectionMethod::Localhost(TargetUser::current_user())),
+    );
+    let state = ExpectedState::from_raw_yaml(
+        "Attributes:\n  - Name: hello\n    Privilege: !None\n    Detail: !Command\n      Cmd: \"echo 'hello from regency'\"\n",
+    )
+    .unwrap();
+    // Reach: an assessment does not run a command, its remediation does
+    let task = RegentTask::from(builder, state, Job::Reach).with_idempotency_key(key);
     TaskEnvelope::new(task, chrono::Utc::now(), "c-test")
 }
 
@@ -101,6 +118,23 @@ reach_partitions = {PARTITIONS}
     topology::declare_control_stream(&channel, &topology_config)
         .await
         .unwrap();
+    topology::declare_live_stream(&channel, &topology_config)
+        .await
+        .unwrap();
+    // D24: follow regency.live like backend does
+    let live_batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let live_cancel = tokio_util::sync::CancellationToken::new();
+    {
+        let batches = live_batches.clone();
+        tokio::spawn(regencylib::live::follow(
+            infra.rabbitmq.clone(),
+            infra.secrets.clone(),
+            Duration::from_secs(0),
+            live_cancel.clone(),
+            |_| {},
+            move |batch| batches.lock().unwrap().push(batch.to_vec()),
+        ));
+    }
     let mut streams = Vec::new();
     for exchange in [EX_OUTCOMES, EX_LIFECYCLE] {
         let queue = unique("test.runner.");
@@ -182,6 +216,9 @@ reach_partitions = {PARTITIONS}
     let raw_key = unique("run:c:");
     let ssh_key = unique("run:c:");
     let other_sdk_key = unique("run:c:");
+    let live_key = unique("run:c:");
+    let live_host = unique("h");
+    let live_route = topology::reach_key(&pool, PARTITIONS, bucket(&live_host, PARTITIONS));
     let host = unique("h");
     let reach_route = topology::reach_key(&pool, PARTITIONS, bucket(&host, PARTITIONS));
     let assess_route = topology::assess_key(&pool);
@@ -203,6 +240,7 @@ reach_partitions = {PARTITIONS}
             &assess_route,
         ),
         (ssh_task(&ssh_key), &assess_route),
+        (live_task(&live_host, &live_key), &live_route),
     ] {
         publisher
             .publish_json(EX_TASKS, route, &envelope.to_bytes().unwrap())
@@ -229,7 +267,7 @@ reach_partitions = {PARTITIONS}
         .unwrap();
 
     let mut results = HashMap::new();
-    while results.len() < 5 {
+    while results.len() < 6 {
         let delivery = tokio::time::timeout(Duration::from_secs(30), outcomes.next())
             .await
             .expect("outcome")
@@ -268,6 +306,41 @@ reach_partitions = {PARTITIONS}
     assert!(refusal.contains("security level"), "{refusal}");
     let refusal = results[&other_sdk_key].result.error().unwrap().to_string();
     assert!(refusal.contains("regent-sdk 0.0.1"), "{refusal}");
+
+    // D24: the run's log travels with its outcome…
+    let log = regent_sdk::hosts::live::RunLog::from_proto_bytes(
+        results[&live_key].run_log_bytes.as_ref().expect("run log"),
+    )
+    .unwrap();
+    let says_hello = |update: &LiveUpdate| matches!(&update.event, LiveEvent::Output { line, .. } if line == "hello from regency");
+    assert!(log.updates().iter().any(says_hello), "{:?}", log.updates());
+    assert!(log.updates().iter().all(|u| u.run_id == live_key));
+    assert!(!log.is_truncated());
+    // …and its live view went through regency.live
+    let mut streamed = Vec::new();
+    for _ in 0..50 {
+        streamed = live_batches
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|bytes| {
+                regencylib::live::decode_batch(bytes)
+                    .unwrap()
+                    .updates()
+                    .iter()
+                    .map(|u| u.to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .filter_map(|u| LiveUpdate::from_proto(&u).ok())
+            .filter(|u| u.run_id == live_key)
+            .collect();
+        if streamed.iter().any(says_hello) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(streamed.iter().any(says_hello), "live view: {streamed:?}");
+    live_cancel.cancel();
 
     let mut states: HashMap<(String, JobState), ()> = HashMap::new();
     while !(states.contains_key(&(aborted_key.clone(), JobState::Aborted))

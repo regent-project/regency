@@ -135,7 +135,7 @@ pub async fn sleep_ms(ms: i32) {
 
 /// The next batch of a stream's messages (see [`BATCH_MS`]), and how the
 /// stream ended if it did: `Some(Ok(()))` closed, `Some(Err(_))` failed.
-async fn next_batch<T>(
+pub(crate) async fn next_batch<T>(
     stream: &mut tonic::Streaming<T>,
 ) -> (Vec<T>, Option<Result<(), tonic::Status>>) {
     use futures::StreamExt;
@@ -324,6 +324,24 @@ pub fn HostPage() -> impl IntoView {
         move |_| hosts.with(|hosts| hosts.get(&host_id).cloned())
     });
 
+    // D24: the host's running jobs, live
+    let host_jobs = RwSignal::new(BTreeMap::<String, api::JobSummary>::new());
+    watch_jobs_of(
+        Some(api::watch_jobs_request::Filter::Hosts(api::HostSelector {
+            hosts: vec![host_id.clone()],
+            ..Default::default()
+        })),
+        24,
+        host_jobs,
+        error,
+    );
+    let running = Signal::derive({
+        let host_id = host_id.clone();
+        move || host_jobs.with(|jobs| crate::live::running_jobs(jobs, &host_id))
+    });
+    // history rows whose log is open (D24)
+    let logs_open = RwSignal::new(std::collections::BTreeSet::<String>::new());
+
     // history
     let outcomes = RwSignal::new(Vec::<api::OutcomeSummary>::new());
     // expanded history rows: job id -> its outcome (None while loading),
@@ -491,6 +509,8 @@ pub fn HostPage() -> impl IntoView {
                 <pre>{serde_json::from_str::<serde_json::Value>(&host.items_json).and_then(|v| serde_json::to_string_pretty(&v)).unwrap_or_default()}</pre>
             }
         })}
+        <h2>"Live"</h2>
+        <crate::live::HostLive running=running />
         <h2>"Effective expected state"</h2>
         <HostStateExplorer host=summary />
         <p class="muted">{move || message.get()}</p>
@@ -512,6 +532,20 @@ pub fn HostPage() -> impl IntoView {
                             let job_id = job_id.clone();
                             move |_| expanded.with(|e| e.get(&job_id).cloned().flatten())
                         });
+                        let log_open = Memo::new({
+                            let job_id = job_id.clone();
+                            move |_| logs_open.with(|l| l.contains(&job_id))
+                        });
+                        let has_log = outcome.run_log.is_some();
+                        let toggle_log = {
+                            let job_id = job_id.clone();
+                            move |_| logs_open.update(|l| {
+                                if !l.remove(&job_id) {
+                                    l.insert(job_id.clone());
+                                }
+                            })
+                        };
+                        let (log_job, log_month, finished_at) = (job_id.clone(), month.clone(), outcome.finished_at);
                         view! {
                             <tr class:expanded=open>
                                 <td>{format_ms(outcome.finished_at)}</td>
@@ -519,8 +553,20 @@ pub fn HostPage() -> impl IntoView {
                                 <td>{badge(outcome.compliance.clone())} " " <span class="muted">{outcome.error.clone()}</span></td>
                                 <td class="muted">{outcome.origin.clone()}</td>
                                 <td><button aria-expanded=move || open.get().to_string() on:click=move |_| toggle(job_id.clone(), month.clone())>
-                                    {move || if open.get() { "Hide" } else { "Details" }}</button></td>
+                                    {move || if open.get() { "Hide" } else { "Details" }}</button>
+                                    {has_log.then(|| view! {
+                                        " " <button aria-expanded=move || log_open.get().to_string() on:click=toggle_log.clone()>
+                                            {move || if log_open.get() { "Hide log" } else { "Log" }}</button>
+                                    })}
+                                    " " {crate::live::log_badge(outcome.run_log.as_ref())}</td>
                             </tr>
+                            <Show when=move || log_open.get()>
+                                <tr class="outcome-detail">
+                                    <td colspan="5">
+                                        <crate::live::RunLogView job_id=log_job.clone() month=log_month.clone() finished_at=finished_at />
+                                    </td>
+                                </tr>
+                            </Show>
                             <Show when=move || open.get()>
                                 <tr class="outcome-detail">
                                     <td colspan="5">
@@ -621,6 +667,8 @@ pub fn Jobs() -> impl IntoView {
             }
         });
     };
+    // D24: rows whose live view / log is open
+    let open = RwSignal::new(std::collections::BTreeSet::<String>::new());
     view! {
         <h1>"Jobs " <span class="muted">"(last 24 h, live)"</span></h1>
         <Show when=move || error.get().is_some()>
@@ -632,7 +680,22 @@ pub fn Jobs() -> impl IntoView {
                 <For each=sorted key=|j| (j.job_id.clone(), j.state.clone(), j.updated_at) let:job>
                     {
                         let running = job.state == "PENDING" || job.state == "STARTED";
+                        let live = crate::live::is_running(&job.state);
+                        let has_outcome = !job.outcome_month.is_empty();
                         let job_id = job.job_id.clone();
+                        let is_open = Memo::new({
+                            let job_id = job_id.clone();
+                            move |_| open.with(|o| o.contains(&job_id))
+                        });
+                        let toggle = {
+                            let job_id = job_id.clone();
+                            move |_| open.update(|o| {
+                                if !o.remove(&job_id) {
+                                    o.insert(job_id.clone());
+                                }
+                            })
+                        };
+                        let detail_job = job.clone();
                         view! {
                             <tr>
                                 <td>{format_ms(job.created_at)}</td>
@@ -641,8 +704,32 @@ pub fn Jobs() -> impl IntoView {
                                 <td>{badge(job.state.clone())}</td>
                                 <td>{(!job.compliance.is_empty()).then(|| badge(job.compliance.clone()))} " " <span class="muted">{job.error.clone()}</span></td>
                                 <td class="muted">{job.origin.clone()}</td>
-                                <td>{running.then(|| view! { <button on:click=move |_| abort(job_id.clone())>"Abort"</button> })}</td>
+                                <td>
+                                    {(live || has_outcome).then(|| view! {
+                                        <button aria-expanded=move || is_open.get().to_string() on:click=toggle.clone()>
+                                            {move || match (is_open.get(), live) {
+                                                (true, _) => "Hide",
+                                                (false, true) => "Live",
+                                                (false, false) => "Log",
+                                            }}</button> " "
+                                    })}
+                                    {running.then(|| view! { <button on:click=move |_| abort(job_id.clone())>"Abort"</button> })}
+                                </td>
                             </tr>
+                            <Show when=move || is_open.get()>
+                                <tr class="outcome-detail">
+                                    <td colspan="7">
+                                        {
+                                            let job = detail_job.clone();
+                                            if live {
+                                                view! { <crate::live::LiveJob job=job /> }.into_any()
+                                            } else {
+                                                view! { <crate::live::RunLogView job_id=job.job_id.clone() month=job.outcome_month.clone() finished_at=job.updated_at /> }.into_any()
+                                            }
+                                        }
+                                    </td>
+                                </tr>
+                            </Show>
                         }
                     }
                 </For>

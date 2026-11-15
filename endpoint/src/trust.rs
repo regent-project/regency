@@ -102,6 +102,14 @@ impl TrustState {
         });
     }
 
+    /// D24: the `run_log_max_bytes` setting.
+    pub fn run_log_max_bytes(&self) -> u64 {
+        self.settings
+            .read()
+            .expect("settings lock")
+            .run_log_max_bytes()
+    }
+
     /// Why `identity` is revoked, if it is.
     pub fn revoked(&self, identity: &Identity) -> Option<&'static str> {
         let settings = self.settings.read().expect("settings lock");

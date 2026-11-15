@@ -37,6 +37,11 @@ pub struct RunnerSection {
     /// Shard-ownership round period (D3 machinery for Reach partitions).
     #[serde(default = "default_lock_retry")]
     pub lock_retry_sec: u64,
+    /// D24: publish what running tasks do on `regency.live` (live views). The
+    /// run's log is kept with its outcome either way (`run_log_max_bytes`
+    /// setting).
+    #[serde(default = "default_live")]
+    pub live: bool,
 }
 
 fn default_pool() -> String {
@@ -57,6 +62,9 @@ fn default_grace() -> u64 {
 fn default_lock_retry() -> u64 {
     5
 }
+fn default_live() -> bool {
+    true
+}
 
 impl Default for RunnerSection {
     fn default() -> Self {
@@ -67,6 +75,7 @@ impl Default for RunnerSection {
             control_lookback_sec: default_lookback(),
             shutdown_grace_sec: default_grace(),
             lock_retry_sec: default_lock_retry(),
+            live: default_live(),
         }
     }
 }

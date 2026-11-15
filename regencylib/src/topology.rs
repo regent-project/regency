@@ -29,6 +29,8 @@ pub const Q_STATUS_DBWRITER: &str = "regency.status.dbwriter";
 pub const Q_DEAD: &str = "regency.dead";
 pub const Q_DEAD_PARKED: &str = "regency.dead.parked";
 pub const STREAM_CONTROL: &str = "regency.control";
+/// Live view of running jobs (D24): batches of regent-sdk `LiveUpdate`s.
+pub const STREAM_LIVE: &str = "regency.live";
 
 pub const DEAD_KEY_TASK: &str = "task";
 pub const DEAD_KEY_PARKED: &str = "parked";
@@ -60,6 +62,12 @@ pub struct TopologyConfig {
     /// `regency.control` retention, seconds (D7: >= runners' look-back).
     #[serde(default = "default_control_max_age")]
     pub control_max_age_sec: u64,
+    /// `regency.live` retention, seconds (D24; only for catching up).
+    #[serde(default = "default_live_max_age")]
+    pub live_max_age_sec: u64,
+    /// `regency.live` size bound, bytes (D24).
+    #[serde(default = "default_live_max_bytes")]
+    pub live_max_bytes: u64,
 }
 
 fn default_partitions() -> u32 {
@@ -74,6 +82,12 @@ fn default_consumer_timeout() -> i64 {
 fn default_control_max_age() -> u64 {
     2 * 86_400
 }
+fn default_live_max_age() -> u64 {
+    3600
+}
+fn default_live_max_bytes() -> u64 {
+    2_000_000_000
+}
 
 impl Default for TopologyConfig {
     fn default() -> Self {
@@ -82,6 +96,8 @@ impl Default for TopologyConfig {
             delivery_limit: default_delivery_limit(),
             task_consumer_timeout_ms: default_consumer_timeout(),
             control_max_age_sec: default_control_max_age(),
+            live_max_age_sec: default_live_max_age(),
+            live_max_bytes: default_live_max_bytes(),
         }
     }
 }
@@ -328,6 +344,30 @@ pub async fn declare_control_stream(
                     "x-max-age",
                     string(&format!("{}s", config.control_max_age_sec)),
                 ),
+            ]),
+        )
+        .await
+        .map(|_| ())
+}
+
+/// The replicated stream `regency.live` (D24): short retention, bounded size,
+/// small segments so that retention applies soon.
+pub async fn declare_live_stream(channel: &Channel, config: &TopologyConfig) -> lapin::Result<()> {
+    channel
+        .queue_declare(
+            s(STREAM_LIVE),
+            QueueDeclareOptions {
+                durable: true,
+                ..Default::default()
+            },
+            table(&[
+                ("x-queue-type", string("stream")),
+                (
+                    "x-max-age",
+                    string(&format!("{}s", config.live_max_age_sec)),
+                ),
+                ("x-max-length-bytes", long(config.live_max_bytes as i64)),
+                ("x-stream-max-segment-size-bytes", long(50_000_000)),
             ]),
         )
         .await

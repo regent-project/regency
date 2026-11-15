@@ -10,7 +10,7 @@
 //! | `regency_scheduler` | reads orders, policies, catalog |
 //! | `regency_endpoint` | reads settings (deny list), state (pins) |
 //! | `regency_sourcesync` | reads catalog |
-//! | `regency_runner` | reads config |
+//! | `regency_runner` | reads config, settings (run log limit, D24) |
 //!
 //! Every service role also reads `regency_config` (D21).
 
@@ -32,7 +32,7 @@ pub const ROLE_RUNNER: &str = "regency_runner";
 /// Reader roles of a database (D8 table).
 pub fn reader_roles(db: &str) -> Vec<&'static str> {
     match db {
-        DB_SETTINGS => vec![ROLE_BACKEND, ROLE_ENDPOINT],
+        DB_SETTINGS => vec![ROLE_BACKEND, ROLE_ENDPOINT, ROLE_RUNNER],
         DB_ORDERS => vec![ROLE_SCHEDULER, ROLE_BACKEND],
         DB_USERS => vec![ROLE_BACKEND],
         DB_POLICIES => vec![ROLE_BACKEND, ROLE_SCHEDULER],

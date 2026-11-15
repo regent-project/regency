@@ -10,8 +10,8 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, 
 use regencylib::messages::{Command, CommandBody, decode_outcome};
 use regencylib::testing::{infra, unique};
 use regencylib::topology::{EX_COMMANDS, EX_OUTCOMES, declare_exchanges};
-use regent_sdk::proto::ReportOutcomeRequest;
 use regent_sdk::proto::grpc::reporting::reporting_client::ReportingClient;
+use regent_sdk::proto::{ReportLiveRequest, ReportOutcomeRequest};
 use regent_sdk::state::compliance::ManagedHostStatus;
 use regent_sdk::task::{Job, RegentTaskResult};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
@@ -75,6 +75,31 @@ fn outcome(host: &str) -> ReportOutcomeRequest {
     let mut request = ReportOutcomeRequest::new();
     request.set_result(result.to_proto());
     request
+}
+
+fn live_update(host: &str, run: &str, seq: u64) -> regent_sdk::hosts::live::LiveUpdate {
+    regent_sdk::hosts::live::LiveUpdate {
+        run_id: run.to_string(),
+        host_id: host.to_string(),
+        job: Job::Assess,
+        seq,
+        at: chrono::Utc::now(),
+        event: regent_sdk::hosts::live::LiveEvent::Output {
+            exec_id: 1,
+            stream: regent_sdk::hosts::live::OutputStream::Stdout,
+            line: format!("line {seq} of a rather verbose command output"),
+        },
+    }
+}
+
+fn live_batch(host: &str, run: &str, seqs: std::ops::RangeInclusive<u64>) -> ReportLiveRequest {
+    let mut batch = ReportLiveRequest::new();
+    for seq in seqs {
+        batch
+            .updates_mut()
+            .push(live_update(host, run, seq).to_proto());
+    }
+    batch
 }
 
 async fn client(port: u16, ca_pem: &str, identity: (String, String)) -> ReportingClient<Channel> {
@@ -144,6 +169,7 @@ enabled = true
 trust_on_first_use = true
 [rabbitmq]
 url = "{amqp}"
+stream_port = {stream_port}
 username = "regency"
 password = {{ SecRef = "{rabbit_password}" }}
 [couchdb]
@@ -159,6 +185,7 @@ internal = 1
 external = 1
 "#,
         amqp = infra.rabbitmq.url,
+        stream_port = infra.rabbitmq.stream_port,
         couch = infra.couchdb.url,
     );
     let config_path = write(&dir, "endpoint.toml", &config);
@@ -177,6 +204,9 @@ external = 1
         .unwrap();
     let channel = connection.create_channel().await.unwrap();
     declare_exchanges(&channel).await.unwrap();
+    regencylib::topology::declare_live_stream(&channel, &Default::default())
+        .await
+        .unwrap();
     let mut consumers = Vec::new();
     for (exchange, key) in [(EX_OUTCOMES, "#"), (EX_COMMANDS, "host.*")] {
         let queue = unique("test.endpoint.");
@@ -243,6 +273,93 @@ external = 1
     // D5: an outcome for another host is refused
     let refused = web01.report_outcome(outcome("web-02")).await.unwrap_err();
     assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+
+    // D24: live updates go to regency.live, only for the host's own identity
+    let live_batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let live_cancel = tokio_util::sync::CancellationToken::new();
+    {
+        let batches = live_batches.clone();
+        tokio::spawn(regencylib::live::follow(
+            infra.rabbitmq.clone(),
+            infra.secrets.clone(),
+            Duration::from_secs(0),
+            live_cancel.clone(),
+            |_| {},
+            move |batch| batches.lock().unwrap().push(batch.to_vec()),
+        ));
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await; // subscribed
+    let pass = unique("pass-");
+    let accepted = web01
+        .report_live(tokio_stream::iter(vec![live_batch("web-01", &pass, 1..=3)]))
+        .await
+        .expect("live accepted");
+    assert_eq!(accepted.get_ref().accepted(), 3);
+    let mut streamed = 0;
+    for _ in 0..50 {
+        streamed = live_batches
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|b| {
+                regencylib::live::decode_batch(b)
+                    .unwrap()
+                    .updates()
+                    .iter()
+                    .map(|u| u.run_id().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|run| run == &pass)
+            .count();
+        if streamed == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(streamed, 3, "forwarded to regency.live");
+    live_cancel.cancel();
+    let refused = web01
+        .report_live(tokio_stream::iter(vec![live_batch("web-02", &pass, 4..=4)]))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+
+    // D24: a run log larger than the run_log_max_bytes setting is cropped
+    let limit = couch
+        .get::<regencylib::model::SettingsDoc>(
+            regencylib::model::DB_SETTINGS,
+            regencylib::model::SETTINGS_DOC_ID,
+        )
+        .await
+        .unwrap()
+        .map(|s| s.doc.run_log_max_bytes())
+        .unwrap_or(regencylib::model::DEFAULT_RUN_LOG_MAX_BYTES);
+    if (1..=8 * 1024 * 1024).contains(&limit) {
+        let mut request = outcome("web-01");
+        let job = request.result().idempotency_key().to_string();
+        let mut log = regent_sdk::hosts::live::RunLog::new(0);
+        let mut seq = 0;
+        while log.size_bytes() <= limit + 1000 {
+            seq += 1;
+            log.push(live_update("web-01", &job, seq));
+        }
+        request.set_run_log(log.to_proto());
+        web01.report_outcome(request).await.expect("accepted");
+        let delivery = tokio::time::timeout(Duration::from_secs(10), outcomes.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        delivery.ack(BasicAckOptions::default()).await.unwrap();
+        let decoded = decode_outcome(&delivery.data).unwrap();
+        let kept = regent_sdk::hosts::live::RunLog::from_proto_bytes(
+            decoded.run_log_bytes.as_ref().expect("run log kept"),
+        )
+        .unwrap();
+        assert!(kept.size_bytes() <= limit, "cropped to {limit}");
+        assert!(kept.omitted_updates() > 0 && kept.is_truncated());
+        assert_eq!(kept.limit_bytes(), limit);
+    }
 
     // self-signed + trust on first use: accepted and announced
     let edge_id = unique("edge-");

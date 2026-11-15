@@ -139,6 +139,7 @@ impl Init<'_> {
         topology::declare_commands_dbwriter(&channel, &config.topology).await?;
         topology::declare_commands_scheduler(&channel, &config.topology).await?;
         topology::declare_control_stream(&channel, &config.topology).await?;
+        topology::declare_live_stream(&channel, &config.topology).await?;
         for pool in &config.pools {
             topology::declare_pool(&channel, &config.topology, pool).await?;
             info!(

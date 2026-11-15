@@ -26,6 +26,10 @@ service Regency {
   // --- live view: snapshot, then updates (server streaming)
   rpc WatchHosts(WatchHostsRequest) returns (stream HostEvent);
   rpc WatchJobs(WatchJobsRequest) returns (stream JobEvent);
+  // D24: what running jobs do (buffered past, then as it happens), and the
+  // log kept with a finished job's outcome.
+  rpc WatchLive(WatchLiveRequest) returns (stream LiveEvent);
+  rpc GetRunLog(GetRunLogRequest) returns (GetRunLogResponse);
 
   // --- reads
   rpc ListOutcomes(ListOutcomesRequest) returns (ListOutcomesResponse);
@@ -134,6 +138,10 @@ message HostSummary {
   string state_revision = 17;
   // Why the assignments cannot be composed (e.g. a conflict), if so.
   string assignment_error = 18;
+  // D24: the newest of the last assess / reach (job id and month of its
+  // outcome), to show its run log.
+  string last_job = 19;
+  string last_job_month = 20;
 }
 
 message WatchHostsRequest {
@@ -202,6 +210,67 @@ message OutcomeSummary {
   string month = 9;
   bool one_shot = 10;         // D23: history only, never the host's state
   string state_revision = 11; // effective state revision checked (D23)
+  RunLogInfo run_log = 12;    // D24: absent when no log was kept
+}
+
+// ------------------------------------------------------------ live (D24)
+
+// One step of a run (regent-sdk LiveUpdate, flattened for display).
+message LiveEntry {
+  string job_id = 1;
+  string host_id = 2;
+  JobKind job = 3;
+  uint64 seq = 4;              // order within the run (from 1)
+  int64 at = 5;                // Unix ms
+  // attribute_started, attribute_assessed, remediation_started,
+  // remediation_finished, command_started, output, command_finished,
+  // aborted, dropped, unknown (from a newer regent-sdk)
+  string kind = 6;
+  int64 attribute_index = 7;   // attribute being handled; -1 if none
+  string attribute = 8;        // its name
+  uint64 exec_id = 9;          // command, on command_* and output
+  // command_started: the command; output: the line; attribute_assessed: the
+  // details or error; remediation_*: the remediation / outcome (SDK JSON)
+  string text = 10;
+  string stream = 11;          // output: stdout / stderr
+  string verdict = 12;         // compliant, non_compliant, non_compliant_fatal, failed
+  uint64 count = 13;           // non_compliant: remediations; dropped: updates lost
+  optional int64 return_code = 14;  // command_finished; absent if it could not run
+}
+
+message WatchLiveRequest {
+  oneof target {
+    string job_id = 1;
+    string host_id = 2;  // every job of the host
+  }
+}
+
+message LiveEvent {
+  oneof event {
+    LiveEntry entry = 1;
+    bool snapshot_done = 2;  // the buffered past has been sent
+    uint64 lost = 3;         // updates this view missed (buffer limit, slow client)
+  }
+}
+
+// What a kept run log holds (D24).
+message RunLogInfo {
+  uint64 updates = 1;
+  uint64 size_bytes = 2;       // estimate
+  uint64 limit_bytes = 3;      // the limit it was cropped to (0 = none)
+  uint64 omitted_updates = 4;  // not kept: limit reached (the log is cropped)
+  uint64 dropped_updates = 5;  // lost before reaching the log (overload)
+}
+
+message GetRunLogRequest {
+  string job_id = 1;
+  string month = 2;  // YYYYMM of the outcome; empty = search retained months
+}
+
+message GetRunLogResponse {
+  bool found = 1;             // false: no log kept for this job
+  RunLogInfo info = 2;
+  repeated LiveEntry entries = 3;
 }
 
 message ListOutcomesResponse {

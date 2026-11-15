@@ -1,4 +1,4 @@
-//! RabbitMQ permissions per service (D4, D7, D10, D11, D13 tables), as the
+//! RabbitMQ permissions per service (D4, D7, D10, D11, D13, D24 tables), as the
 //! (configure, write, read) regular expressions of the management API.
 //!
 //! Every service declares the exchanges it uses (configure on them);
@@ -62,6 +62,7 @@ pub fn for_service(service: &str) -> Option<Permissions> {
                 r"regency\.tasks\..+",
                 DEAD,
                 r"runner\..+",
+                r"regency\.live",
             ],
             &[
                 r"regency\.(tasks|dead)",
@@ -72,7 +73,7 @@ pub fn for_service(service: &str) -> Option<Permissions> {
         ),
         "endpoint" => p(
             &[EXCHANGES],
-            &[STATUS, r"regency\.(outcomes|commands)"],
+            &[STATUS, r"regency\.(outcomes|commands)", r"regency\.live"],
             &[],
         ),
         "dbwriter" => p(
@@ -99,7 +100,7 @@ pub fn for_service(service: &str) -> Option<Permissions> {
                 r"regency\.(commands|lifecycle)",
                 r"regency\.control",
             ],
-            &[],
+            &[r"regency\.live"],
         ),
         "sourcesync" => p(
             &[EXCHANGES, r"amq\.gen-.+", r"sourcesync\..+"],
@@ -167,6 +168,12 @@ mod tests {
         assert!(!allows(&scheduler.write, "regency.outcomes"));
         let backend = for_service("backend").unwrap();
         assert!(allows(&backend.write, "regency.control"));
+        // D24: runners and the endpoint publish live views, backend reads them
+        assert!(allows(&runner.write, "regency.live"));
+        assert!(allows(&endpoint.write, "regency.live"));
+        assert!(allows(&backend.read, "regency.live"));
+        assert!(!allows(&backend.write, "regency.live"));
+        assert!(!allows(&endpoint.read, "regency.live"));
         for service in [
             "scheduler",
             "runner",

@@ -7,6 +7,80 @@ change." for a component that did not change); it becomes the GitHub release
 notes. Changes waiting for the next release go under `# Unreleased` (see
 RELEASING.md).
 
+Live view of jobs (D24), planned as v0.4.0: what a job does on its host
+(attributes, remediations, commands and their output, secrets redacted) is
+shown as it happens in the web client, and its log is kept with its outcome.
+Built on regent-sdk 0.25.0 (live mode of `RegentTask`, `RunLog`) and needs
+regops 0.16.0 for proactive hosts.
+
+Upgrade: run `regencyctl init` (new stream `regency.live`, new RabbitMQ
+permissions, runners read `regency_settings`); release scheduler and runners
+together (regent-sdk changes, D20).
+
+## scheduler
+
+- regent-sdk 0.25.0.
+
+## runner
+
+- Runs every task in regent-sdk's live mode: its updates go, in batches and
+  best effort (never slowing the task down), to the new stream `regency.live`
+  (`[runner] live`, default `true`), and its log, cropped to the
+  `run_log_max_bytes` setting (followed in `regency_settings`), travels with
+  the outcome.
+
+## dbwriter
+
+- Stores a job's log as the outcome's `run_log.pb` attachment, with a summary
+  (`run_log`: updates, size, limit, omitted and lost updates) on the
+  `outcome:` document.
+- `settings.set` validates `run_log_max_bytes` (integer >= 0).
+
+## backend
+
+- Every replica follows `regency.live` and keeps the recent updates of each
+  job in memory (`[backend] live_lookback_sec`, default 600;
+  `live_job_entries`, default 5000).
+- New RPCs `WatchLive` (a job or a host: buffered past, then updates) and
+  `GetRunLog` (the log kept with a finished job); outcome summaries carry
+  `run_log`, host summaries `last_job` / `last_job_month`.
+
+## endpoint
+
+- Implements regent-sdk's `ReportLive`: proactive hosts' live views are
+  checked (host id = certificate identity) and forwarded to `regency.live`.
+- A pass's `run_log` is cropped to `run_log_max_bytes` and recorded with its
+  outcome.
+
+## sourcesync
+
+- regent-sdk 0.25.0.
+
+## regencyctl
+
+- `init` declares the stream `regency.live` (retention
+  `topology.live_max_age_sec`, default 1 h; size `topology.live_max_bytes`)
+  and grants runners and endpoint publish, backend read; runners get read
+  access to `regency_settings`.
+
+## frontend
+
+- Map: hovering a host opens a tip following the cursor: live (red LIVE mark,
+  current attribute, last lines) when a job runs, otherwise its last outcome
+  (FINISHED). Clicking a host shows its running jobs live and its last job's
+  log in the right panel.
+- Host page: "Live" section; history rows show whether a log was kept and
+  open it.
+- Jobs page: "Live" for running jobs, "Log" for finished ones.
+- A cropped or incomplete log is marked ⚠ (with the limit and the number of
+  updates not kept).
+- Settings: job log size limit (`run_log_max_bytes`, in KiB; default 1 MiB,
+  0 = no log kept).
+
+## all-in-one
+
+- See the components above.
+
 # Release v0.3.2
 
 Fix of the Windows build: v0.3.1 did not compile on Windows after all (a

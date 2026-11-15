@@ -120,6 +120,9 @@ async fn backend_authenticates_authorizes_and_streams() {
         .unwrap();
     let channel = connection.create_channel().await.unwrap();
     topology::declare_exchanges(&channel).await.unwrap();
+    topology::declare_live_stream(&channel, &Default::default())
+        .await
+        .unwrap();
     let queue = unique("test.backend.");
     channel
         .queue_declare(
@@ -358,6 +361,109 @@ external = 1
     assert_eq!(
         event.upsert().labels().get("env").map(|v| v.to_string()),
         Some(env.clone())
+    );
+
+    // D24: live view of a host's jobs, from regency.live
+    let mut watch = api::WatchLiveRequest::new();
+    watch.set_host_id(host.as_str());
+    let mut live = client
+        .watch_live(authed(watch, &token))
+        .await
+        .unwrap()
+        .into_inner();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), live.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if event.has_snapshot_done() {
+            break;
+        }
+    }
+    let job_id = unique("run:live:");
+    let update = |seq: u64, line: &str| regent_sdk::hosts::live::LiveUpdate {
+        run_id: job_id.clone(),
+        host_id: host.clone(),
+        job: regent_sdk::task::Job::Reach,
+        seq,
+        at: chrono::Utc::now(),
+        event: regent_sdk::hosts::live::LiveEvent::Output {
+            exec_id: 1,
+            stream: regent_sdk::hosts::live::OutputStream::Stdout,
+            line: line.to_string(),
+        },
+    };
+    let link = regencylib::live::LiveLink::spawn(
+        infra.rabbitmq.clone(),
+        infra.secrets.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let mut batch = regent_sdk::proto::ReportLiveRequest::new();
+    batch.updates_mut().push(update(1, "hello live").to_proto());
+    use protobuf::Serialize as _;
+    link.send(batch.serialize().unwrap());
+    let entry = loop {
+        let event = tokio::time::timeout(Duration::from_secs(20), live.next())
+            .await
+            .expect("live entry")
+            .unwrap()
+            .unwrap();
+        if event.has_entry() {
+            break event.entry().to_owned();
+        }
+    };
+    assert_eq!(entry.job_id().to_string(), job_id);
+    assert_eq!(
+        (entry.kind().to_string(), entry.text().to_string()),
+        ("output".to_string(), "hello live".to_string())
+    );
+    drop(live);
+
+    // D24: the log kept with a finished job's outcome, cropped
+    let now = chrono::Utc::now();
+    let month = month_of(now);
+    regencylib::databases::ensure(&couch, &outcomes_db(&month))
+        .await
+        .unwrap();
+    let result = regent_sdk::task::RegentTaskResult::from(
+        job_id.clone(),
+        host.clone(),
+        regent_sdk::task::Job::Reach,
+        now,
+        now,
+        Ok(regent_sdk::state::compliance::ManagedHostStatus::already_compliant()),
+    );
+    let mut run_log =
+        regent_sdk::hosts::live::RunLog::new(3 * update(1, "a line").approx_size() as u64);
+    for seq in 1..=5 {
+        run_log.push(update(seq, "a line"));
+    }
+    let mut doc = OutcomeDoc::from_result(&result, now, "c-live", "runner/test");
+    doc.run_log = Some(RunLogSummary::of(&run_log));
+    let log_bytes = run_log.to_proto_bytes().unwrap();
+    couch
+        .create_with_attachments(
+            &outcomes_db(&month),
+            &Stored::new(outcome_doc_id(&job_id), doc),
+            &[(RUN_LOG_ATTACHMENT, "application/x-protobuf", &log_bytes)],
+        )
+        .await
+        .unwrap();
+    let mut request = api::GetRunLogRequest::new();
+    request.set_job_id(job_id.as_str());
+    request.set_month(month.as_str());
+    let log = client
+        .get_run_log(authed(request, &token))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(log.found());
+    assert_eq!(log.entries().len(), 3);
+    assert_eq!(
+        (log.info().omitted_updates(), log.info().updates()),
+        (2, 3),
+        "the UI warns about a cropped log"
     );
 
     // commands: operators may assess, not reach, nor change settings

@@ -31,4 +31,8 @@ message OutcomeEnvelope {
   // A one-shot raw attribute (D23): kept in history, never sets the host's
   // state.
   bool one_shot = 8;
+  // regent-sdk's `regent.v1.RunLog`: the live view of the run, cropped to the
+  // `run_log_max_bytes` setting (D24); empty when not kept. Stored as the
+  // outcome's `run_log.pb` attachment.
+  bytes run_log = 9;
 }

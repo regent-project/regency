@@ -18,6 +18,7 @@ pub mod control;
 pub mod couch;
 pub mod databases;
 pub mod hashing;
+pub mod live;
 pub mod logging;
 pub mod messages;
 pub mod model;

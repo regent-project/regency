@@ -245,3 +245,30 @@ textarea { font: 12px/1.4 ui-monospace, monospace; padding: .5rem; width: 100%; 
 textarea.code { min-height: 14rem; }
 .notice { color: var(--ok); margin: .5rem 0; }
 .warning { color: var(--warn); background: #33301f; border: 1px solid #5a4d2c; padding: .4rem .6rem; border-radius: 6px; margin: .3rem 0; }
+
+/* D24: live view of jobs. Live = red dot, finished = grey mark. */
+.live-mark { display: inline-flex; align-items: center; gap: .3rem; font-size: 11px; font-weight: 700; letter-spacing: .05em; color: #f3b3ae; }
+.live-mark i { width: 8px; height: 8px; border-radius: 50%; background: #e0544b; box-shadow: 0 0 0 0 rgba(224, 84, 75, .7); animation: live-pulse 1.4s infinite; }
+@keyframes live-pulse { 0% { box-shadow: 0 0 0 0 rgba(224, 84, 75, .7); } 70% { box-shadow: 0 0 0 6px rgba(224, 84, 75, 0); } 100% { box-shadow: 0 0 0 0 rgba(224, 84, 75, 0); } }
+.finished-mark { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 .35rem; }
+.live-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .3rem 0; }
+.live-job { border-left: 3px solid #e0544b; padding-left: .6rem; margin: .5rem 0 .8rem; }
+.run-log { border-left: 3px solid var(--line); padding-left: .6rem; margin: .5rem 0 .8rem; }
+.live-log { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--canvas); border: 1px solid var(--line); border-radius: 4px; padding: .4rem .5rem; max-height: 22rem; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.live-log.tail { max-height: none; overflow: hidden; }
+.live-log .attr { color: var(--accent); font-weight: 600; margin-top: .2rem; }
+.live-log .ok, .live-log .rc.ok { color: var(--ok); }
+.live-log .bad, .live-log .rc.bad { color: var(--bad); }
+.live-log .warn { color: var(--warn); }
+.live-log .remediation { color: var(--warn); }
+.live-log .cmd { color: #e8eef2; }
+.live-log .out { color: var(--muted); }
+.live-log .out.err { color: #d9a19c; }
+p.warn { color: var(--warn); margin: .3rem 0; }
+.tag { display: inline-block; font-size: 11px; padding: 0 .35rem; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); }
+.tag.warn { border-color: var(--warn); color: var(--warn); }
+.live-tip { position: fixed; z-index: 50; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 24px rgba(0, 0, 0, .45); padding: .5rem .6rem; max-height: 260px; overflow: hidden; }
+.live-tip .tip-head { display: flex; align-items: center; gap: .4rem; margin-bottom: .2rem; }
+.live-tip .live-job, .live-tip .tip-finished { margin: .2rem 0 0; }
+.live-tip .tip-finished { border-left: 3px solid var(--line); padding-left: .6rem; }
+.live-tip p { margin: .2rem 0; }

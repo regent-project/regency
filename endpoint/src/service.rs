@@ -13,7 +13,7 @@ use regencylib::topology::{EX_COMMANDS, EX_OUTCOMES};
 use regent_sdk::proto::grpc::reporting::reporting_server::Reporting;
 use regent_sdk::proto::{
     EnrollRequest, EnrollResponse, RenewCertificateRequest, RenewCertificateResponse,
-    ReportOutcomeRequest, ReportOutcomeResponse,
+    ReportLiveRequest, ReportLiveResponse, ReportOutcomeRequest, ReportOutcomeResponse,
 };
 use regent_sdk::task::RegentTaskResult;
 use tonic::{Request, Response, Status};
@@ -31,6 +31,7 @@ pub struct ReportingService {
     pub trust_on_first_use: bool,
     pub publisher: PublisherLink,
     pub publish_wait: Duration,
+    pub live: regencylib::live::LiveLink,
     pub instance: String,
     pub outcomes: prometheus::IntCounterVec,
 }
@@ -152,13 +153,24 @@ impl ReportingService {
         } else {
             Vec::new()
         };
-        let envelope = outcome_envelope(
+        let mut envelope = outcome_envelope(
             result_bytes,
             reporter_bytes,
             result.started_at(),
             ORIGIN_REGOPS,
             &format!("endpoint/{}", self.instance),
         );
+        // D24: the pass's log, cropped to regency's setting
+        if message.has_run_log() {
+            match regencylib::live::crop_run_log(
+                &message.run_log().to_owned(),
+                self.trust.run_log_max_bytes(),
+            ) {
+                Ok(Some(bytes)) => envelope.set_run_log(bytes),
+                Ok(None) => {}
+                Err(e) => warn!(error = %e, "unreadable run log dropped"),
+            }
+        }
         let bytes = encode_outcome(&envelope).map_err(|e| Status::internal(e.to_string()))?;
         let publisher = self
             .publisher
@@ -181,6 +193,45 @@ impl ReportingService {
         self.outcomes.with_label_values(&["accepted"]).inc();
         info!(job = outcome_routing_key(result.job()), "outcome accepted");
         Ok(Response::new(ReportOutcomeResponse::new()))
+    }
+
+    /// D24: forward a pass's live updates to `regency.live` as they come.
+    async fn live(
+        &self,
+        request: Request<tonic::Streaming<ReportLiveRequest>>,
+    ) -> Result<Response<ReportLiveResponse>, Status> {
+        let identity = self.authenticate(&request).await?;
+        tracing::Span::current().record("host_id", identity.host_id.as_str());
+        let mut stream = request.into_inner();
+        let mut accepted = 0u64;
+        while let Some(batch) = stream.message().await? {
+            // D5: check, never rewrite
+            if let Some(other) = batch
+                .updates()
+                .iter()
+                .find(|update| update.host_id() != identity.host_id.as_str())
+            {
+                return Err(Status::invalid_argument(format!(
+                    "live update for host {} but the certificate identifies {}",
+                    other.host_id(),
+                    identity.host_id
+                )));
+            }
+            let count = batch.updates().len() as u64;
+            if count == 0 {
+                continue;
+            }
+            // re-serializing keeps the fields this version does not know (D6)
+            let bytes = batch
+                .serialize()
+                .map_err(|e| Status::invalid_argument(format!("cannot serialize batch: {e:?}")))?;
+            self.live.send(bytes);
+            accepted += count;
+        }
+        tracing::debug!(accepted, "live view forwarded");
+        let mut response = ReportLiveResponse::new();
+        response.set_accepted(accepted);
+        Ok(Response::new(response))
     }
 
     fn ca(&self) -> Result<(&BuiltInCa, &KeyRing), Status> {
@@ -218,6 +269,21 @@ impl Reporting for ReportingService {
         async {
             let result = self.report(request).await;
             log_result("ReportOutcome", started, &result);
+            result
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn report_live(
+        &self,
+        request: Request<tonic::Streaming<ReportLiveRequest>>,
+    ) -> Result<Response<ReportLiveResponse>, Status> {
+        let started = Instant::now();
+        let span = info_span!("report_live", rpc = "ReportLive", peer = ?request.remote_addr(), host_id = tracing::field::Empty);
+        async {
+            let result = self.live(request).await;
+            log_result("ReportLive", started, &result);
             result
         }
         .instrument(span)

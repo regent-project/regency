@@ -7,6 +7,7 @@ mod api;
 mod auth;
 mod config;
 mod convert;
+mod live;
 mod view;
 
 use std::sync::Arc;
@@ -195,8 +196,32 @@ async fn run(
         config.oidc.clone(),
         config.common.security.external,
     ));
+    // D24: every replica follows regency.live (best effort: no readiness)
+    let live = live::LiveHub::new(section.live_job_entries);
+    {
+        let hub = live.clone();
+        tokio::spawn(regencylib::live::follow(
+            config.common.rabbitmq.clone(),
+            secrets.clone(),
+            Duration::from_secs(section.live_lookback_sec),
+            cancel.clone(),
+            |_| {},
+            move |batch| hub.ingest(batch),
+        ));
+        let (hub, cancel) = (live.clone(), cancel.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tick.tick() => hub.evict_idle(),
+                }
+            }
+        });
+    }
     let service = api::Api {
         view,
+        live,
         auth: authenticator,
         publisher,
         publish_wait: Duration::from_secs(section.publish_wait_sec),

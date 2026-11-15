@@ -7,10 +7,10 @@ use chrono::{DateTime, Utc};
 use regencylib::couch::{Couch, CouchError};
 use regencylib::messages::{DecodedOutcome, JobState, LifecycleEvent, TaskHeader};
 use regencylib::model::{
-    DB_STATE, HostDoc, JobDoc, OUTCOME_ATTACHMENT, OutcomeDoc, OutcomeRef, Stored, host_doc_id,
-    job_doc_id, jobs_db, month_of, outcome_doc_id, outcomes_db,
+    DB_STATE, HostDoc, JobDoc, OUTCOME_ATTACHMENT, OutcomeDoc, OutcomeRef, RUN_LOG_ATTACHMENT,
+    RunLogSummary, Stored, host_doc_id, job_doc_id, jobs_db, month_of, outcome_doc_id, outcomes_db,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Transient = worth retrying (CouchDB unreachable, 5xx, lost race).
 pub fn is_transient(error: &CouchError) -> bool {
@@ -71,15 +71,24 @@ impl Writer {
         );
         fresh.state_revision = decoded.state_revision.clone();
         fresh.one_shot = decoded.one_shot;
+        let mut attachments: Vec<(&str, &str, &[u8])> = vec![(
+            OUTCOME_ATTACHMENT,
+            "application/x-protobuf",
+            &decoded.result_bytes,
+        )];
+        // D24: the run's log, as its producer cropped it
+        if let Some(bytes) = &decoded.run_log_bytes {
+            match regent_sdk::hosts::live::RunLog::from_proto_bytes(bytes) {
+                Ok(log) => {
+                    fresh.run_log = Some(RunLogSummary::of(&log));
+                    attachments.push((RUN_LOG_ATTACHMENT, "application/x-protobuf", bytes));
+                }
+                Err(e) => warn!(error = %e, "unreadable run log, outcome kept without it"),
+            }
+        }
         let doc = match self
             .couch
-            .create_with_attachment(
-                &db,
-                &Stored::new(&id, fresh.clone()),
-                OUTCOME_ATTACHMENT,
-                "application/x-protobuf",
-                &decoded.result_bytes,
-            )
+            .create_with_attachments(&db, &Stored::new(&id, fresh.clone()), &attachments)
             .await
         {
             Ok(_) => {

@@ -19,6 +19,8 @@ pub fn stubs() {
         .method(method("who_am_i", "WhoAmI", "WhoAmIRequest", "WhoAmIResponse", false))
         .method(method("watch_hosts", "WatchHosts", "WatchHostsRequest", "HostEvent", true))
         .method(method("watch_jobs", "WatchJobs", "WatchJobsRequest", "JobEvent", true))
+        .method(method("watch_live", "WatchLive", "WatchLiveRequest", "LiveEvent", true))
+        .method(method("get_run_log", "GetRunLog", "GetRunLogRequest", "GetRunLogResponse", false))
         .method(method("list_outcomes", "ListOutcomes", "ListOutcomesRequest", "ListOutcomesResponse", false))
         .method(method("get_outcome", "GetOutcome", "GetOutcomeRequest", "GetOutcomeResponse", false))
         .method(method("list_orders", "ListOrders", "ListOrdersRequest", "ListOrdersResponse", false))

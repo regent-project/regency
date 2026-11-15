@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod expected;
 mod jobchart;
+mod live;
 mod map;
 mod oneshot;
 mod pages;

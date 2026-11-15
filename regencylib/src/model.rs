@@ -298,6 +298,40 @@ pub fn outcome_doc_id(job_id: &str) -> String {
 
 /// Name of the attachment holding the original protobuf bytes (D6, D8).
 pub const OUTCOME_ATTACHMENT: &str = "result.pb";
+/// Name of the attachment holding the run's log (regent-sdk `RunLog`, D24).
+pub const RUN_LOG_ATTACHMENT: &str = "run_log.pb";
+
+/// What an outcome's `run_log.pb` holds (D24), readable without the
+/// attachment: the UI warns when the log is incomplete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunLogSummary {
+    /// Updates kept.
+    pub updates: u64,
+    /// Size kept, bytes (estimate).
+    pub size_bytes: u64,
+    /// The limit it was cropped to (0 = none).
+    pub limit_bytes: u64,
+    /// Updates not kept because of the limit.
+    pub omitted_updates: u64,
+    /// Updates lost before they reached the log (live view overloaded).
+    pub dropped_updates: u64,
+}
+
+impl RunLogSummary {
+    pub fn of(log: &regent_sdk::hosts::live::RunLog) -> Self {
+        Self {
+            updates: log.updates().len() as u64,
+            size_bytes: log.size_bytes(),
+            limit_bytes: log.limit_bytes(),
+            omitted_updates: log.omitted_updates(),
+            dropped_updates: log.dropped_updates(),
+        }
+    }
+
+    pub fn cropped(&self) -> bool {
+        self.omitted_updates > 0
+    }
+}
 
 /// Compliance summary of an outcome, shared by job, host and outcome docs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +429,9 @@ pub struct OutcomeDoc {
     /// The decoded result (SDK JSON), for display. The attachment is the
     /// source of truth.
     pub result: serde_json::Value,
+    /// The run's log (D24), if kept (attachment `run_log.pb`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_log: Option<RunLogSummary>,
 }
 
 impl OutcomeDoc {
@@ -418,6 +455,7 @@ impl OutcomeDoc {
             state_revision: None,
             one_shot: false,
             result: serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
+            run_log: None,
         }
     }
 }
@@ -601,6 +639,9 @@ impl HostDoc {
 /// The single settings document of `regency_settings`.
 pub const SETTINGS_DOC_ID: &str = "settings:global";
 pub const DEFAULT_RETENTION_MONTHS: i64 = 3;
+/// Size limit of a job's log kept with its outcome (D24), bytes (estimate).
+pub const RUN_LOG_MAX_BYTES_KEY: &str = "run_log_max_bytes";
+pub const DEFAULT_RUN_LOG_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Settings: free-form keys set by `settings.set` (D8, D13).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -619,11 +660,26 @@ impl SettingsDoc {
     pub fn with_defaults() -> Self {
         Self {
             kind: settings_kind(),
-            values: BTreeMap::from([(
-                "retention_months".to_string(),
-                serde_json::Value::from(DEFAULT_RETENTION_MONTHS),
-            )]),
+            values: BTreeMap::from([
+                (
+                    "retention_months".to_string(),
+                    serde_json::Value::from(DEFAULT_RETENTION_MONTHS),
+                ),
+                (
+                    RUN_LOG_MAX_BYTES_KEY.to_string(),
+                    serde_json::Value::from(DEFAULT_RUN_LOG_MAX_BYTES),
+                ),
+            ]),
         }
+    }
+
+    /// D24: size limit of the run log kept with an outcome; 0 = no log kept.
+    /// Absent or not a non-negative integer: the default.
+    pub fn run_log_max_bytes(&self) -> u64 {
+        self.values
+            .get(RUN_LOG_MAX_BYTES_KEY)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(DEFAULT_RUN_LOG_MAX_BYTES)
     }
 
     /// `None` if absent or not an integer (D8 guard: no drop then).

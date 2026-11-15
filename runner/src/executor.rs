@@ -8,13 +8,15 @@ use lapin::BasicProperties;
 use lapin::message::Delivery;
 use regencylib::amqp::{Handled, Publisher};
 use regencylib::control::Aborts;
+use regencylib::live::{LiveLink, RunLogLimit};
 use regencylib::messages::{
     JobState, LifecycleEvent, MessageError, TaskEnvelope, TaskHeader, encode_outcome,
-    outcome_envelope, outcome_routing_key, set_checked,
+    outcome_envelope, outcome_routing_key, set_checked, set_run_log,
 };
 use regencylib::topology::{EX_LIFECYCLE, EX_OUTCOMES};
 use regencylib::validate::reject_inline_secrets;
 use regent_sdk::RegentError;
+use regent_sdk::hosts::live::RunLog;
 use regent_sdk::secrets::SecretProvidersPool;
 use regent_sdk::task::{Job, RegentTaskResult};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +39,10 @@ pub struct Executor {
     pub metrics: Arc<Metrics>,
     /// D19 external level: minimum security of host connections.
     pub host_level: regencylib::security::Level,
+    /// D24: where live updates go (`None`: live views off).
+    pub live: Option<LiveLink>,
+    /// D24: size limit of the log kept with each outcome (0 = none).
+    pub run_log_limit: RunLogLimit,
     /// D4: one Reach at a time per host within this runner.
     host_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -52,6 +58,8 @@ impl Executor {
         pool: String,
         metrics: Arc<Metrics>,
         host_level: regencylib::security::Level,
+        live: Option<LiveLink>,
+        run_log_limit: RunLogLimit,
     ) -> Self {
         Self {
             publisher,
@@ -62,6 +70,8 @@ impl Executor {
             pool,
             metrics,
             host_level,
+            live,
+            run_log_limit,
             host_locks: Mutex::new(HashMap::new()),
         }
     }
@@ -91,6 +101,7 @@ impl Executor {
         &self,
         envelope: &TaskHeader,
         result: &RegentTaskResult,
+        run_log: Option<&RunLog>,
     ) -> Result<(), String> {
         let bytes = result.to_proto_bytes().map_err(|e| e.to_string())?;
         let mut message = outcome_envelope(
@@ -101,6 +112,12 @@ impl Executor {
             &format!("runner/{}", self.instance),
         );
         set_checked(&mut message, envelope);
+        if let Some(run_log) = run_log {
+            // a log that cannot be encoded is not worth losing the outcome
+            if let Err(e) = set_run_log(&mut message, run_log) {
+                warn!(error = %e, "run log not kept");
+            }
+        }
         let payload = encode_outcome(&message).map_err(|e| e.to_string())?;
         self.publisher
             .publish(
@@ -167,7 +184,9 @@ impl Executor {
                 now,
                 Err(RegentError::WrongInitialization(reason)),
             );
-            return self.finish(&envelope.header, &result, job, "refused").await;
+            return self
+                .finish(&envelope.header, &result, None, job, "refused")
+                .await;
         }
         // D4: a second Reach for a busy host waits here
         let host_lock = self.host_lock(envelope.task.host_id());
@@ -198,9 +217,23 @@ impl Executor {
         let started = Instant::now();
         self.metrics.running.inc();
         let mut task = envelope.task.clone();
+        // D24: live view (stream) and log (with the outcome)
+        let log_limit = self.run_log_limit.get();
+        let collector = if self.live.is_some() || log_limit > 0 {
+            let (sink, collector) = regencylib::live::start(self.live.clone(), log_limit);
+            task.enable_live(Some(sink));
+            Some(collector)
+        } else {
+            None
+        };
         let result = task
             .run_with_cancellation(Some(self.secrets.clone()), token.clone())
             .await;
+        task.disable_live(); // drops the sink: the collector ends
+        let run_log = match collector {
+            Some(collector) => collector.await.ok().filter(|_| log_limit > 0),
+            None => None,
+        };
         self.metrics.running.dec();
         if token.is_cancelled() && !self.aborts.is_aborted(&key) {
             // connection lost or shutdown: another runner takes it (D4)
@@ -217,19 +250,26 @@ impl Executor {
             error = summary.error.as_deref().unwrap_or(""),
             "task finished"
         );
-        self.finish(&envelope.header, &result, job, &summary.compliance)
-            .await
+        self.finish(
+            &envelope.header,
+            &result,
+            run_log.as_ref(),
+            job,
+            &summary.compliance,
+        )
+        .await
     }
 
     async fn finish(
         &self,
         envelope: &TaskHeader,
         result: &RegentTaskResult,
+        run_log: Option<&RunLog>,
         job: &'static str,
         label: &str,
     ) -> Handled {
         // ack only after the outcome's publish is confirmed (D4)
-        match self.outcome(envelope, result).await {
+        match self.outcome(envelope, result, run_log).await {
             Ok(()) => {
                 self.metrics.tasks.with_label_values(&[job, label]).inc();
                 Handled::Ack
@@ -272,7 +312,7 @@ impl Executor {
                 now,
                 Err(RegentError::WrongInitialization(reason)),
             );
-            self.finish(&header, &result, job, "refused").await
+            self.finish(&header, &result, None, job, "refused").await
         }
         .instrument(span)
         .await

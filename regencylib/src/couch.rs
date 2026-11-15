@@ -300,13 +300,30 @@ impl Couch {
         content_type: &str,
         data: &[u8],
     ) -> Result<String, CouchError> {
+        self.create_with_attachments(db, doc, &[(name, content_type, data)])
+            .await
+    }
+
+    /// Create with inline attachments `(name, content type, data)`; 409 →
+    /// Conflict (already exists).
+    pub async fn create_with_attachments<T: Serialize>(
+        &self,
+        db: &str,
+        doc: &Stored<T>,
+        attachments: &[(&str, &str, &[u8])],
+    ) -> Result<String, CouchError> {
         let mut value = serde_json::to_value(doc)?;
-        value["_attachments"] = json!({
-            name: {
-                "content_type": content_type,
-                "data": base64::engine::general_purpose::STANDARD.encode(data),
-            }
-        });
+        let mut inline = serde_json::Map::new();
+        for (name, content_type, data) in attachments {
+            inline.insert(
+                name.to_string(),
+                json!({
+                    "content_type": content_type,
+                    "data": base64::engine::general_purpose::STANDARD.encode(data),
+                }),
+            );
+        }
+        value["_attachments"] = Value::Object(inline);
         let response = self
             .request(Method::PUT, &format!("{}/{}", enc(db), enc(&doc.id)))
             .json(&value)

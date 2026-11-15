@@ -150,14 +150,32 @@ first_cleanup_delay_sec = 0
     // be dropped consistently (D4)
     let first = result(&key, &host, 100);
     let second = result(&key, &host, 5000);
+    // D24: with the run's log, cropped by its producer
+    let mut run_log = regent_sdk::hosts::live::RunLog::new(200);
+    for seq in 1..=10 {
+        run_log.push(regent_sdk::hosts::live::LiveUpdate {
+            run_id: key.clone(),
+            host_id: host.clone(),
+            job: regent_sdk::task::Job::Assess,
+            seq,
+            at: chrono::Utc::now(),
+            event: regent_sdk::hosts::live::LiveEvent::Output {
+                exec_id: 1,
+                stream: regent_sdk::hosts::live::OutputStream::Stdout,
+                line: format!("line {seq}"),
+            },
+        });
+    }
+    assert!(run_log.omitted_updates() > 0);
     for r in [&first, &second] {
-        let envelope = outcome_envelope(
+        let mut envelope = outcome_envelope(
             r.to_proto_bytes().unwrap(),
             vec![],
             created_at,
             "c1",
             "runner/test",
         );
+        regencylib::messages::set_run_log(&mut envelope, &run_log).unwrap();
         publisher
             .publish(
                 EX_OUTCOMES,
@@ -205,6 +223,19 @@ first_cleanup_delay_sec = 0
         .unwrap()
         .unwrap();
     assert_eq!(attachment, recorded.to_proto_bytes().unwrap());
+    let summary = outcome.doc.run_log.as_ref().expect("run log summary");
+    assert_eq!(summary, &regencylib::model::RunLogSummary::of(&run_log));
+    assert!(summary.cropped());
+    let stored_log = couch
+        .get_attachment(
+            &outcomes_db(&month),
+            &outcome_doc_id(&key),
+            regencylib::model::RUN_LOG_ATTACHMENT,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_log, run_log.to_proto_bytes().unwrap());
     assert_eq!(
         job.doc.outcome.as_ref().unwrap().finished_at,
         outcome.doc.finished_at,

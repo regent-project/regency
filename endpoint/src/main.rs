@@ -158,6 +158,12 @@ async fn run(
         trust_on_first_use: config.pinning.trust_on_first_use,
         publisher,
         publish_wait: Duration::from_secs(config.endpoint.publish_wait_sec),
+        // D24: live views of proactive hosts, forwarded to regency.live
+        live: regencylib::live::LiveLink::spawn(
+            config.common.rabbitmq.clone(),
+            secrets.clone(),
+            cancel.clone(),
+        ),
         instance: instance.clone(),
         outcomes: counter(
             &health,

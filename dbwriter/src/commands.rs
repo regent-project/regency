@@ -169,6 +169,9 @@ pub async fn apply(couch: &Couch, command: &Command) -> Result<(), CommandError>
             if key == "retention_months" && value.as_i64().is_none_or(|months| months < 1) {
                 return refuse("retention_months must be an integer >= 1");
             }
+            if key == regencylib::model::RUN_LOG_MAX_BYTES_KEY && value.as_u64().is_none() {
+                return refuse("run_log_max_bytes must be an integer >= 0 (0 = no log kept)");
+            }
             let (key, value) = (key.clone(), value.clone());
             modify(
                 couch,

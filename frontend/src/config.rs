@@ -1059,10 +1059,16 @@ pub fn SecurityConfig() -> impl IntoView {
 
 // ---------------------------------------------------------------- settings
 
+/// D24 setting (same key and default as `regencylib::model`).
+const RUN_LOG_MAX_BYTES: &str = "run_log_max_bytes";
+const DEFAULT_RUN_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
 #[component]
 pub fn SettingsConfig() -> impl IntoView {
     let session = expect_context::<Session>();
     let retention = RwSignal::new(String::new());
+    // D24: size limit of the log kept with each job, shown in KiB
+    let run_log_kib = RwSignal::new(String::new());
     let message = RwSignal::new(None::<(bool, String)>);
     spawn_scoped(async move {
         if let Ok(response) = client()
@@ -1077,24 +1083,45 @@ pub fn SettingsConfig() -> impl IntoView {
                     .map(|m| m.to_string())
                     .unwrap_or_default(),
             );
+            let bytes = values[RUN_LOG_MAX_BYTES]
+                .as_u64()
+                .unwrap_or(DEFAULT_RUN_LOG_MAX_BYTES);
+            let _ = run_log_kib.try_set((bytes / 1024).to_string());
         }
     });
     let save = move || {
-        let value = retention.get_untracked();
+        let months = retention.get_untracked().trim().to_string();
+        let kib = run_log_kib.get_untracked().trim().to_string();
         spawn_local(async move {
-            let request = api::SetSettingsRequest {
-                command_id: command_id("settings"),
-                key: "retention_months".into(),
-                value_json: value.trim().to_string(),
+            let bytes = match kib.parse::<u64>() {
+                Ok(kib) => kib.saturating_mul(1024),
+                Err(_) => {
+                    let _ = message.try_set(Some((
+                        false,
+                        "the job log limit must be a whole number of KiB (0 = no log kept)".into(),
+                    )));
+                    return;
+                }
             };
-            report(
-                message,
-                session,
-                client()
+            for (key, value, accepted) in [
+                ("retention_months", months, "retention accepted"),
+                (RUN_LOG_MAX_BYTES, bytes.to_string(), "settings accepted"),
+            ] {
+                let request = api::SetSettingsRequest {
+                    command_id: command_id("settings"),
+                    key: key.into(),
+                    value_json: value,
+                };
+                let result = client()
                     .set_settings(authed(request, &session.token()))
                     .await
-                    .map(|_| "retention accepted".to_string()),
-            );
+                    .map(|_| accepted.to_string());
+                let failed = result.is_err();
+                report(message, session, result);
+                if failed {
+                    return;
+                }
+            }
         });
     };
     view! {
@@ -1104,6 +1131,9 @@ pub fn SettingsConfig() -> impl IntoView {
         <div class="card form">
             <label>"Retention (months of jobs and outcomes kept, D8; hosts are never removed by retention)"
                 <input type="number" min="1" prop:value=move || retention.get() on:input=move |ev| retention.set(event_target_value(&ev)) />
+            </label>
+            <label>"Job log size limit, KiB (the live view of each job is kept with its outcome up to this size, D24; beyond it the log is cropped and marked ⚠; 0 = no log kept)"
+                <input type="number" min="0" prop:value=move || run_log_kib.get() on:input=move |ev| run_log_kib.set(event_target_value(&ev)) />
             </label>
             <div class="toolbar"><button class="primary" on:click=move |_| save()>"Save"</button></div>
         </div>

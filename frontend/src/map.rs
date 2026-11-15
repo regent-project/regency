@@ -33,6 +33,7 @@ use crate::client::{api, authed, client, command_id, format_ms};
 use crate::expected::{
     AssignmentEntry, GroupTarget, HostStateExplorer, describe_selector, job_label, load_assignments,
 };
+use crate::live::{HostLive, HostTip, RunLogView, running_jobs};
 use crate::oneshot::OneShotDialog;
 use crate::pages::{assignments_line, badge, host_state, watch_hosts, watch_jobs};
 
@@ -697,6 +698,11 @@ struct PendingRun {
     hosts: usize,
 }
 
+/// Hover tip (D24): delay before it opens, and its size (to keep it on screen).
+const TIP_DELAY_MS: u64 = 150;
+const TIP_WIDTH: f64 = 380.0;
+const TIP_HEIGHT: f64 = 260.0;
+
 #[component]
 pub fn Map() -> impl IntoView {
     let session = expect_context::<Session>();
@@ -820,11 +826,87 @@ pub fn Map() -> impl IntoView {
     };
     let hovered_host = move || hovered.with(|id| id.as_deref().and_then(host_with_job));
 
+    // D24: the hover tip follows the cursor; it opens (and starts its live
+    // stream) only once the pointer rests on a host, so sweeping across
+    // thousands of hosts opens nothing
+    let pointer = RwSignal::new((0.0f64, 0.0f64));
+    let tip = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        let id = hovered.get();
+        if tip.get_untracked() == id {
+            return;
+        }
+        tip.set(None);
+        if let Some(id) = id {
+            set_timeout(
+                move || {
+                    if hovered.try_get_untracked().flatten().as_deref() == Some(id.as_str()) {
+                        let _ = tip.try_set(Some(id));
+                    }
+                },
+                std::time::Duration::from_millis(TIP_DELAY_MS),
+            );
+        }
+    });
+    // the tip's running job (its id and state): a change re-renders the tip
+    let tip_job = Memo::new(move |_| {
+        tip.with(|id| {
+            id.as_deref().and_then(|id| {
+                jobs.with(|jobs| {
+                    running_jobs(jobs, id)
+                        .first()
+                        .map(|job| (job.job_id.clone(), job.state.clone()))
+                })
+            })
+        })
+    });
+    let tip_style = move || {
+        let (x, y) = pointer.get();
+        let window = web_sys::window();
+        let size =
+            |v: Option<js_sys::wasm_bindgen::JsValue>| v.and_then(|v| v.as_f64()).unwrap_or(1e9);
+        let width = size(window.as_ref().and_then(|w| w.inner_width().ok()));
+        let height = size(window.as_ref().and_then(|w| w.inner_height().ok()));
+        let left = if x + TIP_WIDTH + 24.0 > width {
+            x - TIP_WIDTH - 16.0
+        } else {
+            x + 16.0
+        };
+        let top = if y + TIP_HEIGHT + 24.0 > height {
+            (y - TIP_HEIGHT - 16.0).max(0.0)
+        } else {
+            y + 16.0
+        };
+        format!("left:{left}px;top:{top}px;width:{TIP_WIDTH}px")
+    };
+
     // selected host (clicked): shown in the right panel, kept in the URL
     // (`/?host=<id>`) so it can be shared and survives a reload
     let selected = RwSignal::new(use_query_map().read_untracked().get("host"));
     let selected_host =
         Memo::new(move |_| selected.with(|id| id.as_deref().and_then(host_with_job)));
+    // D24: the selected host's running jobs (live) and its last job's log
+    let selected_running = Signal::derive(move || {
+        selected.with(|id| {
+            id.as_deref()
+                .map(|id| jobs.with(|jobs| running_jobs(jobs, id)))
+                .unwrap_or_default()
+        })
+    });
+    let selected_last_log = Memo::new(move |_| {
+        selected_host.with(|host| {
+            host.as_ref()
+                .map(|(host, _)| host)
+                .filter(|host| !host.last_job.is_empty())
+                .map(|host| {
+                    (
+                        host.last_job.clone(),
+                        host.last_job_month.clone(),
+                        host.state_at,
+                    )
+                })
+        })
+    });
     let navigate = use_navigate();
     Effect::new({
         let navigate = navigate.clone();
@@ -1163,6 +1245,20 @@ pub fn Map() -> impl IntoView {
                 </details>
             </aside>
             <section class="map-canvas">
+                // D24: hover tip, following the cursor
+                {move || {
+                    let job = tip_job.get();
+                    let id = tip.get()?;
+                    let host = hosts.with_untracked(|hosts| hosts.get(&id).cloned())?;
+                    let running = job.and_then(|(job_id, _)| {
+                        jobs.with_untracked(|jobs| jobs.get(&job_id).cloned())
+                    });
+                    Some(view! {
+                        <div class="live-tip" style=tip_style>
+                            <HostTip host=host running=running />
+                        </div>
+                    })
+                }}
                 <div class="toolbar">
                     <span class="muted">"Group by"</span>
                     <select on:change=move |ev| {
@@ -1234,6 +1330,7 @@ pub fn Map() -> impl IntoView {
                         center.set(Some((wx - px * k_new, wy - py * k_new)));
                     }
                     on:pointerdown=move |ev| {
+                        hovered.set(None);
                         moved.set(false);
                         drag.set(Some((ev.client_x() as f64, ev.client_y() as f64)));
                     }
@@ -1248,6 +1345,7 @@ pub fn Map() -> impl IntoView {
                     }
                     on:pointermove=move |ev| {
                         let Some((x, y)) = drag.get_untracked() else {
+                            pointer.set((ev.client_x() as f64, ev.client_y() as f64));
                             let id = host_under(&ev);
                             if hovered.with_untracked(|h| *h != id) {
                                 hovered.set(id);
@@ -1310,6 +1408,13 @@ pub fn Map() -> impl IntoView {
                         Some((host, job)) => view! {
                             {host_summary(host, job, false)}
                         }.into_any(),
+                    }}
+                    <h2>"Live"</h2>
+                    <HostLive running=selected_running />
+                    <h2>"Last job log"</h2>
+                    {move || match selected_last_log.get() {
+                        Some((job_id, month, at)) => view! { <RunLogView job_id=job_id month=month finished_at=at /> }.into_any(),
+                        None => view! { <p class="muted">"No finished job within retention."</p> }.into_any(),
                     }}
                     <h2>"Expected state"</h2>
                     <HostStateExplorer host=Signal::derive(move || selected_host.with(|h| h.as_ref().map(|(host, _)| host.clone()))) />

@@ -74,6 +74,16 @@ pub fn host_summary(doc: &HostDoc, meta: &HostMeta) -> api::HostSummary {
     if let Some(r) = &doc.last_reach {
         summary.set_last_reach_job(r.id.trim_start_matches("outcome:"));
     }
+    // D24: the newest of the two, for its run log
+    let newest = [&doc.last_assess, &doc.last_reach]
+        .into_iter()
+        .flatten()
+        .filter(|r| !r.cleared)
+        .max_by_key(|r| r.finished_at);
+    if let Some(r) = newest {
+        summary.set_last_job(r.id.trim_start_matches("outcome:"));
+        summary.set_last_job_month(r.month.as_str());
+    }
     for fingerprint in &doc.certs.pending {
         summary
             .pending_fingerprints_mut()
@@ -178,6 +188,9 @@ pub fn outcome_summary(doc: &OutcomeDoc, month: &str) -> api::OutcomeSummary {
     summary.set_month(month);
     summary.set_one_shot(doc.one_shot);
     summary.set_state_revision(doc.state_revision.as_deref().unwrap_or_default());
+    if let Some(run_log) = &doc.run_log {
+        summary.set_run_log(crate::live::run_log_info(run_log));
+    }
     summary
 }
 

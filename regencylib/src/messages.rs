@@ -196,6 +196,23 @@ pub struct DecodedOutcome {
     /// Revision of the effective expected state checked (D23), if known.
     pub state_revision: Option<String>,
     pub one_shot: bool,
+    /// regent-sdk `RunLog` bytes (D24), if the producer kept the run's log.
+    pub run_log_bytes: Option<Vec<u8>>,
+}
+
+/// Attach a run's log (regent-sdk `RunLog`, D24) to its outcome envelope.
+pub fn set_run_log(
+    envelope: &mut crate::proto::OutcomeEnvelope,
+    run_log: &regent_sdk::hosts::live::RunLog,
+) -> Result<(), MessageError> {
+    if run_log.updates().is_empty() && !run_log.is_truncated() {
+        return Ok(());
+    }
+    let bytes = run_log
+        .to_proto_bytes()
+        .map_err(|e| MessageError::Proto(e.to_string()))?;
+    envelope.set_run_log(bytes);
+    Ok(())
 }
 
 pub fn decode_outcome(bytes: &[u8]) -> Result<DecodedOutcome, MessageError> {
@@ -214,6 +231,7 @@ pub fn decode_outcome(bytes: &[u8]) -> Result<DecodedOutcome, MessageError> {
         reporter_bytes: envelope.reporter().to_vec(),
         state_revision: Some(envelope.state_revision().to_string()).filter(|r| !r.is_empty()),
         one_shot: envelope.one_shot(),
+        run_log_bytes: Some(envelope.run_log().to_vec()).filter(|b| !b.is_empty()),
     })
 }
 

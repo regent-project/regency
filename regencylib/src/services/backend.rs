@@ -53,6 +53,13 @@ pub struct BackendSection {
     /// How long RPCs wait for RabbitMQ before answering UNAVAILABLE.
     #[serde(default = "default_publish_wait")]
     pub publish_wait_sec: u64,
+    /// D24: on start, read `regency.live` back this far (live views of jobs
+    /// already running).
+    #[serde(default = "default_live_lookback")]
+    pub live_lookback_sec: u64,
+    /// D24: live updates kept in memory per job (older ones are dropped).
+    #[serde(default = "default_live_job_entries")]
+    pub live_job_entries: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -81,6 +88,12 @@ fn default_origins() -> Vec<String> {
 }
 fn default_publish_wait() -> u64 {
     5
+}
+fn default_live_lookback() -> u64 {
+    600
+}
+fn default_live_job_entries() -> usize {
+    5000
 }
 fn default_username_claim() -> String {
     "preferred_username".to_string()
