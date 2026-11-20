@@ -137,3 +137,139 @@ async fn merge_upsert_resolves_conflicts() {
     assert_eq!(resolved.doc.state.compliance, "compliant");
     assert!(couch.delete_db(&db).await.unwrap());
 }
+
+/// Several consumers on one channel (`amqp::consume_on`, the runner's Reach
+/// partitions): cancelling one gives back what it was delivered but had not
+/// started, keeps the channel open and the other consumers running.
+#[tokio::test]
+#[ignore = "needs docker"]
+async fn consumers_share_a_channel_and_cancel_alone() {
+    use lapin::BasicProperties;
+    use lapin::options::{BasicPublishOptions, QueueDeclareOptions};
+    use lapin::types::{FieldTable, ShortString};
+    use regencylib::amqp::{Handled, consume_on};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let infra = infra().await;
+    let connection = regencylib::amqp::connect(&infra.rabbitmq, &infra.secrets, "test/shared")
+        .await
+        .unwrap();
+    let setup = connection.create_channel().await.unwrap();
+    let queues: Vec<String> = (0..3)
+        .map(|i| unique(&format!("test.shared.{i}.")))
+        .collect();
+    for queue in &queues {
+        setup
+            .queue_declare(
+                ShortString::from(queue.as_str()),
+                QueueDeclareOptions::default(),
+                FieldTable::default(),
+            )
+            .await
+            .unwrap();
+    }
+    let publish = |queue: String, n: usize| {
+        let setup = setup.clone();
+        async move {
+            for i in 0..n {
+                setup
+                    .basic_publish(
+                        ShortString::from(""),
+                        ShortString::from(queue.as_str()),
+                        BasicPublishOptions::default(),
+                        format!("{i}").as_bytes(),
+                        BasicProperties::default(),
+                    )
+                    .await
+                    .unwrap()
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+
+    let shared = connection.create_channel().await.unwrap();
+    let handled: Vec<Arc<AtomicUsize>> = (0..3).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+    let gate = Arc::new(tokio::sync::Notify::new()); // holds consumer 0's first message
+    let tokens: Vec<CancellationToken> = (0..3).map(|_| CancellationToken::new()).collect();
+    let mut tasks = Vec::new();
+    for i in 0..3 {
+        let (channel, queue, count, token, gate) = (
+            shared.clone(),
+            queues[i].clone(),
+            handled[i].clone(),
+            tokens[i].clone(),
+            gate.clone(),
+        );
+        tasks.push(tokio::spawn(async move {
+            consume_on(&channel, &queue, &format!("c{i}"), 1, &token, move |_| {
+                let (count, gate) = (count.clone(), gate.clone());
+                async move {
+                    if i == 0 {
+                        gate.notified().await;
+                    }
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Handled::Ack
+                }
+            })
+            .await
+        }));
+    }
+    // consumer 0 is stuck on its first message (prefetch 1: the others stay
+    // in the queue); consumers 1 and 2 work
+    publish(queues[0].clone(), 3).await;
+    publish(queues[1].clone(), 5).await;
+    publish(queues[2].clone(), 5).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while handled[1].load(Ordering::SeqCst) < 5 || handled[2].load(Ordering::SeqCst) < 5 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "consumers 1 and 2 stalled"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // cancel consumer 0: its in-flight message is finished first
+    tokens[0].cancel();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    gate.notify_one();
+    tasks.remove(0).await.unwrap().unwrap();
+    assert_eq!(handled[0].load(Ordering::SeqCst), 1);
+
+    // the channel is still open and consumer 1 still consumes
+    assert!(shared.status().connected());
+    publish(queues[1].clone(), 2).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while handled[1].load(Ordering::SeqCst) < 7 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "consumer 1 stopped with consumer 0"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // what consumer 0 had not handled is still in its queue
+    let left = setup
+        .queue_declare(
+            ShortString::from(queues[0].as_str()),
+            QueueDeclareOptions {
+                passive: true,
+                ..Default::default()
+            },
+            FieldTable::default(),
+        )
+        .await
+        .unwrap()
+        .message_count();
+    assert_eq!(left, 2);
+
+    // a closed channel ends the others with `Ended` (the runner restarts them)
+    shared.close(200, ShortString::from("test")).await.unwrap();
+    for task in tasks {
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(regencylib::amqp::ConsumeError::Ended)
+        ));
+    }
+}

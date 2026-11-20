@@ -7,7 +7,9 @@ change." for a component that did not change); it becomes the GitHub release
 notes. Changes waiting for the next release go under `# Unreleased` (see
 RELEASING.md).
 
-Live view of jobs (D24), planned as v0.4.0: what a job does on its host
+# Release v0.4.0
+
+Live view of jobs (D24): what a job does on its host
 (attributes, remediations, commands and their output, secrets redacted) is
 shown as it happens in the web client, and its log is kept with its outcome.
 Built on regent-sdk 0.25.0 (live mode of `RegentTask`, `RunLog`) and needs
@@ -28,6 +30,11 @@ together (regent-sdk changes, D20).
   (`[runner] live`, default `true`), and its log, cropped to the
   `run_log_max_bytes` setting (followed in `regency_settings`), travels with
   the outcome.
+- Fix: Reach partitions are consumed on shared channels (32 per channel)
+  instead of one channel each. With RabbitMQ 4.4, whose default limit is 256
+  channels per connection, a runner holding all 256 partitions could not
+  consume the last ones, and their tasks stayed pending. A partition consumer
+  that stops while its partition is still owned is now started again.
 
 ## dbwriter
 
@@ -76,6 +83,9 @@ together (regent-sdk changes, D20).
   updates not kept).
 - Settings: job log size limit (`run_log_max_bytes`, in KiB; default 1 MiB,
   0 = no log kept).
+- Map: the left and right panels can be resized by dragging their edge next
+  to the map (double click: default width); the widths are remembered by the
+  browser.
 
 ## all-in-one
 

@@ -15,13 +15,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use lapin::Connection;
-use regencylib::amqp::{Publisher, closed, connect_retrying, consume};
+use lapin::{Channel, Connection};
+use regencylib::amqp::{Publisher, closed, connect_retrying, consume, consume_on};
 use regencylib::control::{self, Aborts};
 use regencylib::shard::{self, ShardSpec, Watchdog};
 use regencylib::telemetry::{Health, counter, gauge, shutdown_signal};
 use regencylib::topology::{self, assess_queue, reach_queue};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -29,6 +30,9 @@ use crate::config::Config;
 use crate::executor::{Executor, Metrics};
 
 const SERVICE: &str = "runner";
+
+/// Reach partitions consumed on one AMQP channel (see `reach_partitions`).
+const PARTITIONS_PER_CHANNEL: u32 = 32;
 
 #[derive(Parser)]
 #[command(
@@ -271,41 +275,62 @@ async fn reach_partitions(
     let (owned_tx, mut owned_rx) = watch::channel(BTreeSet::new());
     let ownership = shard::run(&spec, &connection, &watchdog, &owned_tx, session);
     let manage = async {
-        let mut consumers: HashMap<u32, CancellationToken> = HashMap::new();
+        let mut consumers: HashMap<u32, (CancellationToken, JoinHandle<()>)> = HashMap::new();
+        // partitions share channels, PARTITIONS_PER_CHANNEL each: one channel
+        // per partition would exceed the broker's channel limit per
+        // connection (RabbitMQ 4.4: 256 by default, = the default P)
+        let mut channels: HashMap<u32, Channel> = HashMap::new();
         loop {
             watchdog.tick();
             let owned = owned_rx.borrow_and_update().clone();
             owned_gauge.set(owned.len() as i64);
-            // released partitions: stop intake, in-flight tasks finish
-            consumers.retain(|partition, token| {
-                let keep = owned.contains(partition);
-                if !keep {
+            // released partitions: stop intake, in-flight tasks finish;
+            // stopped consumers of owned partitions: started again below
+            consumers.retain(|partition, (token, task)| {
+                if !owned.contains(partition) {
                     token.cancel();
                     info!(partition, "reach partition released");
+                    return false;
                 }
-                keep
+                !task.is_finished()
             });
+            channels.retain(|_, channel| channel.status().connected());
             for partition in owned {
                 if consumers.contains_key(&partition) {
                     continue;
                 }
+                let group = partition / PARTITIONS_PER_CHANNEL;
+                let channel = match channels.get(&group) {
+                    Some(channel) => channel.clone(),
+                    None => match connection.create_channel().await {
+                        Ok(channel) => {
+                            channels.insert(group, channel.clone());
+                            channel
+                        }
+                        Err(e) => {
+                            warn!(partition, error = %e, "no channel for a reach partition, retrying");
+                            continue;
+                        }
+                    },
+                };
                 let token = session.child_token();
-                consumers.insert(partition, token.clone());
-                let (connection, executor) = (connection.clone(), executor.clone());
+                let executor = executor.clone();
                 let queue = reach_queue(pool, partitions, partition);
                 let tag = format!("{name}/part-{partition}");
                 let prefetch = config.runner.reach_prefetch;
-                tokio::spawn(async move {
+                let cancel = token.clone();
+                let task = tokio::spawn(async move {
                     let handler = move |delivery| {
                         let executor = executor.clone();
                         async move { executor.handle(delivery).await }
                     };
                     if let Err(e) =
-                        consume(&connection, &queue, &tag, prefetch, &token, handler).await
+                        consume_on(&channel, &queue, &tag, prefetch, &cancel, handler).await
                     {
-                        warn!(partition, error = %e, "reach consumer stopped");
+                        warn!(partition, error = %e, "reach consumer stopped, restarting it");
                     }
                 });
+                consumers.insert(partition, (token, task));
             }
             tokio::select! {
                 _ = session.cancelled() => break,
@@ -313,7 +338,7 @@ async fn reach_partitions(
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
         }
-        for token in consumers.values() {
+        for (token, _) in consumers.values() {
             token.cancel();
         }
     };

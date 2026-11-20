@@ -1154,6 +1154,76 @@ pub fn Map() -> impl IntoView {
     };
     let left_open = panel("regency.map.left");
     let right_open = panel("regency.map.right");
+    // panel widths: set by dragging the splitters between the panels and the
+    // map (double click: default width), remembered by the browser
+    let width = |key: &'static str, default: f64| {
+        let stored = crate::client::storage()
+            .and_then(|s| s.get_item(key).ok().flatten())
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|w| w.is_finite());
+        (
+            RwSignal::new(clamp_panel(stored.unwrap_or(default))),
+            key,
+            default,
+        )
+    };
+    let left_width = width("regency.map.left.width", 300.0);
+    let right_width = width("regency.map.right.width", 400.0);
+    let page_style = move || {
+        let mut style = String::new();
+        if left_open.get() {
+            style.push_str(&format!("--left:{}px;", left_width.0.get()));
+        }
+        if right_open.get() {
+            style.push_str(&format!("--right:{}px;", right_width.0.get()));
+        }
+        style
+    };
+    // `sign`: +1 when dragging right widens the panel (left one), -1 otherwise
+    let splitter = move |(width, key, default): (RwSignal<f64>, &'static str, f64),
+                         open: RwSignal<bool>,
+                         sign: f64| {
+        let start = StoredValue::new(None::<(f64, f64)>); // pointer x, width
+        let save = move || {
+            if let Some(storage) = crate::client::storage() {
+                let _ = storage.set_item(key, &width.get_untracked().round().to_string());
+            }
+        };
+        view! {
+            <div class=move || if open.get() { "splitter" } else { "splitter off" }
+                title="Drag to resize the panel (double click: default width)"
+                on:pointerdown=move |ev: web_sys::PointerEvent| {
+                    if !open.get_untracked() || ev.button() != 0 {
+                        return;
+                    }
+                    ev.prevent_default();
+                    if let Some(el) = ev.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
+                        let _ = el.set_pointer_capture(ev.pointer_id());
+                    }
+                    start.set_value(Some((ev.client_x() as f64, width.get_untracked())));
+                }
+                on:pointermove=move |ev: web_sys::PointerEvent| {
+                    if let Some((x0, w0)) = start.get_value() {
+                        width.set(clamp_panel(w0 + sign * (ev.client_x() as f64 - x0)));
+                    }
+                }
+                on:pointerup=move |_| {
+                    if start.get_value().is_some() {
+                        start.set_value(None);
+                        save();
+                    }
+                }
+                on:pointercancel=move |_| {
+                    start.set_value(None);
+                    save();
+                }
+                on:dblclick=move |_| {
+                    width.set(clamp_panel(default));
+                    save();
+                }>
+            </div>
+        }
+    };
     let page_class = move || {
         let mut class = String::from("map-page");
         if !left_open.get() {
@@ -1182,7 +1252,7 @@ pub fn Map() -> impl IntoView {
     };
 
     view! {
-        <div class=page_class>
+        <div class=page_class style=page_style>
             <aside class=side_class("left", left_open)>
                 <button class="rail" title="Show jobs and activity" on:click=move |_| left_open.set(true)>"Jobs"</button>
                 <button class="shrink" title="Hide this panel" on:click=move |_| left_open.set(false)>"‹"</button>
@@ -1244,6 +1314,7 @@ pub fn Map() -> impl IntoView {
                     <p class="muted">"A host's colour is its compliance with its effective expected state: the layers of every assignment that selects it. Click a group card to fold or unfold its hosts; Assess and Reach run each host of the group against its own effective state (an assignment's dialog can also run a hand-written attribute once). Click a host to show it on the right. In the areas display, a host in several groups is drawn in each of them."</p>
                 </details>
             </aside>
+            {splitter(left_width, left_open, 1.0)}
             <section class="map-canvas">
                 // D24: hover tip, following the cursor
                 {move || {
@@ -1376,6 +1447,7 @@ pub fn Map() -> impl IntoView {
                 </svg>
                 </div>
             </section>
+            {splitter(right_width, right_open, -1.0)}
             <aside class=side_class("right", right_open)>
                 <button class="rail" title="Show inventories and hosts" on:click=move |_| right_open.set(true)>"Hosts"</button>
                 <button class="shrink" title="Hide this panel" on:click=move |_| right_open.set(false)>"›"</button>
@@ -1479,6 +1551,16 @@ pub fn Map() -> impl IntoView {
 }
 
 /// A host's summary in the right panel (live: rebuilt on every update).
+/// A side panel's width in pixels: at least 180, at most 45 % of the window
+/// (the map keeps room).
+fn clamp_panel(width: f64) -> f64 {
+    let window = web_sys::window()
+        .and_then(|w| w.inner_width().ok())
+        .and_then(|w| w.as_f64())
+        .unwrap_or(1920.0);
+    width.clamp(180.0, (window * 0.45).max(180.0))
+}
+
 fn host_summary(host: api::HostSummary, job: Option<String>, with_name: bool) -> impl IntoView {
     view! {
         <dl>

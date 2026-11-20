@@ -92,7 +92,7 @@ pub fn watch_live(target: watch_live_request::Target) -> RwSignal<Feed> {
 pub fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
-    if bytes >= MIB && bytes % MIB == 0 {
+    if bytes >= MIB && bytes.is_multiple_of(MIB) {
         format!("{} MiB", bytes / MIB)
     } else if bytes >= MIB {
         format!("{:.1} MiB", bytes as f64 / MIB as f64)

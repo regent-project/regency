@@ -378,6 +378,7 @@ pub enum Handled {
 /// Consume `queue` with at most `concurrency` messages in flight (prefetch),
 /// settling each according to `handler`. Returns when the consumer ends
 /// (connection lost) or on `cancel` (in-flight messages are finished first).
+/// Uses a channel of its own; see [`consume_on`] to share one.
 pub async fn consume<F, Fut>(
     connection: &Connection,
     queue: &str,
@@ -391,30 +392,70 @@ where
     Fut: std::future::Future<Output = Handled>,
 {
     let channel = connection.create_channel().await?;
-    let started = async {
-        channel
-            .basic_qos(concurrency, lapin::options::BasicQosOptions::default())
-            .await?;
-        channel
-            .basic_consume(
-                ShortString::from(queue),
-                ShortString::from(consumer_tag),
-                lapin::options::BasicConsumeOptions::default(),
-                FieldTable::default(),
-            )
-            .await
-    };
-    let consumer = match started.await {
-        Ok(consumer) => consumer,
-        Err(e) => {
-            // never leave the channel open (lapin's per-connection limit)
-            let _ = channel.close(200, ShortString::from("failed")).await;
-            return Err(e.into());
-        }
-    };
+    let result = consume_on(&channel, queue, consumer_tag, concurrency, cancel, handler).await;
+    // never leave the channel open (the broker's per-connection limit)
+    let _ = channel.close(200, ShortString::from("done")).await;
+    match result {
+        // this channel was ours alone: its end is the connection's
+        Err(ConsumeError::Ended) => Ok(()),
+        Err(ConsumeError::Amqp(e)) => Err(e),
+        Ok(()) => Ok(()),
+    }
+}
+
+/// Why [`consume_on`] stopped without being cancelled.
+#[derive(Debug, thiserror::Error)]
+pub enum ConsumeError {
+    #[error(transparent)]
+    Amqp(#[from] AmqpError),
+    /// The delivery stream ended (channel or connection closed).
+    #[error("consumer ended (channel closed)")]
+    Ended,
+}
+
+impl From<lapin::Error> for ConsumeError {
+    fn from(e: lapin::Error) -> Self {
+        Self::Amqp(e.into())
+    }
+}
+
+/// Like [`consume`], on a channel that may carry other consumers: a broker
+/// allows a limited number of channels per connection (RabbitMQ 4.4: 256 by
+/// default), so a service consuming many queues (the runner's Reach
+/// partitions) groups them on a few channels. `concurrency` is this
+/// consumer's own prefetch (`basic.qos` without `global`).
+///
+/// On `cancel`, the consumer is cancelled (`basic.cancel`), in-flight
+/// messages are finished, and messages already delivered to it but not
+/// started are given back (the channel stays open for the others). Ends with
+/// [`ConsumeError::Ended`] if the stream ends without `cancel`.
+pub async fn consume_on<F, Fut>(
+    channel: &Channel,
+    queue: &str,
+    consumer_tag: &str,
+    concurrency: u16,
+    cancel: &CancellationToken,
+    handler: F,
+) -> Result<(), ConsumeError>
+where
+    F: Fn(lapin::message::Delivery) -> Fut,
+    Fut: std::future::Future<Output = Handled>,
+{
+    channel
+        .basic_qos(concurrency, lapin::options::BasicQosOptions::default())
+        .await?;
+    let consumer = channel
+        .basic_consume(
+            ShortString::from(queue),
+            ShortString::from(consumer_tag),
+            lapin::options::BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
+        .await?;
     info!(queue, concurrency, "consuming");
-    let stream = consumer.take_until(cancel.cancelled());
-    stream
+    consumer
+        .clone()
+        .take_until(cancel.cancelled())
         .for_each_concurrent(usize::from(concurrency), |delivery| async {
             let delivery = match delivery {
                 Ok(delivery) => delivery,
@@ -445,7 +486,32 @@ where
             }
         })
         .await;
-    let _ = channel.close(200, ShortString::from("done")).await;
+    if !cancel.is_cancelled() {
+        return Err(ConsumeError::Ended);
+    }
+    if !channel.status().connected() {
+        return Ok(()); // the broker requeues whatever was unacknowledged
+    }
+    // stop deliveries, then give back what was delivered but not started
+    // (closing the channel would do it, but the channel is shared)
+    let _ = channel
+        .basic_cancel(
+            ShortString::from(consumer_tag),
+            lapin::options::BasicCancelOptions::default(),
+        )
+        .await;
+    let mut rest = consumer;
+    while let Ok(Some(Ok(delivery))) =
+        tokio::time::timeout(Duration::from_secs(5), rest.next()).await
+    {
+        let _ = delivery
+            .acker
+            .nack(lapin::options::BasicNackOptions {
+                requeue: true,
+                ..Default::default()
+            })
+            .await;
+    }
     Ok(())
 }
 

@@ -7,11 +7,31 @@
 //! once.
 //!
 //!   cargo run -p backend --example dataset -- [--hosts N] [--url URL] [--no-run]
+//!       [--password-file PATH] [--single-pool]
+//!       [--ssh ADDR:PORT --ssh-user USER --ssh-key PATH [--host-key SHA256:…]...]
+//!       [--agents N --endpoint URL --ca-file PATH [--server-name NAME]]
 //!
-//! Every host is this machine (Localhost) with its own directory
+//! Every host is this machine with its own directory
 //! `/tmp/regency-dev/hosts/<host>/` (the files its expected states check) and
 //! its own lock (`/tmp/regency-dev/locks/<host>`), so hosts are independent
-//! for D4's host lock. Each run rewrites those files with a fixed mix of
+//! for D4's host lock. This machine is reached as Localhost (regency runs
+//! here, `dev/run_locally`) or, with `--ssh`, over SSH at ADDR:PORT as USER
+//! with the private key at PATH **on the runners' side** (a file secret
+//! reference resolved by the runner, D9), its host key checked against the
+//! `--host-key` fingerprints (regency runs elsewhere, `dev/run_homelab`).
+//! `--single-pool` puts every host in the `default` runner pool (a single
+//! runner, e.g. the all-in-one). `--password-file`: the bootstrap admin's
+//! password (default `dev/secrets/bootstrap-admin`).
+//!
+//! `--agents N` adds N **proactive** hosts (`regops-<region>-NNNN`), each
+//! meant for its own local regops agent reporting to the endpoint at URL
+//! (D5, built-in CA enrollment, D13): their files, an enrollment token
+//! (issued here, only while the agent has no certificate), the expected state
+//! of each one in the Git repository `/tmp/regency-dev/agents-repo/states/`
+//! (committed by `dev/run_homelab`) and its regops configuration
+//! `/tmp/regency-dev/agents/<host>/config.toml`, the endpoint's CA at PATH.
+//! They are not in the catalog: until regops can take its state from regency
+//! (D23), they show as unassigned hosts, with their outcomes and live logs. Each run rewrites those files with a fixed mix of
 //! compliant hosts and drift; `legacy` hosts are unreachable SSH hosts
 //! (error outcomes); `edge` hosts belong to the `edge` runner pool.
 //! The catalog is only written when it differs (deterministic command ids);
@@ -25,7 +45,7 @@ use regencylib::api::regency_client::RegencyClient;
 use regencylib::model::*;
 use regencylib::proto as api;
 use regent_sdk::ExpectedState;
-use regent_sdk::hosts::handlers::ssh2::Ssh2Auth;
+use regent_sdk::hosts::handlers::ssh2::{Ssh2Auth, Ssh2HostKey};
 use regent_sdk::hosts::handlers::{ConnectionMethod, TargetUser};
 use regent_sdk::hosts::lock::HostLockSettings;
 use regent_sdk::hosts::managed_host::ManagedHostBuilder;
@@ -208,7 +228,15 @@ fn hosts(total: u32) -> Vec<Host> {
     list
 }
 
-fn builder(host: &Host) -> ManagedHostBuilder {
+/// How the runners reach this machine (`--ssh`), Localhost otherwise.
+struct SshTarget {
+    endpoint: String,
+    user: String,
+    key: String,
+    host_keys: Vec<String>,
+}
+
+fn builder(host: &Host, ssh: Option<&SshTarget>) -> ManagedHostBuilder {
     let (endpoint, method) = if host.unreachable {
         // nothing listens on port 1: an error outcome (connection refused)
         let key = SecretReference::from("dev/secrets/legacy-ssh-key", None);
@@ -216,6 +244,12 @@ fn builder(host: &Host) -> ManagedHostBuilder {
             "127.0.0.1:1",
             ConnectionMethod::Ssh2(Ssh2Auth::key("deploy", key)),
         )
+    } else if let Some(ssh) = ssh {
+        let mut auth = Ssh2Auth::key(&ssh.user, SecretReference::from(&ssh.key, None));
+        if !ssh.host_keys.is_empty() {
+            auth = auth.with_host_key(Ssh2HostKey::Fingerprints(ssh.host_keys.clone()));
+        }
+        (ssh.endpoint.as_str(), ConnectionMethod::Ssh2(auth))
     } else {
         (
             "localhost",
@@ -366,6 +400,18 @@ struct Args {
     url: String,
     hosts: u32,
     run: bool,
+    password_file: String,
+    single_pool: bool,
+    ssh: Option<SshTarget>,
+    agents: Option<Agents>,
+}
+
+/// Proactive hosts, one regops agent each (`--agents`).
+struct Agents {
+    count: u32,
+    endpoint: String,
+    ca_file: String,
+    server_name: Option<String>,
 }
 
 fn args() -> anyhow::Result<Args> {
@@ -373,24 +419,76 @@ fn args() -> anyhow::Result<Args> {
         url: "http://127.0.0.1:8080".into(),
         hosts: 3000,
         run: true,
+        password_file: "dev/secrets/bootstrap-admin".into(),
+        single_pool: false,
+        ssh: None,
+        agents: None,
     };
+    let (mut ssh, mut ssh_user, mut ssh_key, mut host_keys) = (None, None, None, Vec::new());
+    let (mut agents, mut endpoint, mut ca_file, mut server_name) = (None, None, None, None);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
+        let mut value = || {
+            args.next()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("{arg} needs a value"))
+        };
         match arg.as_str() {
-            "--hosts" => parsed.hosts = args.next().unwrap_or_default().parse()?,
-            "--url" => parsed.url = args.next().unwrap_or_default(),
+            "--hosts" => parsed.hosts = value()?.parse()?,
+            "--url" => parsed.url = value()?,
             "--no-run" => parsed.run = false,
-            other => anyhow::bail!("unknown argument {other} (--hosts N, --url URL, --no-run)"),
+            "--password-file" => parsed.password_file = value()?,
+            "--single-pool" => parsed.single_pool = true,
+            "--ssh" => ssh = Some(value()?),
+            "--ssh-user" => ssh_user = Some(value()?),
+            "--ssh-key" => ssh_key = Some(value()?),
+            "--host-key" => host_keys.push(value()?),
+            "--agents" => agents = Some(value()?.parse::<u32>()?),
+            "--endpoint" => endpoint = Some(value()?),
+            "--ca-file" => ca_file = Some(value()?),
+            "--server-name" => server_name = Some(value()?),
+            other => anyhow::bail!(
+                "unknown argument {other} (--hosts N, --url URL, --no-run, --password-file PATH, \
+                 --single-pool, --ssh ADDR:PORT, --ssh-user USER, --ssh-key PATH, --host-key FP, \
+                 --agents N, --endpoint URL, --ca-file PATH, --server-name NAME)"
+            ),
         }
     }
     anyhow::ensure!(parsed.hosts >= 1, "--hosts must be at least 1");
+    match (ssh, ssh_user, ssh_key) {
+        (Some(endpoint), Some(user), Some(key)) => {
+            parsed.ssh = Some(SshTarget {
+                endpoint,
+                user,
+                key,
+                host_keys,
+            })
+        }
+        (None, None, None) => {
+            anyhow::ensure!(host_keys.is_empty(), "--host-key needs --ssh");
+        }
+        _ => anyhow::bail!("--ssh, --ssh-user and --ssh-key go together"),
+    }
+    match (agents, endpoint, ca_file) {
+        (Some(0), ..) | (None, None, None) => {}
+        (Some(count), Some(endpoint), Some(ca_file)) => {
+            parsed.agents = Some(Agents {
+                count,
+                endpoint,
+                ca_file,
+                server_name,
+            })
+        }
+        _ => anyhow::bail!("--agents needs --endpoint and --ca-file"),
+    }
     Ok(parsed)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = args()?;
-    let password = std::fs::read_to_string("dev/secrets/bootstrap-admin")?;
+    let password = std::fs::read_to_string(&args.password_file)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", args.password_file))?;
     let mut client = RegencyClient::connect(args.url.clone()).await?;
     let mut login = api::LoginRequest::new();
     login.set_username("admin");
@@ -422,7 +520,7 @@ async fn main() -> anyhow::Result<()> {
             name: (*name).into(),
             default_connection_method: None,
             global_vars: None,
-            pool: pool.map(str::to_string),
+            pool: pool.filter(|_| !args.single_pool).map(str::to_string),
         }));
     }
     for (name, yaml) in [
@@ -467,13 +565,16 @@ async fn main() -> anyhow::Result<()> {
         items.push(CatalogBody::Hostdef(HostDef {
             source_id: SOURCE.into(),
             host_id: host.id.clone(),
-            builder: builder(host),
+            builder: builder(host, args.ssh.as_ref()),
             inventories: host.inventories.clone(),
             labels: host.labels.clone(),
             pool: None,
         }));
     }
     sync_catalog(&mut client, &token, items).await?;
+    if let Some(agents) = &args.agents {
+        prepare_agents(&mut client, &token, agents).await?;
+    }
     sync_orders(&mut client, &token).await?;
 
     if args.run {
@@ -488,6 +589,155 @@ async fn main() -> anyhow::Result<()> {
         println!("first Assess sent (every host, its effective expected state)");
     }
     Ok(())
+}
+
+/// Proactive hosts: one regops agent each, set up under `{ROOT}/agents/`.
+async fn prepare_agents(
+    client: &mut RegencyClient<Channel>,
+    token: &str,
+    agents: &Agents,
+) -> anyhow::Result<()> {
+    let repo = Path::new(ROOT).join("agents-repo");
+    std::fs::create_dir_all(repo.join("states"))?;
+    let mut ids = BTreeSet::new();
+    let mut issued = 0;
+    for n in 1..=agents.count {
+        let region = REGIONS[(n as usize) % REGIONS.len()];
+        let short: String = region.split('-').map(|p| &p[..1]).collect();
+        let id = format!("regops-{short}-{n:04}");
+        let host = Host {
+            id: id.clone(),
+            inventories: BTreeSet::new(),
+            labels: BTreeMap::new(),
+            unreachable: false,
+        };
+        prepare_files(&host)?;
+        // a third of them also check the web layer, a third the database one
+        let layers: &[&str] = match n % 3 {
+            0 => &[BASELINE, WEB],
+            1 => &[BASELINE, DB],
+            _ => &[BASELINE],
+        };
+        let mut state = String::from("---\nAttributes:\n");
+        for layer in layers {
+            let body = layer.split_once("Attributes:\n").map_or("", |(_, b)| b);
+            state.push_str(body);
+        }
+        // regops reads it as is: no host variables
+        let state = state.replace("{{ host }}", &id);
+        ExpectedState::from_raw_yaml(&state)
+            .map_err(|e| anyhow::anyhow!("expected state of {id}: {e:?}"))?;
+        write_if_changed(&repo.join("states").join(format!("{id}.yaml")), &state)?;
+
+        let dir = Path::new(ROOT).join("agents").join(&id);
+        std::fs::create_dir_all(dir.join("spool"))?;
+        // one agent in four remediates (regops Enforce = Reach)
+        let mode = if n % 4 == 0 { "Enforce" } else { "Assess" };
+        let server_name = agents
+            .server_name
+            .as_ref()
+            .map(|name| format!("server_name = {name:?}\n"))
+            .unwrap_or_default();
+        let config = format!(
+            r#"# regops agent of the dev dataset (backend/examples/dataset.rs, dev/run_homelab)
+Reporting = "Regency"
+
+[Git]
+repo = "{repo}"
+branch = "main"
+local_path = "{dir}/repo"
+expected_state_path = "states/{id}.yaml"
+
+[SystemIntegration]
+log_level = "Info"
+log_format = "Raw"
+
+[Behavior]
+mode = "{mode}"
+interval_sec = 60
+auto_update = false
+
+[HostLock]
+path = "{ROOT}/locks/{id}"
+
+[Regency]
+endpoint = "{endpoint}"
+host_id = "{id}"
+{server_name}ca_cert_path = "{ca}"
+tls_mode = "BuiltInCa"
+cert_path = "{dir}/client.pem"
+key_path = "{dir}/client.key"
+enrollment_token_path = "{dir}/enrollment.token"
+spool_dir = "{dir}/spool"
+"#,
+            repo = repo.display(),
+            dir = dir.display(),
+            endpoint = agents.endpoint,
+            ca = agents.ca_file,
+        );
+        write_if_changed(&dir.join("config.toml"), &config)?;
+        // the token only serves the first enrollment; then regops renews
+        // its certificate itself
+        if !dir.join("client.pem").exists() {
+            let mut request = api::IssueEnrollmentTokenRequest::new();
+            request.set_host_id(id.as_str());
+            request.set_ttl_sec(86_400);
+            let response = client
+                .issue_enrollment_token(authed(request, token))
+                .await?
+                .into_inner();
+            write_secret(&dir.join("enrollment.token"), &response.token().to_string())?;
+            issued += 1;
+        }
+        ids.insert(id);
+    }
+    // agents of a larger previous run: their state files go (the agents
+    // themselves are only started by dev/run_homelab, from the configs)
+    for entry in std::fs::read_dir(repo.join("states"))? {
+        let path = entry?.path();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if !ids.contains(stem) {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    for entry in std::fs::read_dir(Path::new(ROOT).join("agents"))? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if path.is_dir() && !ids.contains(name) {
+            std::fs::remove_dir_all(&path)?;
+        }
+    }
+    println!(
+        "{} regops agents prepared under {ROOT}/agents ({issued} enrollment tokens issued)",
+        agents.count
+    );
+    Ok(())
+}
+
+fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
+    if std::fs::read_to_string(path).ok().as_deref() == Some(content) {
+        return Ok(());
+    }
+    std::fs::write(path, content)
+}
+
+/// Written readable by its owner only.
+fn write_secret(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(content.as_bytes())
 }
 
 /// Upsert the items whose JSON differs from the catalog, delete the

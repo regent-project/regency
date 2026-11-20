@@ -1,0 +1,892 @@
+#!/usr/bin/env bash
+# Run your local regency build on a three-machine test bench (development
+# only):
+#
+#   - "inference" (default 192.168.1.40): regency, installed as the
+#     all-in-one package (every service, RabbitMQ, CouchDB);
+#   - "managed" (default 192.168.1.50): every simulated managed host of the
+#     dataset. Two thirds are passive hosts, reached by inference's runner
+#     over SSH; one third are proactive hosts, each with its own regops agent
+#     running on "managed" and reporting to inference's endpoint;
+#   - this machine: builds, deploys, drives both over SSH; you use the web UI
+#     from here (http://<inference>:8080).
+#
+# Steps:
+#   1. build the release binaries, the web client and the
+#      regency-all-in-one .deb of this checkout;
+#   2. deploy it to inference with reg (install.sh --package, served to
+#      inference by a temporary HTTP server on this machine): the first
+#      time, this also installs RabbitMQ and CouchDB there;
+#   3. give inference's runner an SSH key (generated there, never leaves it),
+#      fetch inference's built-in CA, and authorize the key on "managed"
+#      (~/.ssh/authorized_keys of the managed user, from inference only);
+#   4. copy the dataset loader and regops to "managed"
+#      (/tmp/regency-dev/bin/) and run the loader THERE, so the hosts' files,
+#      locks, the agents' configurations and their Git repository are all
+#      under /tmp/regency-dev/ on "managed"; it loads the dataset
+#      (backend/examples/dataset.rs) into inference's regency: passive hosts
+#      at <managed>:22 (host key fingerprints checked by the runner), one
+#      runner pool;
+#   5. run the regops agents on "managed" (logs there, in
+#      /tmp/regency-dev/logs/agents/) until Ctrl-C, which stops them. Until
+#      regops can take its expected state from regency (D23), they show as
+#      unassigned hosts.
+#
+#   dev/run_managed [options]          (from anywhere)
+#
+#   --inventory FILE  reg inventory of inference (one host, sudo allowed)
+#                     [REGENCY_INFERENCE_INVENTORY]
+#                     (default: ../homelab/homelab_inventory.yaml next to regency/)
+#   --inference ADDR  inference's address (default: its Endpoint in the inventory)
+#   --managed ADDR    the managed machine's address (default 192.168.1.50)
+#                     [REGENCY_MANAGED]
+#   --managed-user U  account on "managed" that the managed hosts use: this
+#                     machine logs in as U with your SSH key, so does
+#                     inference's runner with its own (default: managed)
+#                     [REGENCY_MANAGED_USER]
+#   --privilege P     reg privilege escalation on inference: WithSudo or
+#                     WithSudoRs (default WithSudoRs: Ubuntu 25.10+'s sudo)
+#                     [REGENCY_INFERENCE_PRIVILEGE]
+#   --hosts N         hosts of the dataset (default: the most "managed" can
+#                     run, measured, see --capacity; each run of a passive
+#                     host is one SSH connection to "managed")
+#   --agents N        how many of them are regops agents (default a third;
+#                     one regops process each on "managed")
+#   --capacity        only measure what "managed" can run and print it (one
+#                     regops agent and a few SSH sessions for about a minute):
+#                     the most hosts with a third of agents, the most passive
+#                     hosts besides --agents N, and the limiting resource
+#   --no-capacity     skip that measurement (default --hosts: 1000)
+#   --regops FILE     regops binary (default: built from ../regops)
+#   --jobs N          cargo build jobs (default 2: release builds use lto, which
+#                     needs a lot of memory per job)
+#   --port N          port of the temporary HTTP server (default 8765)
+#   --no-build        deploy the last built package (target/debian/)
+#   --no-deploy       do not build nor deploy (keep what inference runs)
+#   --no-dataset      do not load the dataset
+#   --no-agents       do not start the regops agents (stops those running)
+#   --wipe            start from scratch: on inference, purge regency,
+#                     RabbitMQ and CouchDB with all their data, configuration
+#                     and secrets (Erlang and the apt repositories stay), then
+#                     install again; on "managed", delete /tmp/regency-dev
+#                     (the agents' certificates belong to the old CA). The
+#                     new admin password is saved in dev/secrets/homelab-admin.
+#                     Asks for confirmation (--yes: does not)
+#   -h, --help        this help
+#
+# Needs, on this machine: reg, cargo-deb, trunk, SSH key access to
+# <managed-user>@<managed> (ssh-copy-id), and the web UI's admin password in
+# dev/secrets/homelab-admin (fetched from inference when missing). On "managed": sshd with
+# dev/homelab/sshd-regency-dev.conf installed (the runner opens many
+# connections at once; the script prints how), git, flock (util-linux), and
+# a glibc as recent as this machine's (the binaries are built here). See
+# dev/README.md.
+set -euo pipefail
+
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+inventory="${REGENCY_INFERENCE_INVENTORY:-$root/../homelab/homelab_inventory.yaml}"
+privilege="${REGENCY_INFERENCE_PRIVILEGE:-WithSudoRs}"
+managed="${REGENCY_MANAGED:-192.168.1.50}"
+managed_user="${REGENCY_MANAGED_USER:-managed}"
+inference=""
+hosts=""
+agents=""
+capacity=1
+capacity_only=0
+regops="$root/../regops/target/release/regops"
+jobs=2
+port=8765
+build=1
+deploy=1
+dataset=1
+start_agents=1
+wipe=0
+yes=0
+while (($#)); do
+  arg=$1
+  shift
+  case "$arg" in
+    --inventory|--inference|--managed|--managed-user|--privilege|--regops)
+      [[ -n ${1:-} ]] || { echo "$arg needs a value" >&2; exit 2; }
+      case "$arg" in
+        --inventory) inventory=$1 ;;
+        --inference) inference=$1 ;;
+        --managed) managed=$1 ;;
+        --managed-user) managed_user=$1 ;;
+        --privilege) privilege=$1 ;;
+        --regops) regops=$1 ;;
+      esac
+      shift ;;
+    --agents)
+      [[ ${1:-} =~ ^[0-9]+$ ]] || { echo "$arg needs a number" >&2; exit 2; }
+      agents=$1
+      shift ;;
+    --hosts|--jobs|--port)
+      [[ ${1:-} =~ ^[1-9][0-9]*$ ]] || { echo "$arg needs a positive number" >&2; exit 2; }
+      case "$arg" in
+        --hosts) hosts=$1 ;;
+        --jobs) jobs=$1 ;;
+        --port) port=$1 ;;
+      esac
+      shift ;;
+    --no-build) build=0 ;;
+    --no-deploy) deploy=0; build=0 ;;
+    --no-dataset) dataset=0 ;;
+    --no-agents) start_agents=0 ;;
+    --wipe) wipe=1 ;;
+    --yes) yes=1 ;;
+    --capacity) capacity_only=1 ;;
+    --no-capacity) capacity=0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
+  esac
+done
+case "$privilege" in
+  WithSudo|WithSudoRs) ;;
+  *) echo "--privilege: WithSudo or WithSudoRs" >&2; exit 2 ;;
+esac
+if [[ -n $hosts && -n $agents ]] && (( agents >= hosts )); then
+  echo "--agents must be less than --hosts" >&2; exit 2
+fi
+if [[ $capacity_only == 1 && $capacity == 0 ]]; then
+  echo "--capacity and --no-capacity exclude each other" >&2; exit 2
+fi
+if [[ $wipe == 1 ]]; then
+  [[ $deploy == 1 ]] || { echo "--wipe reinstalls: not with --no-deploy" >&2; exit 2; }
+  [[ $dataset == 1 ]] || { echo "--wipe empties regency: not with --no-dataset" >&2; exit 2; }
+fi
+
+cd "$root"
+logs=dev/logs
+mkdir -p "$logs"
+say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# on "managed": the dataset's fixed root (backend/examples/dataset.rs)
+remote=/tmp/regency-dev
+
+work=$(mktemp -d)
+server=""
+agents_running=0
+
+# m CMD...: run a command on "managed" (one shared SSH connection); the
+# arguments are single-quoted for the remote shell (POSIX, any login shell)
+m() {
+  local a q="" sq="'\\''"
+  for a; do q+="'${a//\'/$sq}' "; done
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=auto \
+    -o ControlPath="$work/ssh-%C" -o ControlPersist=120 \
+    "$managed_user@$managed" "$q"
+}
+# m_sh SCRIPT [ARG...]: run a bash script on "managed"
+m_sh() { local script=$1; shift; m bash -c "$script" bash "$@"; }
+# m_put LOCAL REMOTE [MODE]: copy a file to "managed" when it differs
+m_put() {
+  local sum
+  sum=$(sha256sum "$1" | cut -d' ' -f1)
+  if [[ $(m_sh 'sha256sum "$1" 2>/dev/null | cut -d" " -f1' "$2") != "$sum" ]]; then
+    m_sh 'mkdir -p "$(dirname "$1")" && cat > "$1.tmp" && chmod "$2" "$1.tmp" && mv -f "$1.tmp" "$1"' \
+      "$2" "${3:-0644}" < "$1"
+  fi
+}
+stop_agents() {
+  m_sh 'f=$1/agents.pids; [ -f "$f" ] || exit 0
+        xargs -r kill -TERM < "$f" 2>/dev/null || true; rm -f "$f"' "$remote" 2>/dev/null || true
+}
+
+# regops: built from ../regops unless --regops, then copied to "managed"
+ensure_regops() {
+  if [[ $regops == "$root/../regops/target/release/regops" ]] && [[ $build == 1 || ! -x $regops ]]; then
+    say "building regops (../regops, release)"
+    (cd "$root/../regops" && cargo build --release -j "$jobs")
+  fi
+  [[ -x $regops ]] || die "no regops binary at $regops (--regops)"
+}
+
+# --- capacity of "managed" ------------------------------------------------------
+# What one simulated host costs there, measured, against what the machine has:
+#   - a proactive host = one regops process: peak memory, threads, CPU per
+#     pass, disk (clone, spool) and log growth, from one real agent running
+#     standalone for a while (5 s passes) on a host like the dataset's;
+#   - a passive host = files + the SSH sessions of inference's runner: CPU
+#     per session (a full SSH connection, the host lock, a few commands),
+#     memory per open session, times the dataset's order rates.
+# Budgets keep a margin for the rest of the machine (see `capacity_report`).
+# Prints the report; sets cap_hosts (a third of agents, or besides --agents)
+# and cap_agents.
+cap_hosts=""
+cap_agents=""
+capacity_probe='
+  set -eu
+  root=$1; dur=$2
+  p=$root/capacity
+  rm -rf "$root/capacity"
+  mkdir -p "$p/host/etc/ssh" "$p/host/etc/nginx" "$p/host/etc/postgresql" "$p/repo/states" \
+    "$p/agent/spool" "$p/locks"
+  # one host'"'"'s files, as backend/examples/dataset.rs writes them
+  h=$p/host/etc
+  printf "Managed by regency: unauthorized access is prohibited\n" > "$h/motd"
+  printf "Port 22\nPasswordAuthentication no\n" > "$h/ssh/sshd_config"
+  printf "vm.swappiness = 10\nnet.ipv4.ip_forward = 0\n" > "$h/sysctl.conf"
+  printf "worker_processes auto;\nserver_tokens off;\n" > "$h/nginx/nginx.conf"
+  printf "max_connections = 200\nshared_buffers = 1GB\n" > "$h/postgresql/postgresql.conf"
+  printf -- "-A INPUT -p tcp --dport 22 -j ACCEPT\n" > "$h/firewall.rules"
+  echo "passive_disk_kb=$(du -sk "$p/host" | cut -f1)"
+  echo "passive_inodes=$(find "$p/host" | wc -l)"
+
+  # the machine
+  echo "nproc=$(nproc)"
+  awk "/^MemTotal:/ {print \"mem_total_kb=\" \$2} /^MemAvailable:/ {print \"mem_avail_kb=\" \$2}" /proc/meminfo
+  echo "tmp_fstype=$(findmnt -no FSTYPE -T "$root" 2>/dev/null || echo unknown)"
+  df -Pk "$root" | awk "NR == 2 {print \"tmp_avail_kb=\" \$4}"
+  df -Pi "$root" | awk "NR == 2 {print \"tmp_inodes_avail=\" (\$4 ~ /^[0-9]+$/ ? \$4 : 0)}"
+  echo "ulimit_u=$(ulimit -u)"
+  echo "tasks_max=$(systemctl show -p TasksMax --value "user-$(id -u).slice" 2>/dev/null || echo infinity)"
+  echo "threads_max=$(cat /proc/sys/kernel/threads-max)"
+  echo "pid_max=$(cat /proc/sys/kernel/pid_max)"
+  echo "user_tasks=$(ps -L -u "$(id -u)" --no-headers | wc -l)"
+  echo "clk_tck=$(getconf CLK_TCK)"
+
+  # one regops agent, standalone, checking that host every 5 s
+  cat > "$p/repo/states/probe.yaml" <<EOF
+---
+Attributes:
+  - Name: login banner
+    Privilege: !None
+    Timeout: 20s
+    Detail: !LineInFile
+      FilePath: "$h/motd"
+      State: !Present
+        Create: true
+      Line: !Raw "Managed by regency: unauthorized access is prohibited"
+  - Name: no root login over SSH
+    Privilege: !None
+    Timeout: 20s
+    Detail: !LineInFile
+      FilePath: "$h/ssh/sshd_config"
+      State: !Absent
+        FileMustExistAnyway: false
+      Line: !Raw "PermitRootLogin yes"
+  - Name: swappiness
+    Privilege: !None
+    Timeout: 20s
+    Detail: !LineInFile
+      FilePath: "$h/sysctl.conf"
+      State: !Present
+        Create: true
+      Line: !Raw "vm.swappiness = 10"
+  - Name: nginx workers
+    Privilege: !None
+    Timeout: 20s
+    Detail: !LineInFile
+      FilePath: "$h/nginx/nginx.conf"
+      State: !Present
+        Create: true
+      Line: !Raw "worker_processes auto;"
+  - Name: hide nginx version
+    Privilege: !None
+    Timeout: 20s
+    Detail: !LineInFile
+      FilePath: "$h/nginx/nginx.conf"
+      State: !Present
+        Create: true
+      Line: !Raw "server_tokens off;"
+EOF
+  git -C "$p/repo" init -q -b main
+  git -C "$p/repo" add -A
+  git -C "$p/repo" -c user.name=regency-dev -c user.email=regency-dev@localhost commit -q -m probe
+  cat > "$p/agent/config.toml" <<EOF
+Reporting = "None"
+
+[Git]
+repo = "$p/repo"
+branch = "main"
+local_path = "$p/agent/repo"
+expected_state_path = "states/probe.yaml"
+
+[SystemIntegration]
+log_level = "Info"
+log_format = "Raw"
+
+[Behavior]
+mode = "Assess"
+interval_sec = 5
+auto_update = false
+
+[HostLock]
+path = "$p/locks/probe"
+EOF
+  "$root/bin/regops" --config-path "$p/agent/config.toml" run > "$p/agent.log" 2>&1 < /dev/null &
+  pid=$!
+  ticks() { awk "{print \$14 + \$15}" "/proc/$pid/stat"; }
+  sleep 3   # start, clone, first pass
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "probe_error=regops stopped at once: $(tail -n 3 "$p/agent.log" | tr "\n" " ")"
+    exit 0
+  fi
+  c0=$(ticks); s0=$(stat -c %s "$p/agent.log")
+  sleep "$dur"
+  c1=$(ticks); s1=$(stat -c %s "$p/agent.log")
+  echo "agent_rss_kb=$(awk "/^VmHWM:/ {print \$2}" "/proc/$pid/status")"
+  echo "agent_threads=$(awk "/^Threads:/ {print \$2}" "/proc/$pid/status")"
+  kill -TERM "$pid"; wait "$pid" 2>/dev/null || true
+  echo "agent_cpu_ticks=$((c1 - c0))"
+  echo "agent_passes=$((dur / 5))"
+  echo "agent_log_bytes=$((s1 - s0))"
+  echo "agent_errors=$(grep -ci error "$p/agent.log" || true)"
+  echo "agent_disk_kb=$(du -sk "$p/agent" | cut -f1)"
+  echo "agent_inodes=$(find "$p/agent" | wc -l)"
+'
+assess_capacity() {
+  local facts=$work/capacity.facts sessions=20 open=8
+  say "measuring what $managed can run (about a minute: one regops agent, then SSH sessions)"
+  stop_agents   # the previous run's agents would hide memory
+  m_put "$regops" "$remote/bin/regops" 0755
+  local unresolved
+  unresolved=$(m_sh 'ldd "$1" 2>&1 | grep "not found" || true' "$remote/bin/regops")
+  [[ -z $unresolved ]] || die "regops built here does not run on $managed (glibc too old?): $unresolved"
+  m_sh "$capacity_probe" "$remote" 30 > "$facts"
+  if grep -q '^probe_error=' "$facts"; then
+    die "capacity: $(sed -n 's/^probe_error=//p' "$facts")"
+  fi
+
+  # passive hosts: what inference's runner does, one full connection per job
+  local p=$remote/capacity cmd b0 b1 b2 t0 t1 r0 r1 i
+  cmd="flock -s $p/locks/passive sh -c 'for f in motd ssh/sshd_config sysctl.conf nginx/nginx.conf postgresql/postgresql.conf firewall.rules; do sh -c \"grep -c . $p/host/etc/\$f\" >/dev/null; done'"
+  ssh_full() {
+    ssh -n -o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=no -o ControlPath=none \
+      "$managed_user@$managed" "$1"
+  }
+  # busy CPU ticks of the whole machine (user nice system irq softirq steal)
+  busy() { m awk '/^cpu / {print $2 + $3 + $4 + $7 + $8 + $9}' /proc/stat; }
+  b0=$(busy); sleep 5; b1=$(busy)   # background activity
+  t0=$(date +%s.%N)
+  for ((i = 0; i < sessions; i++)); do ssh_full "$cmd" || die "capacity: SSH session to $managed failed"; done
+  t1=$(date +%s.%N)
+  b2=$(busy)
+  {
+    echo "idle_busy_ticks=$((b1 - b0))"
+    echo "idle_seconds=5"
+    echo "session_busy_ticks=$((b2 - b1))"
+    echo "sessions=$sessions"
+    echo "session_wall=$(awk -v a="$t0" -v b="$t1" 'BEGIN {print b - a}')"
+  } >> "$facts"
+  # memory of open sessions (sshd's processes, the user's shells)
+  local rss='ps -eo rss=,user=,comm= | awk -v u="$1" '"'"'$3 ~ /^sshd/ || $2 == u {s += $1} END {print s + 0}'"'"
+  r0=$(m_sh "$rss" "$managed_user")
+  local pids=()
+  for ((i = 0; i < open; i++)); do ssh_full "sleep 8" & pids+=($!); done
+  sleep 4
+  r1=$(m_sh "$rss" "$managed_user")
+  wait "${pids[@]}" || true
+  echo "session_rss_kb=$(( (r1 - r0) / open ))" >> "$facts"
+  m rm -rf "$remote/capacity"
+
+  local result
+  result=$(capacity_report "$facts") || die "capacity: could not compute (facts in $facts)"
+  printf '%s\n' "$result" | sed '/^CAPACITY /d'
+  read -r cap_hosts cap_agents < <(printf '%s\n' "$result" | sed -n 's/^CAPACITY //p')
+  [[ $cap_hosts =~ ^[0-9]+$ && $cap_agents =~ ^[0-9]+$ ]] || die "capacity: no result"
+}
+
+# capacity_report FACTS: the report, then "CAPACITY <hosts> <agents>"
+capacity_report() {
+  AGENTS="$agents" python3 -I - "$1" <<'PY'
+import os, sys
+
+f = {}
+for line in open(sys.argv[1]):
+    key, _, value = line.strip().partition("=")
+    if key:
+        f[key] = value
+
+def num(key):
+    try:
+        return float(f[key])
+    except (KeyError, ValueError):
+        return None
+
+# Assumptions (dev/run_managed, backend/examples/dataset.rs)
+RUNNER_CONCURRENCY = 16      # jobs inference's runner runs at once (SSH sessions)
+AGENT_INTERVAL = 60.0        # the dataset's agents: one pass a minute
+# passive host: SSH sessions an hour from the dataset's orders: baseline every
+# 600 s (every host), web every 300 s (web + api: 38 % of hosts), db every
+# 15 min (5 %)
+SESSIONS_PER_HOUR = 3600 / 600 + 0.38 * 3600 / 300 + 0.05 * 4
+REGENCY_FACTOR = 1.5         # agent reporting to regency (TLS, gRPC, live view, spool) vs standalone
+MEM_SHARE, CPU_SHARE, DISK_SHARE = 0.80, 0.60, 0.80
+MEM_RESERVE_KB = 256 * 1024  # the rest of the machine
+
+tck = num("clk_tck") or 100
+nproc = num("nproc")
+tmpfs = f.get("tmp_fstype") == "tmpfs"
+
+# a proactive host (one regops agent)
+agent_rss = num("agent_rss_kb") * REGENCY_FACTOR
+passes = max(num("agent_passes"), 1)
+agent_cpu = num("agent_cpu_ticks") / tck / passes * REGENCY_FACTOR / AGENT_INTERVAL
+log_day_kb = num("agent_log_bytes") / passes * (86400 / AGENT_INTERVAL) / 1024
+agent_disk = num("agent_disk_kb") + log_day_kb + 64   # + certificate, spool, state file
+agent_inodes = num("agent_inodes") + 8
+agent_threads = num("agent_threads")
+
+# a passive host (files + the runner's SSH sessions)
+idle_rate = num("idle_busy_ticks") / num("idle_seconds")
+wall = num("session_wall")
+session_cpu = max((num("session_busy_ticks") - idle_rate * wall) / tck / num("sessions"), 0.002)
+session_wall = wall / num("sessions")
+session_rss = max(num("session_rss_kb"), 1024)
+passive_cpu = session_cpu * SESSIONS_PER_HOUR / 3600
+passive_disk = num("passive_disk_kb")
+passive_inodes = num("passive_inodes")
+
+# budgets
+budgets = {}   # name -> (budget, per agent, per passive host, note)
+mem_budget = num("mem_avail_kb") * MEM_SHARE - MEM_RESERVE_KB - RUNNER_CONCURRENCY * session_rss
+budgets["memory"] = (mem_budget,
+                     agent_rss + (agent_disk if tmpfs else 0),
+                     passive_disk if tmpfs else 0,
+                     f"{num('mem_avail_kb') / 1048576:.1f} GiB available"
+                     + (", /tmp in RAM (tmpfs)" if tmpfs else ""))
+busy_idle = idle_rate / tck
+budgets["CPU"] = (nproc * CPU_SHARE - busy_idle, agent_cpu, passive_cpu,
+                  f"{nproc:.0f} CPUs, {busy_idle:.2f} busy at rest")
+budgets["disk"] = (num("tmp_avail_kb") * DISK_SHARE, agent_disk, passive_disk,
+                   f"{num('tmp_avail_kb') / 1048576:.1f} GiB free on /tmp ({f.get('tmp_fstype')}), agents' logs: 1 day")
+if num("tmp_inodes_avail"):
+    budgets["inodes"] = (num("tmp_inodes_avail") * DISK_SHARE, agent_inodes, passive_inodes,
+                         f"{num('tmp_inodes_avail'):.0f} free on /tmp")
+limits = [num("threads_max") / 2]
+for key in ("ulimit_u", "tasks_max"):
+    if num(key):
+        limits.append(num(key))
+budgets["tasks"] = (min(limits) - num("user_tasks") - 256, agent_threads, 0,
+                    f"limit {min(limits):.0f} for the user (ulimit -u, systemd TasksMax, threads-max)")
+
+def most(per_host):
+    """(hosts, limiting resource) for a per-host cost function."""
+    best = None
+    for name, (budget, a, p, _) in budgets.items():
+        cost = per_host(a, p)
+        if cost <= 0:
+            continue
+        n = max(budget, 0) / cost
+        if best is None or n < best[0]:
+            best = (n, name)
+    return best
+
+def nice(n):
+    n = int(n)
+    return n if n < 100 else n - n % 10
+
+print(f"  one regops agent: {agent_rss / 1024:.0f} MiB (peak, x{REGENCY_FACTOR} for reporting), "
+      f"{agent_threads:.0f} threads, {agent_cpu * 1000:.1f} ms CPU/s, {agent_disk / 1024:.1f} MiB on disk a day")
+print(f"  one passive host: {session_cpu * 1000:.0f} ms CPU per SSH session, "
+      f"{SESSIONS_PER_HOUR:.1f} sessions/h, {session_rss / 1024:.1f} MiB per open session, "
+      f"{passive_disk:.0f} KiB of files")
+for name, (budget, *_ , note) in budgets.items():
+    print(f"  {name:7} {note}")
+if num("agent_errors"):
+    print(f"  (the probe agent logged {num('agent_errors'):.0f} errors: its measure may be off)")
+
+fixed = os.environ.get("AGENTS")
+if fixed:
+    agents = int(fixed)
+    over = [name for name, (budget, a, _, _) in budgets.items() if agents * a > budget]
+    if over:
+        print(f"  {agents} agents exceed: {', '.join(over)}")
+        hosts = agents   # no room for passive hosts
+    else:
+        for name in budgets:
+            budget, a, p, note = budgets[name]
+            budgets[name] = (budget - agents * a, a, p, note)
+        n, limit = most(lambda a, p: p)
+        hosts = agents + nice(n)
+        print(f"  => besides {agents} agents: at most {nice(n)} passive hosts (limited by {limit})")
+else:
+    n, limit = most(lambda a, p: a / 3 + p * 2 / 3)
+    hosts = nice(n)
+    agents = hosts // 3
+    print(f"  => at most {hosts} hosts, of which {agents} regops agents (limited by {limit})")
+    na, la = most(lambda a, p: a)
+    print(f"     (agents only: {nice(na)}, limited by {la})")
+throughput = RUNNER_CONCURRENCY / session_wall * 3600 / SESSIONS_PER_HOUR
+print(f"  note: inference's runner ({RUNNER_CONCURRENCY} jobs at once, {session_wall:.2f} s a session "
+      f"from here) keeps up with at most about {nice(throughput)} passive hosts at these order rates")
+print(f"CAPACITY {hosts} {agents}")
+PY
+}
+
+cleanup() {
+  [[ -n $server ]] && kill "$server" 2>/dev/null || true
+  if [[ $agents_running == 1 ]]; then
+    say "stopping the regops agents on $managed"
+    stop_agents
+  fi
+  ssh -o ControlPath="$work/ssh-%C" -O exit "$managed_user@$managed" >/dev/null 2>&1 || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# --capacity: "managed" only, nothing deployed nor loaded
+if [[ $capacity_only == 1 ]]; then
+  m true 2>/dev/null || die "cannot log in to $managed_user@$managed with an SSH key (once: ssh-copy-id $managed_user@$managed)"
+  missing=$(m_sh 'for c in git flock; do command -v "$c" >/dev/null || printf "%s " "$c"; done')
+  [[ -z $missing ]] || die "missing on $managed: $missing"
+  build=0   # an existing regops binary will do
+  ensure_regops
+  assess_capacity
+  exit 0
+fi
+
+# --- checks -------------------------------------------------------------------
+command -v reg >/dev/null || die "reg not found (cargo install --path ../reg)"
+[[ -f $inventory ]] || die "no inference inventory at $inventory (--inventory)"
+inventory="$(cd "$(dirname "$inventory")" && pwd)/$(basename "$inventory")"
+if [[ -z $inference ]]; then
+  inference=$(sed -n 's/^[[:space:]]*Endpoint:[[:space:]]*"\{0,1\}\([^":]*\).*/\1/p' "$inventory" | head -n 1)
+  [[ -n $inference ]] || die "no Endpoint in $inventory: use --inference"
+fi
+# this machine's address as inference sees it (the deploy's HTTP server)
+self=$(ip -4 route get "$inference" 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1)
+[[ -n $self ]] || die "no route to inference ($inference)"
+say "regency on inference ($inference), managed hosts on $managed (user $managed_user)"
+
+m true 2>/dev/null || die "cannot log in to $managed_user@$managed with an SSH key (once: ssh-copy-id $managed_user@$managed)"
+missing=$(m_sh 'for c in git flock sha256sum; do command -v "$c" >/dev/null || printf "%s " "$c"; done')
+[[ -z $missing ]] || die "missing on $managed: $missing(git for the agents' repository, flock for the host locks, D4)"
+
+# sshd on "managed", as inference's runner will see it: its host keys
+fingerprints=()
+while read -r _ fp _; do fingerprints+=("$fp"); done < <(
+  ssh-keyscan -T 5 -t ed25519,ecdsa,rsa "$managed" 2>/dev/null | ssh-keygen -lf - 2>/dev/null)
+(( ${#fingerprints[@]} )) || die "no SSH host key from $managed:22 (ssh-keyscan)"
+if ! m_sh 'grep -qs "regency dev" /etc/ssh/sshd_config.d/*.conf'; then
+  cat >&2 <<EOF
+$(printf '\033[33mWARNING:\033[0m') dev/homelab/sshd-regency-dev.conf is not installed on $managed: its sshd
+will refuse part of the runner's connections (MaxStartups). Once:
+  scp dev/homelab/sshd-regency-dev.conf $managed_user@$managed:/tmp/
+  ssh -t $managed_user@$managed 'sudo install -m 0644 /tmp/sshd-regency-dev.conf /etc/ssh/sshd_config.d/50-regency-dev.conf \\
+    && sudo sed -i s/HOMELAB_ADDRESS/$inference/ /etc/ssh/sshd_config.d/50-regency-dev.conf \\
+    && sudo sshd -t && (sudo systemctl reload ssh || sudo systemctl reload sshd)'
+(OpenSSH < 9.8: remove its PerSourcePenaltyExemptList line.)
+EOF
+fi
+if [[ $wipe == 1 ]]; then
+  printf '\033[1;31m--wipe\033[0m deletes EVERYTHING regency, RabbitMQ and CouchDB hold on inference (%s):\n' "$inference"
+  echo "  packages regency-*, rabbitmq-server, couchdb (purged), /var/lib/regency, /etc/regency,"
+  echo "  /var/lib/rabbitmq, /etc/rabbitmq, /opt/couchdb, /var/lib/couchdb, their logs and users;"
+  echo "  and /tmp/regency-dev on $managed (hosts' files, agents' configurations and certificates)."
+  if [[ $yes == 0 ]]; then
+    [[ -t 0 ]] || die "--wipe needs a confirmation: run it in a terminal, or add --yes"
+    read -r -p "Type the inference address ($inference) to confirm: " answer
+    [[ $answer == "$inference" ]] || die "not confirmed: nothing wiped"
+  fi
+fi
+
+# reg on inference: STATE_FILE LOG_FILE; fails unless compliance is reached
+# (reg exits 0 either way)
+reg_inference() {
+  # from the inventory's directory: its relative paths (credentials) are
+  # relative to where reg starts
+  local log
+  log="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+  (cd "$(dirname "$inventory")" && reg -i "$inventory" -s "$1" -m enforce) > "$log" 2>&1 || true
+  if ! grep -q "Compliance reached" "$2" || grep -q "Failed to reach compliance" "$2"; then
+    sed 's/\x1b\[[0-9;]*m//g' "$2" | grep -E '^\[|ERROR' | tail -n 30 >&2
+    die "reg could not apply $(basename "$1") on inference (full output: $2)"
+  fi
+}
+
+# --- build ----------------------------------------------------------------------
+package=target/debian/regency-all-in-one-dev.deb
+if [[ $build == 1 ]]; then
+  say "building the services, regencyctl and regency-aio (release, $jobs jobs)"
+  cargo build --release -j "$jobs" -p regency-aio -p regencyctl -p scheduler -p runner \
+    -p dbwriter -p backend -p endpoint -p sourcesync
+  say "building the web client (trunk)"
+  # trunk needs a toolchain with the wasm32 std (rustup's stable here)
+  wasm_path="$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin"
+  (cd frontend && PATH="$wasm_path:$PATH" trunk build --release)
+  say "packaging regency-all-in-one"
+  cargo deb --no-build -p regency-aio -o "$package"
+fi
+if [[ $dataset == 1 ]]; then
+  cargo build --release -j "$jobs" -p backend --example dataset
+fi
+measure=0
+[[ $dataset == 1 && $capacity == 1 ]] && measure=1
+if [[ $measure == 1 || ${agents:-1} != 0 ]]; then
+  ensure_regops
+fi
+
+# --- how many hosts ---------------------------------------------------------------
+# measured before anything is wiped or deployed: a machine too small stops here
+if [[ $measure == 1 ]]; then
+  assess_capacity
+  if [[ -z $hosts ]]; then
+    (( cap_hosts > ${agents:-0} )) || die "\"managed\" cannot run ${agents:-0} agents and any passive host (see above; --hosts forces a size)"
+    hosts=$cap_hosts
+    [[ -n $agents ]] || agents=$cap_agents
+    say "dataset sized to $managed: $hosts hosts ($agents regops agents)"
+  elif (( hosts > cap_hosts )) || [[ -z $agents && $((hosts / 3)) -gt $cap_agents ]]; then
+    printf '\033[33mWARNING:\033[0m --hosts %s is more than %s measured (%s hosts): expect swapping, slow or failing jobs\n' \
+      "$hosts" "$managed" "$cap_hosts" >&2
+  fi
+fi
+[[ -n $hosts ]] || hosts=1000
+[[ -n $agents ]] || agents=$((hosts / 3))
+(( agents < hosts )) || die "--agents must be less than --hosts"
+passive=$((hosts - agents))
+
+# --- wipe ---------------------------------------------------------------------------
+if [[ $wipe == 1 ]]; then
+  stop_agents
+  say "deleting /tmp/regency-dev on $managed"
+  m rm -rf /tmp/regency-dev
+  cat > "$work/wipe.yaml" <<'EOF'
+Attributes:
+  - Name: regency, RabbitMQ and CouchDB are gone
+    Privilege: !PRIVILEGE
+    Timeout: 10m
+    Detail: !Command
+      Cmd: |
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        units=$(systemctl list-unit-files --no-legend 'regency*' 2>/dev/null | awk '{print $1}')
+        for u in $units rabbitmq-server.service couchdb.service; do
+          systemctl disable --now "$u" >/dev/null 2>&1 || true
+        done
+        pkgs=$(dpkg-query -W -f='${Package} ${db:Status-Status}\n' 'regency*' rabbitmq-server couchdb 2>/dev/null \
+          | awk '$2 != "not-installed" {print $1}')
+        if [ -n "$pkgs" ]; then
+          echo ">>> Purging $pkgs"
+          # couchdb's debconf answers would be reused by the next install
+          echo PURGE | debconf-communicate couchdb >/dev/null 2>&1 || true
+          apt-get -q -y purge $pkgs >/dev/null
+        fi
+        # what purge leaves: data, generated configuration, secrets, logs
+        rm -rf /var/lib/regency /etc/regency /var/log/regency \
+          /var/lib/rabbitmq /etc/rabbitmq /var/log/rabbitmq \
+          /opt/couchdb /var/lib/couchdb /var/log/couchdb /etc/couchdb
+        # a leftover Erlang node (epmd, beam) would keep RabbitMQ's old state
+        pkill -u rabbitmq >/dev/null 2>&1 || true
+        systemctl stop epmd.socket epmd.service >/dev/null 2>&1 || true
+        for u in regency rabbitmq couchdb; do
+          if getent passwd "$u" >/dev/null; then userdel "$u" >/dev/null 2>&1 || true; fi
+          if getent group "$u" >/dev/null; then groupdel "$u" >/dev/null 2>&1 || true; fi
+        done
+        systemctl daemon-reload
+        echo ">>> inference wiped"
+EOF
+  sed -i "s/!PRIVILEGE/!$privilege/" "$work/wipe.yaml"
+  say "wiping regency, RabbitMQ and CouchDB on inference (reg; output in $logs/inference-wipe.log)"
+  reg_inference "$work/wipe.yaml" "$logs/inference-wipe.log"
+fi
+
+# --- deploy to inference ------------------------------------------------------------
+if [[ $deploy == 1 ]]; then
+  [[ -f $package ]] || die "no package at $package: run without --no-build"
+  cp "$package" "$work/regency-all-in-one.deb"
+  cp install.sh "$work/install.sh"
+  python3 -I -m http.server --bind "$self" --directory "$work" "$port" > "$logs/inference-http.log" 2>&1 &
+  server=$!
+  sleep 1
+  kill -0 "$server" 2>/dev/null || die "the HTTP server could not start on $self:$port (--port), see $logs/inference-http.log"
+
+  # replaces the package even at the same version (apt would skip it), then
+  # the installer sets up RabbitMQ, CouchDB and regency, or resumes
+  cat > "$work/deploy.yaml" <<EOF
+Attributes:
+  - Name: regency dev build is installed
+    Privilege: !$privilege
+    Timeout: 20m
+    Detail: !Command
+      Cmd: |
+        set -e
+        d=\$(mktemp -d); trap 'rm -rf "\$d"' EXIT
+        curl -fsS -o "\$d/regency-all-in-one.deb" http://$self:$port/regency-all-in-one.deb
+        curl -fsS -o "\$d/install.sh" http://$self:$port/install.sh
+        if dpkg-query -W -f='\${Status}' regency-all-in-one 2>/dev/null | grep -q 'ok installed'; then
+          echo ">>> Replacing regency-all-in-one with the dev build"
+          DEBIAN_FRONTEND=noninteractive dpkg -i --force-confold "\$d/regency-all-in-one.deb"
+        fi
+        sh "\$d/install.sh" --package "\$d/regency-all-in-one.deb"
+EOF
+  say "deploying to inference (reg; output in $logs/inference-deploy.log)"
+  reg_inference "$work/deploy.yaml" "$logs/inference-deploy.log"
+  kill "$server" 2>/dev/null || true
+  server=""
+fi
+
+# --- admin password -------------------------------------------------------------------
+# after a wipe (new install, new password) or when we have none: the initial
+# one, generated by the installer (reg's output kept in the temporary
+# directory only)
+if [[ $wipe == 1 || ( $dataset == 1 && ! -s dev/secrets/homelab-admin ) ]]; then
+  cat > "$work/password.yaml" <<EOF
+Attributes:
+  - Name: the initial admin password is shown
+    Privilege: !$privilege
+    Timeout: 30s
+    Detail: !Command
+      Cmd: echo PW-BEGIN; cat /var/lib/regency/secrets/bootstrap-admin; echo; echo PW-END
+EOF
+  reg_inference "$work/password.yaml" "$work/password.log"
+  password=$(sed 's/\x1b\[[0-9;]*m//g' "$work/password.log" | sed -n 's/^\[[^]]*\] *| //p' \
+    | sed -n '/^PW-BEGIN$/,/^PW-END$/p' | sed '1d;$d' | sed '/^$/d' | head -n 1)
+  : > "$work/password.log"
+  [[ -n $password ]] || die "no initial admin password on inference (/var/lib/regency/secrets/bootstrap-admin)"
+  (umask 077; printf '%s\n' "$password" > dev/secrets/homelab-admin)
+  unset password
+  say "admin password saved in dev/secrets/homelab-admin"
+fi
+[[ $dataset == 0 || -s dev/secrets/homelab-admin ]] \
+  || die "the web UI's admin password goes in dev/secrets/homelab-admin"
+
+# --- inference's runner key and CA ---------------------------------------------------
+# every time (cheap), so that --no-deploy also works with a fresh "managed"
+cat > "$work/access.yaml" <<EOF
+Attributes:
+  - Name: the runner has an SSH key for the dev hosts
+    Privilege: !$privilege
+    Timeout: 30s
+    Detail: !Command
+      Cmd: |
+        set -e
+        k=/var/lib/regency/secrets/dev-hosts-ssh-key
+        [ -f "\$k" ] || ssh-keygen -q -t ed25519 -N '' -C regency-dev-hosts -f "\$k"
+        chown regency:regency "\$k" "\$k.pub"; chmod 0600 "\$k"
+        echo "PUBKEY \$(cat "\$k.pub")"
+  - Name: the endpoint's CA certificate is shown
+    Privilege: !$privilege
+    Timeout: 30s
+    Detail: !Command
+      Cmd: echo CA-BEGIN; cat /var/lib/regency/tls/ca.pem; echo CA-END
+EOF
+say "fetching inference's runner key and CA (reg; output in $logs/inference-access.log)"
+reg_inference "$work/access.yaml" "$logs/inference-access.log"
+sed 's/\x1b\[[0-9;]*m//g' "$logs/inference-access.log" > "$work/access.log"
+pubkey=$(sed -n 's/.*PUBKEY \(ssh-ed25519 [A-Za-z0-9+\/=]* regency-dev-hosts\).*/\1/p' "$work/access.log" | tail -n 1)
+[[ -n $pubkey ]] || die "inference's SSH key was not found in $logs/inference-access.log"
+# reg's live view: "[host]     | line"
+sed -n 's/^\[[^]]*\] *| //p' "$work/access.log" \
+  | sed -n '/^CA-BEGIN$/,/^CA-END$/p' | sed '1d;$d' > "$work/ca.pem"
+grep -q "BEGIN CERTIFICATE" "$work/ca.pem" || die "the endpoint's CA was not found in $logs/inference-access.log"
+
+# the runner's key on "managed": from inference only, commands only
+line="from=\"$inference\",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty $pubkey"
+added=$(m_sh '
+  set -e
+  mkdir -p ~/.ssh && chmod 0700 ~/.ssh
+  touch ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys
+  grep -qxF "$1" ~/.ssh/authorized_keys && exit 0
+  t=$(mktemp)
+  grep -v " regency-dev-hosts$" ~/.ssh/authorized_keys > "$t" || true
+  echo "$1" >> "$t"
+  cat "$t" > ~/.ssh/authorized_keys; rm -f "$t"
+  echo added' "$line")
+[[ $added == added ]] && say "inference's runner key is authorized on $managed (~$managed_user/.ssh/authorized_keys, from $inference only)"
+
+# --- binaries on "managed" ------------------------------------------------------------
+say "copying the dataset loader and regops to $managed:$remote/bin/"
+m_put "$work/ca.pem" "$remote/agents/ca.pem"
+to_check=()
+if [[ $dataset == 1 ]]; then
+  m_put target/release/examples/dataset "$remote/bin/dataset" 0755
+  to_check+=("$remote/bin/dataset")
+fi
+if (( agents > 0 )); then
+  m_put "$regops" "$remote/bin/regops" 0755
+  to_check+=("$remote/bin/regops")
+fi
+if (( ${#to_check[@]} )); then
+  # built here: "managed" needs a glibc at least as recent as this machine's
+  unresolved=$(m_sh 'for f; do ldd "$f" 2>&1 | grep "not found" | sed "s|^|$(basename "$f"): |"; done' "${to_check[@]}")
+  [[ -z $unresolved ]] || die "binaries built here do not run on $managed (glibc too old, or missing libraries):
+$unresolved"
+fi
+
+# --- dataset (loaded from "managed": its files are written there) ---------------------
+url="http://$inference:8080"
+for _ in $(seq 60); do
+  curl -fsS -o /dev/null --max-time 5 "$url/" && break
+  sleep 2
+done
+curl -fsS -o /dev/null --max-time 5 "$url/" || die "inference's web UI does not answer at $url"
+if [[ $dataset == 1 ]]; then
+  say "loading the dataset ($passive hosts over SSH at $managed:22, $agents regops agents), from $managed"
+  dataset_args=(--url "$url" --hosts "$passive" --password-file /dev/stdin --single-pool
+    --ssh "$managed:22" --ssh-user "$managed_user" --ssh-key /var/lib/regency/secrets/dev-hosts-ssh-key
+    --agents "$agents")
+  for fp in "${fingerprints[@]}"; do dataset_args+=(--host-key "$fp"); done
+  if (( agents > 0 )); then
+    dataset_args+=(--endpoint "https://$inference:8443" --ca-file "$remote/agents/ca.pem" --server-name regency)
+  fi
+  # the admin password goes through SSH's stdin, never on a command line
+  if ! m "$remote/bin/dataset" "${dataset_args[@]}" < dev/secrets/homelab-admin 2>&1 \
+      | tee -a "$logs/dataset.log"; then
+    die "the dataset could not be loaded, see $logs/dataset.log"
+  fi
+fi
+say "ready: $url (admin / dev/secrets/homelab-admin); logs on inference: journalctl -u regency-all-in-one -f"
+
+# --- regops agents on "managed" ---------------------------------------------------------
+stop_agents   # those of a previous run, if it did not stop them
+if (( agents == 0 )) || [[ $start_agents == 0 ]]; then
+  exit 0
+fi
+# the agents pull their expected state from this repository (regops is GitOps)
+m_sh '
+  set -e
+  repo=$1/agents-repo
+  [ -d "$repo/states" ] || { echo "no agent states in $repo: run without --no-dataset once" >&2; exit 1; }
+  [ -d "$repo/.git" ] || git -C "$repo" init -q -b main
+  git -C "$repo" add -A
+  if ! git -C "$repo" rev-parse -q --verify HEAD >/dev/null || ! git -C "$repo" diff --cached --quiet; then
+    git -C "$repo" -c user.name=regency-dev -c user.email=regency-dev@localhost \
+      commit -q -m "dev dataset: the agents'"'"' expected states"
+  fi' "$remote" || die "the agents' Git repository on $managed could not be prepared"
+
+# Runs on "managed": starts one regops per configuration, records their pids,
+# and stops them all when its stdin closes (this script exits or dies: the
+# SSH session ends) or when they have all stopped.
+launcher='
+  root=$1
+  pidfile=$root/agents.pids
+  mkdir -p "$root/logs/agents"
+  configs=("$root"/agents/*/config.toml)
+  [ -f "${configs[0]}" ] || { echo "no agent configuration under $root/agents: run without --no-dataset once" >&2; exit 1; }
+  pids=()
+  : > "$pidfile"
+  for config in "${configs[@]}"; do
+    id=$(basename "$(dirname "$config")")
+    "$root/bin/regops" --config-path "$config" run >> "$root/logs/agents/$id.log" 2>&1 < /dev/null &
+    pids+=($!)
+    echo $! >> "$pidfile"
+    sleep 0.2   # spreads enrollments and passes
+  done
+  echo "${#pids[@]} regops agents running"
+  # (the session is its own process group: this also ends `cat` below)
+  ( alive() { for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && return 0; done; return 1; }
+    while alive; do sleep 5; done
+    echo "every regops agent has stopped (see $root/logs/agents/)"; rm -f "$pidfile"; kill -TERM 0 ) 2>/dev/null &
+  watcher=$!
+  cat > /dev/null   # until the SSH session ends
+  kill "$watcher" 2>/dev/null
+  kill -TERM "${pids[@]}" 2>/dev/null
+  wait "${pids[@]}" 2>/dev/null
+  rm -f "$pidfile"
+'
+say "starting the regops agents on $managed (logs there: $remote/logs/agents/), Ctrl-C to stop them"
+agents_running=1
+# stdin held open by `sleep`: Ctrl-C ends the session, which stops the agents
+exec {keep}< <(exec sleep infinity)
+keeper=$!
+m_sh "$launcher" "$remote" <&"$keep" || true
+kill "$keeper" 2>/dev/null || true
+agents_running=0

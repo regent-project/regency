@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# Run your local regency build on the homelab (development only): regency
+# (every service, RabbitMQ, CouchDB) runs on a dedicated machine, installed
+# as the all-in-one package; the dataset's managed hosts are THIS machine,
+# through the real network: two thirds are passive hosts, reached by the
+# homelab's runner over SSH; one third are proactive hosts, each with its own
+# regops agent running here and reporting to the homelab's endpoint.
+#
+#   1. build the release binaries, the web client and the
+#      regency-all-in-one .deb of this checkout;
+#   2. deploy it to the homelab with reg (install.sh --package, served to
+#      the homelab by a temporary HTTP server on this machine): the first
+#      time, this also installs RabbitMQ and CouchDB there;
+#   3. give the homelab's runner an SSH key (generated there, never leaves
+#      it) and authorize it in ~/.ssh/authorized_keys here, restricted to the
+#      homelab's address;
+#   4. load the dataset (backend/examples/dataset.rs) into the homelab's
+#      regency: hosts reached over SSH (host key fingerprints checked), their
+#      files under /tmp/regency-dev on this machine, one runner pool;
+#   5. prepare the regops agents (enrollment tokens of the homelab's built-in
+#      CA, their expected states in a local Git repository) and run them here,
+#      logs in dev/logs/agents/; Ctrl-C stops them. Until regops can take its
+#      expected state from regency (D23), they show as unassigned hosts.
+#
+#   dev/run_homelab [options]          (from anywhere)
+#
+#   --inventory FILE  reg inventory of the homelab (one host, sudo allowed)
+#                     [REGENCY_HOMELAB_INVENTORY]
+#                     (default: ../homelab/homelab_inventory.yaml next to regency/)
+#   --homelab ADDR    the homelab's address (default: its Endpoint in the inventory)
+#   --privilege P     reg privilege escalation on the homelab: WithSudo or
+#                     WithSudoRs (default WithSudoRs: Ubuntu 25.10+'s sudo)
+#                     [REGENCY_HOMELAB_PRIVILEGE]
+#   --hosts N         hosts of the dataset (default 300; each run of a passive
+#                     host is one SSH connection to this machine)
+#   --agents N        how many of them are regops agents (default a third;
+#                     one regops process each here)
+#   --regops FILE     regops binary (default: built from ../regops)
+#   --jobs N          cargo build jobs (default 2: release builds use lto, which
+#                     needs a lot of memory per job)
+#   --port N          port of the temporary HTTP server (default 8765)
+#   --no-build        deploy the last built package (target/debian/)
+#   --no-deploy       do not build nor deploy (keep what the homelab runs)
+#   --no-dataset      do not load the dataset
+#   -h, --help        this help
+#
+# Needs, on this machine: reg, cargo-deb, trunk, sshd running and reachable
+# from the homelab, with dev/homelab/sshd-regency-dev.conf installed (the
+# runner opens many connections at once; the script prints how), and the
+# web UI's admin password in dev/secrets/homelab-admin. See dev/README.md.
+set -euo pipefail
+
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+inventory="${REGENCY_HOMELAB_INVENTORY:-$root/../homelab/homelab_inventory.yaml}"
+privilege="${REGENCY_HOMELAB_PRIVILEGE:-WithSudoRs}"
+homelab=""
+hosts=1000
+agents=""
+regops="$root/../regops/target/release/regops"
+jobs=2
+port=8765
+build=1
+deploy=1
+dataset=1
+while (($#)); do
+  arg=$1
+  shift
+  case "$arg" in
+    --inventory|--homelab|--privilege|--regops)
+      [[ -n ${1:-} ]] || { echo "$arg needs a value" >&2; exit 2; }
+      case "$arg" in
+        --inventory) inventory=$1 ;;
+        --regops) regops=$1 ;;
+        --homelab) homelab=$1 ;;
+        --privilege) privilege=$1 ;;
+      esac
+      shift ;;
+    --agents)
+      [[ ${1:-} =~ ^[0-9]+$ ]] || { echo "$arg needs a number" >&2; exit 2; }
+      agents=$1
+      shift ;;
+    --hosts|--jobs|--port)
+      [[ ${1:-} =~ ^[1-9][0-9]*$ ]] || { echo "$arg needs a positive number" >&2; exit 2; }
+      case "$arg" in
+        --hosts) hosts=$1 ;;
+        --jobs) jobs=$1 ;;
+        --port) port=$1 ;;
+      esac
+      shift ;;
+    --no-build) build=0 ;;
+    --no-deploy) deploy=0; build=0 ;;
+    --no-dataset) dataset=0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
+  esac
+done
+case "$privilege" in
+  WithSudo|WithSudoRs) ;;
+  *) echo "--privilege: WithSudo or WithSudoRs" >&2; exit 2 ;;
+esac
+[[ -n $agents ]] || agents=$((hosts / 3))
+(( agents < hosts )) || { echo "--agents must be less than --hosts" >&2; exit 2; }
+passive=$((hosts - agents))
+
+cd "$root"
+logs=dev/logs
+mkdir -p "$logs"
+say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# --- checks -------------------------------------------------------------------
+command -v reg >/dev/null || die "reg not found (cargo install --path ../reg)"
+[[ -f $inventory ]] || die "no homelab inventory at $inventory (--inventory)"
+inventory="$(cd "$(dirname "$inventory")" && pwd)/$(basename "$inventory")"
+if [[ -z $homelab ]]; then
+  homelab=$(sed -n 's/^[[:space:]]*Endpoint:[[:space:]]*"\{0,1\}\([^":]*\).*/\1/p' "$inventory" | head -n 1)
+  [[ -n $homelab ]] || die "no Endpoint in $inventory: use --homelab"
+fi
+# this machine's address as the homelab sees it
+self=$(ip -4 route get "$homelab" 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1)
+[[ -n $self ]] || die "no route to the homelab ($homelab)"
+say "homelab $homelab, managed hosts on this machine ($self, user $USER)"
+
+# SSH server here, as the homelab's runner will see it: its host keys
+fingerprints=()
+while read -r _ fp _; do fingerprints+=("$fp"); done < <(
+  ssh-keyscan -T 5 -t ed25519,ecdsa,rsa "$self" 2>/dev/null | ssh-keygen -lf - 2>/dev/null)
+if (( ${#fingerprints[@]} == 0 )); then
+  cat >&2 <<EOF
+No SSH server answers on $self:22. The homelab's runner reaches the dataset's
+hosts there. Once (sudo):
+  sudo install -m 0644 dev/homelab/sshd-regency-dev.conf /etc/ssh/sshd_config.d/50-regency-dev.conf
+  sudo sed -i 's/HOMELAB_ADDRESS/$homelab/' /etc/ssh/sshd_config.d/50-regency-dev.conf
+  sudo systemctl enable --now sshd
+EOF
+  exit 1
+fi
+if ! grep -qs "regency dev" /etc/ssh/sshd_config.d/*.conf; then
+  printf '\033[33mWARNING:\033[0m dev/homelab/sshd-regency-dev.conf is not installed: sshd will refuse part of the runner'"'"'s connections (MaxStartups). See dev/README.md.\n' >&2
+fi
+if [[ $dataset == 1 && ! -s dev/secrets/homelab-admin ]]; then
+  die "the web UI's admin password goes in dev/secrets/homelab-admin (the initial one is in /var/lib/regency/secrets/bootstrap-admin on the homelab)"
+fi
+
+# reg on the homelab: STATE_FILE LOG_FILE; fails unless compliance is reached
+# (reg exits 0 either way)
+reg_homelab() {
+  # from the inventory's directory: its relative paths (credentials) are
+  # relative to where reg starts
+  local log
+  log="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+  (cd "$(dirname "$inventory")" && reg -i "$inventory" -s "$1" -m enforce) > "$log" 2>&1 || true
+  if ! grep -q "Compliance reached" "$2" || grep -q "Failed to reach compliance" "$2"; then
+    sed 's/\x1b\[[0-9;]*m//g' "$2" | grep -E '^\[|ERROR' | tail -n 30 >&2
+    die "reg could not apply $(basename "$1") on the homelab (full output: $2)"
+  fi
+}
+
+work=$(mktemp -d)
+server=""
+agent_pids=()
+cleanup() {
+  [[ -n $server ]] && kill "$server" 2>/dev/null || true
+  if (( ${#agent_pids[@]} )); then
+    say "stopping the regops agents"
+    kill -TERM "${agent_pids[@]}" 2>/dev/null || true
+    wait "${agent_pids[@]}" 2>/dev/null || true
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# --- build ----------------------------------------------------------------------
+package=target/debian/regency-all-in-one-dev.deb
+if [[ $build == 1 ]]; then
+  say "building the services, regencyctl and regency-aio (release, $jobs jobs)"
+  cargo build --release -j "$jobs" -p regency-aio -p regencyctl -p scheduler -p runner \
+    -p dbwriter -p backend -p endpoint -p sourcesync
+  say "building the web client (trunk)"
+  # trunk needs a toolchain with the wasm32 std (rustup's stable here)
+  wasm_path="$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin"
+  (cd frontend && PATH="$wasm_path:$PATH" trunk build --release)
+  say "packaging regency-all-in-one"
+  cargo deb --no-build -p regency-aio -o "$package"
+fi
+if [[ $dataset == 1 ]]; then
+  cargo build --release -j "$jobs" -p backend --example dataset
+fi
+if (( agents > 0 )) && [[ $build == 1 || ! -x $regops ]]; then
+  if [[ $regops == "$root/../regops/target/release/regops" ]]; then
+    say "building regops (../regops, release)"
+    (cd "$root/../regops" && cargo build --release -j "$jobs")
+  fi
+  [[ -x $regops ]] || die "no regops binary at $regops (--regops)"
+fi
+
+# --- deploy ---------------------------------------------------------------------
+if [[ $deploy == 1 ]]; then
+  [[ -f $package ]] || die "no package at $package: run without --no-build"
+  cp "$package" "$work/regency-all-in-one.deb"
+  cp install.sh "$work/install.sh"
+  python3 -I -m http.server --bind "$self" --directory "$work" "$port" > "$logs/homelab-http.log" 2>&1 &
+  server=$!
+  sleep 1
+  kill -0 "$server" 2>/dev/null || die "the HTTP server could not start on $self:$port (--port), see $logs/homelab-http.log"
+
+  # replaces the package even at the same version (apt would skip it), then
+  # the installer sets up RabbitMQ, CouchDB and regency, or resumes
+  cat > "$work/deploy.yaml" <<EOF
+Attributes:
+  - Name: regency dev build is installed
+    Privilege: !$privilege
+    Timeout: 20m
+    Detail: !Command
+      Cmd: |
+        set -e
+        d=\$(mktemp -d); trap 'rm -rf "\$d"' EXIT
+        curl -fsS -o "\$d/regency-all-in-one.deb" http://$self:$port/regency-all-in-one.deb
+        curl -fsS -o "\$d/install.sh" http://$self:$port/install.sh
+        if dpkg-query -W -f='\${Status}' regency-all-in-one 2>/dev/null | grep -q 'ok installed'; then
+          echo ">>> Replacing regency-all-in-one with the dev build"
+          DEBIAN_FRONTEND=noninteractive dpkg -i --force-confold "\$d/regency-all-in-one.deb"
+        fi
+        sh "\$d/install.sh" --package "\$d/regency-all-in-one.deb"
+  - Name: the runner has an SSH key for the dev hosts
+    Privilege: !$privilege
+    Timeout: 30s
+    Detail: !Command
+      Cmd: |
+        set -e
+        k=/var/lib/regency/secrets/dev-hosts-ssh-key
+        [ -f "\$k" ] || ssh-keygen -q -t ed25519 -N '' -C regency-dev-hosts -f "\$k"
+        chown regency:regency "\$k" "\$k.pub"; chmod 0600 "\$k"
+        echo "PUBKEY \$(cat "\$k.pub")"
+EOF
+  say "deploying to the homelab (reg; output in $logs/homelab-deploy.log)"
+  reg_homelab "$work/deploy.yaml" "$logs/homelab-deploy.log"
+  kill "$server" 2>/dev/null || true
+  server=""
+  pubkey=$(sed 's/\x1b\[[0-9;]*m//g' "$logs/homelab-deploy.log" | sed -n 's/.*PUBKEY \(ssh-ed25519 [A-Za-z0-9+\/=]* regency-dev-hosts\).*/\1/p' | tail -n 1)
+  [[ -n $pubkey ]] || die "the homelab's SSH key was not found in $logs/homelab-deploy.log"
+
+  # the runner's key, here: from the homelab only, commands only
+  mkdir -p ~/.ssh && chmod 0700 ~/.ssh
+  touch ~/.ssh/authorized_keys && chmod 0600 ~/.ssh/authorized_keys
+  line="from=\"$homelab\",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty $pubkey"
+  if ! grep -qxF "$line" ~/.ssh/authorized_keys; then
+    grep -v ' regency-dev-hosts$' ~/.ssh/authorized_keys > "$work/authorized_keys" || true
+    echo "$line" >> "$work/authorized_keys"
+    cat "$work/authorized_keys" > ~/.ssh/authorized_keys
+    say "the homelab's runner key is authorized in ~/.ssh/authorized_keys (from $homelab only)"
+  fi
+fi
+
+# --- the endpoint's CA (agents) -------------------------------------------------
+agents_root=/tmp/regency-dev/agents
+if (( agents > 0 )); then
+  mkdir -p "$agents_root"
+  cat > "$work/ca.yaml" <<EOF
+Attributes:
+  - Name: the endpoint's CA certificate is shown
+    Privilege: !$privilege
+    Timeout: 30s
+    Detail: !Command
+      Cmd: echo CA-BEGIN; cat /var/lib/regency/tls/ca.pem; echo CA-END
+EOF
+  reg_homelab "$work/ca.yaml" "$logs/homelab-ca.log"
+  # reg's live view: "[host]     | line"
+  sed 's/\x1b\[[0-9;]*m//g' "$logs/homelab-ca.log" | sed -n 's/^\[[^]]*\] *| //p' \
+    | sed -n '/^CA-BEGIN$/,/^CA-END$/p' | sed '1d;$d' > "$work/ca.pem"
+  grep -q "BEGIN CERTIFICATE" "$work/ca.pem" || die "the endpoint's CA was not found in $logs/homelab-ca.log"
+  cp "$work/ca.pem" "$agents_root/ca.pem"
+fi
+
+# --- dataset --------------------------------------------------------------------
+url="http://$homelab:8080"
+for _ in $(seq 60); do
+  curl -fsS -o /dev/null --max-time 5 "$url/" && break
+  sleep 2
+done
+curl -fsS -o /dev/null --max-time 5 "$url/" || die "the homelab's web UI does not answer at $url"
+if [[ $dataset == 1 ]]; then
+  say "loading the dataset ($passive hosts over SSH at $self:22, $agents regops agents)"
+  host_keys=()
+  for fp in "${fingerprints[@]}"; do host_keys+=(--host-key "$fp"); done
+  agent_args=(--agents "$agents")
+  if (( agents > 0 )); then
+    agent_args+=(--endpoint "https://$homelab:8443" --ca-file "$agents_root/ca.pem" --server-name regency)
+  fi
+  target/release/examples/dataset --url "$url" --hosts "$passive" \
+    --password-file dev/secrets/homelab-admin --single-pool \
+    --ssh "$self:22" --ssh-user "$USER" --ssh-key /var/lib/regency/secrets/dev-hosts-ssh-key \
+    "${host_keys[@]}" "${agent_args[@]}" 2>&1 | tee -a "$logs/dataset.log"
+  [[ ${PIPESTATUS[0]} == 0 ]] || die "the dataset could not be loaded, see $logs/dataset.log"
+fi
+say "ready: $url (admin / dev/secrets/homelab-admin); logs on the homelab: journalctl -u regency-all-in-one -f"
+
+# --- regops agents ----------------------------------------------------------------
+if (( agents == 0 )); then
+  exit 0
+fi
+repo=/tmp/regency-dev/agents-repo
+[[ -d $repo/states ]] || die "no agent states in $repo: run without --no-dataset once"
+# the agents pull their expected state from this repository (regops is GitOps)
+[[ -d $repo/.git ]] || git -C "$repo" init -q -b main
+git -C "$repo" add -A
+if ! git -C "$repo" rev-parse -q --verify HEAD >/dev/null || ! git -C "$repo" diff --cached --quiet; then
+  git -C "$repo" -c user.name=regency-dev -c user.email=regency-dev@localhost \
+    commit -q -m "dev dataset: the agents' expected states"
+fi
+mkdir -p "$logs/agents"
+configs=("$agents_root"/*/config.toml)
+[[ -f ${configs[0]} ]] || die "no agent configuration under $agents_root: run without --no-dataset once"
+say "starting ${#configs[@]} regops agents (logs in $logs/agents/), Ctrl-C to stop them"
+for config in "${configs[@]}"; do
+  id=$(basename "$(dirname "$config")")
+  "$regops" --config-path "$config" run >> "$logs/agents/$id.log" 2>&1 &
+  agent_pids+=($!)
+  sleep 0.2   # spreads enrollments and passes
+done
+# until Ctrl-C, or until every agent has stopped
+wait "${agent_pids[@]}" || true
+agent_pids=()
+say "every regops agent has stopped (see $logs/agents/)"
