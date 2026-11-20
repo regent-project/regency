@@ -7,6 +7,17 @@
        [backend] frontend_dir). Set it when the files are served elsewhere. -->
   <meta name="regency-backend" content="" />
   <title>regency</title>
+  <!-- colour theme before the first paint: the saved choice, else the system's -->
+  <script>
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("regency.theme"); } catch (e) {}
+      if (t !== "light" && t !== "dark") {
+        t = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
   <link data-trunk rel="icon" href="regent-logo.png" />
   <link data-trunk rel="copy-file" href="regent-logo.png" />
   <link data-trunk rel="css" href="style.css" />

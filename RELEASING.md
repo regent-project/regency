@@ -43,7 +43,9 @@ Pre-releases (`v1.3.0-rc.1`) are published as GitHub pre-releases.
 
 ## Changelog
 
-Every change that matters to operators or users goes into `CHANGELOG.md`,
+`CHANGELOG.md` holds **only the release being prepared**: older releases are
+not kept in it (their notes are the GitHub releases, and the file's git
+history). Every change that matters to operators or users goes into it,
 under `# Unreleased`, in the subsection of its component:
 
 ```markdown
@@ -85,7 +87,9 @@ Example: v0.2.0.
    ```
 6. The release workflow builds and publishes everything (about 20-30
    minutes) and creates the GitHub release `v0.2.0`.
-7. Add a new `# Unreleased` section at the top of `CHANGELOG.md`.
+7. Start `CHANGELOG.md` fresh for the next release: keep its header, replace
+   the released section with an empty `# Unreleased` one (the released
+   notes live on in the GitHub release).
 
 If the workflow fails, fix the cause, delete the GitHub release if it was
 created and the tag (`git push --delete origin v0.2.0`, `git tag -d

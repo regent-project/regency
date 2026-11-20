@@ -1,4 +1,5 @@
-//! Jobs in progress over time, in the map's left panel: pending and running
+//! Jobs in progress over time, in the masthead while the map is open (compact
+//! form; `compact = false` is the full panel form): pending and running
 //! jobs over the last 2 min / 10 min / 30 min / 1 h. Client-side only: built
 //! from the jobs the map already follows (WatchJobs, last hour), each job's
 //! `states_json` giving when it became pending, started and ended, so the
@@ -274,7 +275,12 @@ struct Chart {
 }
 
 #[component]
-pub fn JobChart(jobs: RwSignal<BTreeMap<String, api::JobSummary>>) -> impl IntoView {
+pub fn JobChart(
+    jobs: RwSignal<BTreeMap<String, api::JobSummary>>,
+    /// One line for the masthead: current counts, plot, range picker.
+    #[prop(optional)]
+    compact: bool,
+) -> impl IntoView {
     let window = RwSignal::new(saved_window());
     let now = RwSignal::new(js_sys::Date::now() as i64);
     if let Ok(handle) = set_interval_with_handle(
@@ -373,6 +379,64 @@ pub fn JobChart(jobs: RwSignal<BTreeMap<String, api::JobSummary>>) -> impl IntoV
             .map(|(_, l)| *l)
             .unwrap_or("")
     };
+    // jobs pending / running right now
+    let current = move || {
+        spans.with(|spans| {
+            let open = |s: Option<(i64, Option<i64>)>| s.is_some_and(|(_, end)| end.is_none());
+            let running = spans.iter().filter(|s| open(s.running)).count();
+            let pending = spans
+                .iter()
+                .filter(|s| open(s.pending) && s.running.is_none())
+                .count();
+            (pending, running)
+        })
+    };
+    let plot = move || {
+        view! {
+            <svg viewBox=format!("0 0 {W} {H}") preserveAspectRatio="none" class="job-chart-plot"
+                role="img" aria-label=move || format!("Pending and running jobs, last {}", label())>
+                <path class="pending" d=move || chart.with(|c| c.pending_path.clone()) />
+                <path class="running" d=move || chart.with(|c| c.running_path.clone()) />
+                {move || chart.with(|c| c.ticks.iter().map(|t| {
+                    let y = H - t / c.top * H;
+                    view! { <line class="grid" x1="0" x2=W y1=y y2=y vector-effect="non-scaling-stroke" /> }
+                }).collect::<Vec<_>>())}
+            </svg>
+        }
+    };
+    if compact {
+        return view! {
+            <div class="job-chart compact">
+                <div class="job-chart-now">
+                    <span title="pending now"><i class="pending"></i>{move || current().0}</span>
+                    <span title="running now"><i class="running"></i>{move || current().1}</span>
+                </div>
+                <div class="job-chart-box" on:mousemove=on_move on:mouseleave=move |_| hover.set(None)>
+                    {plot}
+                    // highest gridline only: the plot is short
+                    {move || chart.with(|c| c.ticks.last().map(|t| view! {
+                        <span class="tick" style=format!("bottom: {:.2}%", t / c.top * 100.0)>{format_value(*t)}</span>
+                    }))}
+                    {tooltip}
+                </div>
+                <select class="job-chart-window" title="Time range"
+                    on:change=move |ev| {
+                        if let Ok(minutes) = event_target_value(&ev).parse::<u32>() {
+                            window.set(minutes);
+                            if let Some(storage) = crate::client::storage() {
+                                let _ = storage.set_item(KEY, &minutes.to_string());
+                            }
+                        }
+                    }>
+                    {WINDOWS.iter().map(|(minutes, name)| {
+                        let minutes = *minutes;
+                        view! { <option value=minutes.to_string() selected=move || window.get() == minutes>{*name}</option> }
+                    }).collect::<Vec<_>>()}
+                </select>
+            </div>
+        }
+        .into_any();
+    }
     view! {
         <div class="job-chart">
             <div class="job-chart-head">
@@ -393,15 +457,7 @@ pub fn JobChart(jobs: RwSignal<BTreeMap<String, api::JobSummary>>) -> impl IntoV
                 </span>
             </div>
             <div class="job-chart-box" on:mousemove=on_move on:mouseleave=move |_| hover.set(None)>
-                <svg viewBox=format!("0 0 {W} {H}") preserveAspectRatio="none" class="job-chart-plot"
-                    role="img" aria-label=move || format!("Pending and running jobs, last {}", label())>
-                    <path class="pending" d=move || chart.with(|c| c.pending_path.clone()) />
-                    <path class="running" d=move || chart.with(|c| c.running_path.clone()) />
-                    {move || chart.with(|c| c.ticks.iter().map(|t| {
-                        let y = H - t / c.top * H;
-                        view! { <line class="grid" x1="0" x2=W y1=y y2=y vector-effect="non-scaling-stroke" /> }
-                    }).collect::<Vec<_>>())}
-                </svg>
+                {plot}
                 // tick labels in HTML: SVG text would be stretched with the plot
                 {move || chart.with(|c| c.ticks.iter().map(|t| view! {
                     <span class="tick" style=format!("bottom: {:.2}%", t / c.top * 100.0)>{format_value(*t)}</span>
@@ -415,6 +471,7 @@ pub fn JobChart(jobs: RwSignal<BTreeMap<String, api::JobSummary>>) -> impl IntoV
             </div>
         </div>
     }
+    .into_any()
 }
 
 #[cfg(test)]

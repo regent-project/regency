@@ -36,6 +36,10 @@ pub struct Palette {
     fg: String,
     muted: String,
     accent: String,
+    link: String,
+    extra_link: String,
+    area: String,
+    area_line: String,
 }
 
 impl Palette {
@@ -63,6 +67,10 @@ impl Palette {
             fg: var("--fg", "#d3dbe2"),
             muted: var("--muted", "#8796a3"),
             accent: var("--accent", "#6f9fbd"),
+            link: var("--map-link", "#323e47"),
+            extra_link: var("--map-link-extra", "#2a353d"),
+            area: var("--map-area", "#1f2830"),
+            area_line: var("--map-area-line", "#3a4c59"),
         }
     }
 
@@ -77,12 +85,6 @@ impl Palette {
     }
 }
 
-/// Links, opaque: #50626f at 45 % (dashed ones: 30 %) over `--canvas`.
-const LINK: &str = "#323e47";
-const EXTRA_LINK: &str = "#2a353d";
-/// Areas: background and border (opaque).
-const AREA: &str = "#1f2830";
-const AREA_LINE: &str = "#3a4c59";
 /// Links stop this far from a group's center, still under its card (a
 /// 236 × 124 rectangle): shorter lines, not all meeting in one point.
 const LINK_STOP: f64 = 58.0;
@@ -238,14 +240,14 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         let rounded = |a: &crate::map::Area| {
             let _ = ctx.round_rect_with_f64(a.x, a.y, a.w, a.h, radius);
         };
-        ctx.set_fill_style_str(AREA);
+        ctx.set_fill_style_str(&palette.area);
         ctx.begin_path();
         for a in &areas {
             rounded(a);
         }
         ctx.fill();
         ctx.set_line_width(vp.line(1.5));
-        ctx.set_stroke_style_str(AREA_LINE);
+        ctx.set_stroke_style_str(&palette.area_line);
         for folded in [false, true] {
             let mut of_kind = areas.iter().filter(|a| a.folded == folded).peekable();
             if of_kind.peek().is_none() {
@@ -265,7 +267,7 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
 
     // links: host -> its group, then dashed links to its other inventories
     if f.layout.links {
-        ctx.set_stroke_style_str(LINK);
+        ctx.set_stroke_style_str(&palette.link);
         ctx.set_line_width(1.0 / vp.k);
         ctx.begin_path();
         for p in &f.layout.hosts {
@@ -278,7 +280,7 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         ctx.stroke();
     }
     if !f.layout.extra_links.is_empty() {
-        ctx.set_stroke_style_str(EXTRA_LINK);
+        ctx.set_stroke_style_str(&palette.extra_link);
         let _ = ctx.set_line_dash(&dash(&[4.0 / vp.k, 4.0 / vp.k]));
         ctx.begin_path();
         for [ax, ay, bx, by] in &f.layout.extra_links {

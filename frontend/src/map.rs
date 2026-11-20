@@ -12,8 +12,10 @@
 //! scale). Zoom with the wheel,
 //! pan by dragging, click a card to fold/unfold its hosts.
 //!
-//! Two panels around it: jobs in progress and activity on the left;
-//! fleet, inventories and the selected host on the right. Clicking a host
+//! Shown as "Live view". The legend is a layer on top of the map; one panel,
+//! on the right: groups and the selected host (the fleet counts and the
+//! jobs-in-progress chart are in the masthead, `crate::feeds`; jobs in
+//! progress and their Abort on the Jobs page). Clicking a host
 //! selects it (`/?host=<id>`): its summary and expected state explorer show
 //! in the right panel, "Details" opens the host page.
 
@@ -27,15 +29,16 @@ use leptos::task::spawn_local;
 use leptos_router::NavigateOptions;
 use leptos_router::hooks::{use_navigate, use_query_map};
 
-use crate::Session;
 use crate::canvas::{self, Frame, Palette, View};
 use crate::client::{api, authed, client, command_id, format_ms};
 use crate::expected::{
     AssignmentEntry, GroupTarget, HostStateExplorer, describe_selector, job_label, load_assignments,
 };
+use crate::feeds::Feeds;
 use crate::live::{HostLive, HostTip, RunLogView, running_jobs};
 use crate::oneshot::OneShotDialog;
-use crate::pages::{assignments_line, badge, host_state, watch_hosts, watch_jobs};
+use crate::pages::{assignments_line, badge, host_state};
+use crate::{Session, Theme};
 
 pub const DOT: f64 = 7.0;
 /// Distance between two hosts on a ring and between two rings.
@@ -112,7 +115,32 @@ pub enum Tone {
     Unassigned,
 }
 
-fn tone(state: &str) -> Tone {
+impl Tone {
+    /// The CSS colour of the legend and the canvas (`canvas::Palette`).
+    pub fn css(self) -> &'static str {
+        match self {
+            Tone::Ok => "var(--ok)",
+            Tone::Bad => "var(--bad)",
+            Tone::Warn => "var(--warn)",
+            Tone::Unknown => "var(--unknown)",
+            Tone::Unassigned => "var(--unassigned)",
+        }
+    }
+
+    /// Legend order: compliant first, unassigned last.
+    pub fn rank(self) -> u8 {
+        match self {
+            Tone::Ok => 0,
+            Tone::Bad => 1,
+            Tone::Warn => 2,
+            Tone::Unknown => 3,
+            Tone::Unassigned => 4,
+        }
+    }
+}
+
+/// Colour of a host state (`pages::host_state`), as on the map.
+pub fn tone(state: &str) -> Tone {
     if is_ok(state) {
         Tone::Ok
     } else if is_bad(state) {
@@ -706,12 +734,11 @@ const TIP_HEIGHT: f64 = 260.0;
 #[component]
 pub fn Map() -> impl IntoView {
     let session = expect_context::<Session>();
-    let hosts = RwSignal::new(BTreeMap::<String, api::HostSummary>::new());
-    let ready = RwSignal::new(false);
+    // every host and the last hour's jobs: the app-wide feeds (crate::feeds)
+    let Feeds {
+        hosts, ready, jobs, ..
+    } = expect_context::<Feeds>();
     let error = RwSignal::new(None::<String>);
-    watch_hosts(api::HostSelector::default(), hosts, ready, error);
-    let jobs = RwSignal::new(BTreeMap::<String, api::JobSummary>::new());
-    watch_jobs(1, jobs, error);
     let assignments = RwSignal::new(Vec::<AssignmentEntry>::new());
     load_assignments(assignments, error);
     // reference -> host selector, for the assignment groups' Assess / Reach
@@ -938,6 +965,7 @@ pub fn Map() -> impl IntoView {
     // canvas: redrawn on the next animation frame after a change only (job
     // events included: a host with a job only changes colour)
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
+    let Theme(theme) = expect_context::<Theme>();
     let alive = Arc::new(AtomicBool::new(true));
     let dirty = Arc::new(AtomicBool::new(true));
     on_cleanup({
@@ -953,11 +981,14 @@ pub fn Map() -> impl IntoView {
             hovered.track();
             selected.track();
             rings.track();
+            theme.track();
             dirty.store(true, Ordering::Relaxed);
         }
     });
     {
-        let palette = Palette::read();
+        // colours of the current theme, read again when it changes
+        let mut palette = Palette::read();
+        let mut palette_theme = theme.get_untracked();
         let context = |canvas: &web_sys::HtmlCanvasElement| {
             canvas
                 .get_context("2d")
@@ -985,6 +1016,10 @@ pub fn Map() -> impl IntoView {
             }
             if !(dirty.swap(false, Ordering::Relaxed) || resized) {
                 return;
+            }
+            if theme.get_untracked() != palette_theme {
+                palette_theme = theme.get_untracked();
+                palette = Palette::read();
             }
             let hovered = hovered.get_untracked();
             let selected = selected.get_untracked();
@@ -1052,71 +1087,6 @@ pub fn Map() -> impl IntoView {
         });
     };
 
-    let counts = move || {
-        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-        hosts.with(|hosts| {
-            for host in hosts.values() {
-                *counts.entry(host_state(host).to_string()).or_default() += 1;
-            }
-        });
-        counts.into_iter().collect::<Vec<_>>()
-    };
-    let recent = move || {
-        jobs.with(|jobs| {
-            // the 12 newest, without copying or sorting thousands of jobs
-            let newest = |j: &&api::JobSummary| std::cmp::Reverse(j.updated_at);
-            let mut list: Vec<&api::JobSummary> = jobs.values().collect();
-            if list.len() > 12 {
-                list.select_nth_unstable_by_key(11, newest);
-                list.truncate(12);
-            }
-            list.sort_by_key(newest);
-            list.into_iter().cloned().collect::<Vec<_>>()
-        })
-    };
-    // jobs in progress: count per state and the newest ones
-    let active = Memo::new(move |_| {
-        jobs.with(|jobs| {
-            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-            let mut list: Vec<&api::JobSummary> = jobs
-                .values()
-                .filter(|j| Ring::of(&j.state).is_some())
-                .inspect(|j| *counts.entry(j.state.clone()).or_default() += 1)
-                .collect();
-            let newest = |j: &&api::JobSummary| std::cmp::Reverse(j.updated_at);
-            if list.len() > 15 {
-                list.select_nth_unstable_by_key(14, newest);
-                list.truncate(15);
-            }
-            list.sort_by_key(newest);
-            let list: Vec<api::JobSummary> = list.into_iter().cloned().collect();
-            (counts.into_iter().collect::<Vec<_>>(), list)
-        })
-    });
-    let abort = move |job_id: String| {
-        spawn_local(async move {
-            let request = api::AbortJobRequest {
-                command_id: command_id("abort"),
-                job_id,
-            };
-            let text = match client().abort_job(authed(request, &session.token())).await {
-                Ok(_) => "abort requested".to_string(),
-                Err(status) => {
-                    session.check(&status);
-                    format!("abort refused: {}", status.message())
-                }
-            };
-            let _ = message.try_set(Some(text));
-        });
-    };
-    // a link to a host that selects it instead of leaving the map
-    let host_link = move |host_id: String| {
-        let href = format!("/?host={}", js_sys::encode_uri_component(&host_id));
-        let label = host_id.clone();
-        view! {
-            <a href=href on:click=move |ev| { ev.prevent_default(); selected.set(Some(host_id.clone())); }>{label}</a>
-        }
-    };
     // groups of the map, for the right panel's list
     let group_rows = move || {
         map.with(|m| {
@@ -1152,7 +1122,6 @@ pub fn Map() -> impl IntoView {
         });
         open
     };
-    let left_open = panel("regency.map.left");
     let right_open = panel("regency.map.right");
     // panel widths: set by dragging the splitters between the panels and the
     // map (double click: default width), remembered by the browser
@@ -1167,19 +1136,15 @@ pub fn Map() -> impl IntoView {
             default,
         )
     };
-    let left_width = width("regency.map.left.width", 300.0);
     let right_width = width("regency.map.right.width", 400.0);
     let page_style = move || {
         let mut style = String::new();
-        if left_open.get() {
-            style.push_str(&format!("--left:{}px;", left_width.0.get()));
-        }
         if right_open.get() {
             style.push_str(&format!("--right:{}px;", right_width.0.get()));
         }
         style
     };
-    // `sign`: +1 when dragging right widens the panel (left one), -1 otherwise
+    // `sign`: +1 when dragging right widens the panel, -1 otherwise (the right one)
     let splitter = move |(width, key, default): (RwSignal<f64>, &'static str, f64),
                          open: RwSignal<bool>,
                          sign: f64| {
@@ -1226,9 +1191,6 @@ pub fn Map() -> impl IntoView {
     };
     let page_class = move || {
         let mut class = String::from("map-page");
-        if !left_open.get() {
-            class.push_str(" no-left");
-        }
         if !right_open.get() {
             class.push_str(" no-right");
         }
@@ -1243,6 +1205,11 @@ pub fn Map() -> impl IntoView {
             }
         }
     };
+    let all_folded = move || {
+        map.with(|m| {
+            collapsed.with(|c| !m.groups.is_empty() && m.groups.iter().all(|g| c.contains(&g.name)))
+        })
+    };
     let svg_class = move || {
         if hovered.get().is_some() {
             "map over-host"
@@ -1253,68 +1220,6 @@ pub fn Map() -> impl IntoView {
 
     view! {
         <div class=page_class style=page_style>
-            <aside class=side_class("left", left_open)>
-                <button class="rail" title="Show jobs and activity" on:click=move |_| left_open.set(true)>"Jobs"</button>
-                <button class="shrink" title="Hide this panel" on:click=move |_| left_open.set(false)>"‹"</button>
-                <h2>"Jobs in progress"</h2>
-                <crate::jobchart::JobChart jobs />
-                {move || active.with(|(counts, _)| if counts.is_empty() {
-                    view! { <p class="muted">"No job in progress."</p> }.into_any()
-                } else {
-                    view! {
-                        <div class="counts">
-                            {counts.iter().map(|(state, n)| view! { <span>{badge(state.clone())} " " {*n}</span> }).collect::<Vec<_>>()}
-                        </div>
-                    }.into_any()
-                })}
-                <ul class="activity">
-                    <For each=move || active.with(|(_, list)| list.clone()) key=|j| (j.job_id.clone(), j.state.clone()) let:job>
-                        {
-                            let job_id = job.job_id.clone();
-                            let abortable = job.state != "ABORT_REQUIRED";
-                            view! {
-                                <li>
-                                    {badge(job.state.clone())}
-                                    <span class="host">{host_link(job.host_id.clone())}</span>
-                                    <span class="muted">{job_label(job.job)}</span>
-                                    {abortable.then(|| view! {
-                                        <button class="small" title="Abort this job" on:click=move |_| abort(job_id.clone())>"Abort"</button>
-                                    })}
-                                </li>
-                            }
-                        }
-                    </For>
-                </ul>
-                <Show when=move || active.with(|(counts, _)| counts.iter().map(|c| c.1).sum::<usize>() > 15)>
-                    <p class="muted"><a href="/jobs">"All jobs"</a></p>
-                </Show>
-                <h2>"Activity " <span class="muted">"(last hour)"</span></h2>
-                <ul class="activity">
-                    <For each=recent key=|j| (j.job_id.clone(), j.state.clone(), j.updated_at) let:job>
-                        <li>
-                            <span class="muted" title=format_ms(job.updated_at)>{format_ms(job.updated_at).split(' ').nth(1).unwrap_or_default().get(..5).unwrap_or_default().to_string()}</span>
-                            {badge(job.state.clone())}
-                            <span class="host">{host_link(job.host_id.clone())}</span>
-                            <span class="muted">{job_label(job.job)}</span>
-                        </li>
-                    </For>
-                </ul>
-                <details class="legend-box">
-                    <summary>"Legend"</summary>
-                    <ul class="legend">
-                        <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--ok)" /></svg> " compliant / reach success"</li>
-                        <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--bad)" /></svg> " not compliant / failed / error"</li>
-                        <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--warn)" /></svg> " aborted / assignments in conflict"</li>
-                        <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--unknown)" /></svg> " not checked yet, or against an older expected state"</li>
-                        <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--unassigned)" /></svg> " unassigned: no expected state"</li>
-                        <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--job)" /></svg> " job in progress (pending, running or abort requested)"</li>
-                        <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--warn)" stroke-width="2" stroke-dasharray="2 2" /></svg> " conflicting definitions or certificate pending"</li>
-                        <li><svg width="16" height="16"><circle cx="8" cy="8" r="7" fill="none" stroke="var(--accent)" stroke-width="2" /></svg> " selected host"</li>
-                    </ul>
-                    <p class="muted">"A host's colour is its compliance with its effective expected state: the layers of every assignment that selects it. Click a group card to fold or unfold its hosts; Assess and Reach run each host of the group against its own effective state (an assignment's dialog can also run a hand-written attribute once). Click a host to show it on the right. In the areas display, a host in several groups is drawn in each of them."</p>
-                </details>
-            </aside>
-            {splitter(left_width, left_open, 1.0)}
             <section class="map-canvas">
                 // D24: hover tip, following the cursor
                 {move || {
@@ -1365,17 +1270,15 @@ pub fn Map() -> impl IntoView {
                         <option value="graph" selected=move || display.get() == Display::Graph>"graph"</option>
                         <option value="areas" selected=move || display.get() == Display::Areas>"areas"</option>
                     </select>
-                    <button title="Show only the map, or bring both panels back"
-                        on:click=move |_| {
-                            let show = !(left_open.get_untracked() || right_open.get_untracked());
-                            left_open.set(show);
-                            right_open.set(show);
+                    // one button: fold every group, or unfold them all once all are folded
+                    <button title="Fold or unfold every group"
+                        on:click=move |_| if all_folded() {
+                            collapsed.set(BTreeSet::new());
+                        } else {
+                            collapsed.set(map.with_untracked(|m| m.groups.iter().map(|g| g.name.clone()).collect()));
                         }>
-                        {move || if left_open.get() || right_open.get() { "Hide panels" } else { "Show panels" }}
+                        {move || if all_folded() { "Unfold" } else { "Fold" }}
                     </button>
-                    <button on:click=move |_| { scale.set(1.0); center.set(None); }>"Fit"</button>
-                    <button on:click=move |_| collapsed.set(map.with_untracked(|m| m.groups.iter().map(|g| g.name.clone()).collect()))>"Fold all"</button>
-                    <button on:click=move |_| collapsed.set(BTreeSet::new())>"Unfold all"</button>
                     <span class="muted">{move || if ready.get() { format!("{} hosts, live", hosts.with(|h| h.len())) } else { "loading…".into() }}</span>
                     <span class="muted">{move || message.get()}</span>
                 </div>
@@ -1445,18 +1348,26 @@ pub fn Map() -> impl IntoView {
                         {group_card(card.0, card.1, collapsed, moved, ask)}
                     </For>
                 </svg>
+                // legend: a layer on top of the hosts, bottom left
+                        <details class="map-legend">
+                            <summary>"Legend"</summary>
+                            <ul class="legend">
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--ok)" /></svg> " compliant / reach success"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--bad)" /></svg> " not compliant / failed / error"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--warn)" /></svg> " aborted / assignments in conflict"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--unknown)" /></svg> " not checked yet, or against an older expected state"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--unassigned)" /></svg> " unassigned: no expected state"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--job)" /></svg> " job in progress (pending, running or abort requested)"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--warn)" stroke-width="2" stroke-dasharray="2 2" /></svg> " conflicting definitions or certificate pending"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="7" fill="none" stroke="var(--accent)" stroke-width="2" /></svg> " selected host"</li>
+                            </ul>
+                        </details>
                 </div>
             </section>
             {splitter(right_width, right_open, -1.0)}
             <aside class=side_class("right", right_open)>
                 <button class="rail" title="Show inventories and hosts" on:click=move |_| right_open.set(true)>"Hosts"</button>
                 <button class="shrink" title="Hide this panel" on:click=move |_| right_open.set(false)>"›"</button>
-                <h2>"Fleet"</h2>
-                <div class="counts">
-                    <For each=counts key=|c| c.clone() let:count>
-                        <span>{badge(count.0.clone())} " " {count.1}</span>
-                    </For>
-                </div>
                 <Show when=move || selected.with(Option::is_some)
                     fallback=move || view! {
                         <h2>"Host"</h2>

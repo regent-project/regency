@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use futures::future::{AbortHandle, Abortable};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_router::hooks::use_params_map;
+use leptos_router::hooks::{use_params_map, use_query_map};
 
 use crate::Session;
 use crate::client::api::{self, host_event, job_event};
@@ -232,17 +232,26 @@ pub fn watch_hosts(
 
 #[component]
 pub fn Hosts() -> impl IntoView {
-    let hosts = RwSignal::new(BTreeMap::<String, api::HostSummary>::new());
-    let ready = RwSignal::new(false);
-    let error = RwSignal::new(None::<String>);
+    // every host: the app-wide feed (crate::feeds)
+    let crate::feeds::Feeds {
+        hosts,
+        ready,
+        error,
+        ..
+    } = expect_context::<crate::feeds::Feeds>();
     let filter = RwSignal::new(String::new());
-    watch_hosts(api::HostSelector::default(), hosts, ready, error);
+    // `?state=<state>`: hosts in exactly that state (`host_state`), e.g. from
+    // the masthead's fleet counts
+    let query = use_query_map();
+    let state = Memo::new(move |_| query.with(|q| q.get("state")).filter(|s| !s.is_empty()));
 
     let visible = move || {
         let needle = filter.get().to_lowercase();
+        let state = state.get();
         hosts.with(|hosts| {
             hosts
                 .values()
+                .filter(|h| state.as_deref().is_none_or(|s| host_state(h) == s))
                 .filter(|h| {
                     needle.is_empty()
                         || h.host_id.to_lowercase().contains(&needle)
@@ -273,9 +282,20 @@ pub fn Hosts() -> impl IntoView {
             </For>
         </div>
         <div class="toolbar">
+            {move || state.get().map(|s| view! {
+                <span class="filter-chip">"State: " {badge(s)}
+                    <a href="/hosts" title="Show every state" aria-label="Remove the state filter">"×"</a>
+                </span>
+            })}
             <input placeholder="Filter: host, state, label=value, inventory" style="min-width: 320px"
                 prop:value=move || filter.get() on:input=move |ev| filter.set(event_target_value(&ev)) />
-            <span class="muted">{move || if ready.get() { format!("{} hosts, live", hosts.with(|h| h.len())) } else { "loading…".to_string() }}</span>
+            <span class="muted">{move || if !ready.get() {
+                "loading…".to_string()
+            } else if state.with(Option::is_some) || !filter.with(String::is_empty) {
+                format!("{} of {} hosts, live", visible().len(), hosts.with(|h| h.len()))
+            } else {
+                format!("{} hosts, live", hosts.with(|h| h.len()))
+            }}</span>
         </div>
         <Show when=move || error.get().is_some()>
             <p class="error">{move || error.get()}</p>

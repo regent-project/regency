@@ -17,12 +17,17 @@ PATH=~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH trunk serve 
   routes such as `/hosts/<id>`).
 - Not a default workspace member: `cargo build` at the workspace root skips it.
 
-Theme: dark greys and blues around the logo's blue (`#1f4559`, variables
-at the top of `style.css`).
+Look: a console like OpenShift / TailAdmin (masthead, left sidebar, page
+title band, white cards). Two themes, light and dark, as CSS variables at the
+top of `style.css` (`[data-theme]` on `<html>`: set before the first paint by
+`index.html` from the saved choice or the system's, switched by the masthead
+button, `main.rs::Theme`). The map canvas reads its colours from the same
+variables (`canvas::Palette`, `--map-*`) and re-reads them when the theme
+changes.
 
 Pages:
 
-- **Map** (`/`, main page): live infrastructure graph, laid out like the
+- **Live view** (`/`, main page; "the map" in the code): live infrastructure graph, laid out like the
   former proof of concept: one card per group (assignment by default,
   inventory, label value or state) with its hosts as dots on rings around
   it, linked to it (no root node, no circle around a group). Dots are
@@ -51,18 +56,25 @@ Pages:
   attribute, choices not made ("choose…"), blank fields
   (`Schema::blank_for`); "To fill in: …" (`Schema::missing`) until valid. Builder tests use `src/testdata/attribute.schema.json`
   (regent-sdk 0.23.0's schema, as backend serves it; regenerate it when the
-  SDK pin moves). A click on a card folds it. Zoom (wheel, around the cursor), pan (drag),
-  hover a host for a glance. Two panels around the map: on the left, jobs
-  in progress (with Abort) and the activity of the last hour; on the right,
-  fleet counts, the groups (a click centres the map on one) and the
-  selected host. Clicking a host selects it (`/?host=<id>`, shareable) and
+  SDK pin moves). A click on a card folds it; the toolbar's Fold / Unfold button folds
+  every group, or unfolds them all once all are folded. Zoom (wheel, around
+  the cursor), pan (drag), hover a host for a glance. The legend is a
+  folded layer at the bottom left of the map. One panel, on the right: the
+  groups (a click centres the map on one) and the selected host (jobs in
+  progress and their Abort are on the Jobs page);
+  on every page, the masthead shows the fleet counts (hosts per state) and
+  the jobs-in-progress chart (`src/jobchart.rs`, compact form: pending /
+  running now, the curve over the chosen range, hover for a time slot's
+  values), from app-wide live feeds (`src/feeds.rs`: every host and the
+  last hour's jobs, restarted 5 s after they end, finished jobs pruned
+  after an hour) that the Live view and the Hosts page reuse. Clicking a host selects it (`/?host=<id>`, shareable) and
   shows its summary (state, assignments) and its effective expected state
   (`expected::HostStateExplorer`: the layers, lowest priority first, then
   the attributes tagged with their assignment, from `GetEffectiveState`) in
   the right panel, with Assess/Reach and a Details button to the host page; clicking empty space
-  deselects it. Each panel shrinks to a thin rail (its ‹/› button; click the
-  rail to bring it back), and "Hide panels" in the toolbar leaves only the
-  map; the browser remembers the choice (local storage).
+  deselects it. The panel shrinks to a thin rail (its › button; click the
+  rail to bring it back) and is resized by dragging its edge; the browser
+  remembers both (local storage).
   A second display ("Display: areas", also remembered): each group is a
   rectangle holding its hosts in a grid, with its card (same
   counts, Assess/Reach, fold on click) in the top right corner; a host in
@@ -76,7 +88,8 @@ Pages:
   batches (`pages::next_batch`, 150 ms). Measured with 3000 hosts: what costs
   is pixels, not canvas calls: keep lines ≥ 1 px and tiny dots as squares.
 - **Hosts** (`/hosts`): live table (filter by id, state, `label=value`,
-  inventory); host detail (state, assignments, remediations, certificate
+  inventory); `/hosts?state=<state>` shows only the hosts in that
+  state (exactly, removable chip), the target of the masthead's fleet counts; host detail (state, assignments, remediations, certificate
   approval, effective expected state with Assess/Reach now, outcome history,
   deletion of the host's data).
 - **Jobs** (`/jobs`): live jobs of the last 24 h (abort).

@@ -6,6 +6,7 @@ mod canvas;
 mod client;
 mod config;
 mod expected;
+mod feeds;
 mod jobchart;
 mod live;
 mod map;
@@ -14,9 +15,10 @@ mod pages;
 
 use leptos::prelude::*;
 use leptos_router::components::{A, Route, Router, Routes};
+use leptos_router::hooks::{use_location, use_query_map};
 use leptos_router::path;
 
-use crate::client::{save_token, saved_token};
+use crate::client::{save_token, saved_token, storage};
 
 /// Session shared by every page.
 #[derive(Clone, Copy)]
@@ -38,28 +40,169 @@ impl Session {
     }
 }
 
+/// Colour theme: `light` or `dark`, the `data-theme` attribute of `<html>`
+/// (first set by `index.html` from the saved choice or the system's).
+/// Canvas drawings track it to re-read their colours.
+#[derive(Clone, Copy)]
+pub struct Theme(pub RwSignal<&'static str>);
+
+impl Theme {
+    const KEY: &'static str = "regency.theme";
+
+    fn load() -> Self {
+        let current = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+            .and_then(|e| e.get_attribute("data-theme"));
+        Self(RwSignal::new(match current.as_deref() {
+            Some("dark") => "dark",
+            _ => "light",
+        }))
+    }
+
+    fn toggle(self) {
+        let next = if self.0.get_untracked() == "dark" {
+            "light"
+        } else {
+            "dark"
+        };
+        if let Some(root) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+        {
+            let _ = root.set_attribute("data-theme", next);
+        }
+        if let Some(storage) = storage() {
+            let _ = storage.set_item(Self::KEY, next);
+        }
+        self.0.set(next);
+    }
+}
+
+/// Sidebar folded to icons, remembered by the browser.
+const NAV_KEY: &str = "regency.nav";
+
+#[component]
+fn NavItem(href: &'static str, icon: &'static str, label: &'static str) -> impl IntoView {
+    view! {
+        <A href=href attr:title=label>
+            <span class="nav-icon" aria-hidden="true">{icon}</span>
+            <span class="nav-label">{label}</span>
+        </A>
+    }
+}
+
+/// The masthead's fleet counts: hosts per state, each a link to the Hosts
+/// page filtered on that state (`/hosts?state=…`; the one shown is marked).
+#[component]
+fn FleetStats() -> impl IntoView {
+    let feeds = expect_context::<feeds::Feeds>();
+    // in legend order, coloured like the map's dots
+    let fleet = Memo::new(move |_| {
+        let mut counts = feeds.fleet();
+        counts.sort_by_key(|(state, _)| (map::tone(state).rank(), state.clone()));
+        counts
+    });
+    let location = use_location();
+    let query = use_query_map();
+    let shown_state = Memo::new(move |_| {
+        (location.pathname.get() == "/hosts")
+            .then(|| query.with(|q| q.get("state")))
+            .flatten()
+    });
+    view! {
+    <div class="stats" title="Hosts by state">
+        <A href="/hosts" attr:class="stats-label" attr:title="All hosts">"Fleet"</A>
+        <span class="stats-total">
+            {move || if feeds.ready.get() {
+                format!("{} hosts", fleet.with(|c| c.iter().map(|(_, n)| n).sum::<usize>()))
+            } else {
+                "loading…".to_string()
+            }}
+        </span>
+        // each state: a link to the Hosts page filtered on it
+        {move || fleet.get().into_iter().map(|(state, n)| {
+            let href = format!("/hosts?state={}", js_sys::encode_uri_component(&state));
+            let title = format!("Show the {} hosts", state.replace('_', " "));
+            let current = {
+                let state = state.clone();
+                move || shown_state.get().as_deref() == Some(state.as_str())
+            };
+            let style = format!("--tone: {}", map::tone(&state).css());
+            view! {
+                <A href=href attr:class=move || if current() { "stats-count current" } else { "stats-count" }
+                    attr:title=title attr:style=style>
+                    <i class="dot" aria-hidden="true"></i>
+                    <span class="state">{state.replace('_', " ")}</span>
+                    <b class="n">{n}</b>
+                </A>
+            }
+        }).collect::<Vec<_>>()}
+        <Show when=move || feeds.error.with(Option::is_some)>
+            <span class="stats-warning" title=move || feeds.error.get().unwrap_or_default()>"⚠ reconnecting…"</span>
+        </Show>
+    </div>    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let session = Session {
         token: RwSignal::new(saved_token()),
     };
     provide_context(session);
+    let theme = Theme::load();
+    provide_context(theme);
+    // live feeds of every host and of the last hour's jobs, for the
+    // masthead and the pages (run by feeds::FeedsRunner once logged in)
+    let feeds = feeds::Feeds::new();
+    provide_context(feeds);
+    let nav_folded = RwSignal::new(
+        storage()
+            .and_then(|s| s.get_item(NAV_KEY).ok().flatten())
+            .is_some_and(|v| v == "folded"),
+    );
+    let fold_nav = move |_| {
+        let folded = !nav_folded.get_untracked();
+        if let Some(storage) = storage() {
+            let _ = storage.set_item(NAV_KEY, if folded { "folded" } else { "open" });
+        }
+        nav_folded.set(folded);
+    };
     view! {
         <Show when=move || session.token.get().is_some() fallback=pages::Login>
             <Router>
-                <header>
+                <div class="app" class:nav-folded=move || nav_folded.get()>
+                <header class="masthead">
+                    <button class="icon nav-toggle" title="Fold the menu" aria-label="Fold the menu" on:click=fold_nav>"☰"</button>
                     <span class="brand"><img src="/regent-logo.png" alt="" />"regency"</span>
-                    <A href="/">"Map"</A>
-                    <A href="/hosts">"Hosts"</A>
-                    <A href="/jobs">"Jobs"</A>
-                    <A href="/config/hosts">"Configuration"</A>
+                    <feeds::FeedsRunner />
+                    <FleetStats />
+                    <div class="stats jobs-stats">
+                        <A href="/jobs" attr:class="stats-label" attr:title="All jobs">"Jobs in progress"</A>
+                        <jobchart::JobChart jobs=feeds.jobs compact=true />
+                    </div>
                     <span class="spacer"></span>
-                    <pages::WhoAmI />
-                    <button on:click=move |_| {
+                    <button class="icon" title="Light / dark theme" aria-label="Light / dark theme"
+                        on:click=move |_| theme.toggle()>
+                        {move || if theme.0.get() == "dark" { "☀" } else { "☾" }}
+                    </button>
+                    <span class="user"><span class="avatar" aria-hidden="true">"👤"</span><pages::WhoAmI /></span>
+                    <button class="logout" on:click=move |_| {
                         save_token(None);
                         session.token.set(None);
                     }>"Log out"</button>
                 </header>
+                <nav class="sidebar">
+                    <NavItem href="/" icon="◉" label="Live view" />
+                    <NavItem href="/hosts" icon="▤" label="Hosts" />
+                    <NavItem href="/jobs" icon="⟳" label="Jobs" />
+                    <div class="nav-section">"Configuration"</div>
+                    <NavItem href="/config/hosts" icon="✎" label="Host definitions" />
+                    <NavItem href="/config/sources" icon="⎇" label="Sources" />
+                    <NavItem href="/config/services" icon="⚙" label="Services" />
+                    <NavItem href="/config/security" icon="⛨" label="Security" />
+                    <NavItem href="/config/settings" icon="☷" label="Settings" />
+                </nav>
                 <main>
                     <Routes fallback=|| view! { <p>"Not found."</p> }>
                         <Route path=path!("/") view=map::Map />
@@ -74,6 +217,7 @@ fn App() -> impl IntoView {
                         <Route path=path!("/config/settings") view=config::SettingsConfig />
                     </Routes>
                 </main>
+                </div>
             </Router>
         </Show>
     }

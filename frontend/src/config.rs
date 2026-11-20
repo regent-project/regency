@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_router::components::A;
 use serde_json::{Value, json};
 
 use crate::Session;
@@ -87,19 +86,6 @@ fn message_view(message: RwSignal<Option<(bool, String)>>) -> impl IntoView {
             let class = if ok { "notice" } else { "error" };
             view! { <p class=class>{text}</p> }
         })
-    }
-}
-
-#[component]
-pub fn ConfigNav() -> impl IntoView {
-    view! {
-        <nav class="tabs">
-            <A href="/config/hosts">"Hosts"</A>
-            <A href="/config/sources">"Sources"</A>
-            <A href="/config/services">"Services"</A>
-            <A href="/config/security">"Security"</A>
-            <A href="/config/settings">"Settings"</A>
-        </nav>
     }
 }
 
@@ -396,7 +382,6 @@ pub fn HostsConfig() -> impl IntoView {
     };
 
     view! {
-        <ConfigNav />
         <h1>"Hosts"</h1>
         <p class="muted">"Host definitions of the catalog (D11). Hosts from a Git source are edited in Git; hosts from API or frontend sources are edited here. Deleting a definition never deletes the host's history: use “Delete host data” on the host page for that."</p>
         <Show when=move || error.get().is_some()><p class="error">{move || error.get()}</p></Show>
@@ -600,7 +585,6 @@ pub fn SourcesConfig() -> impl IntoView {
         }
     };
     view! {
-        <ConfigNav />
         <h1>"Sources"</h1>
         <p class="muted">"Where inventories and expected states come from (D9, D11). Git sources are polled by sourcesync (layout: inventories/*.yaml, expected_states/*.yaml under the path); credentials are secret references resolved by sourcesync."</p>
         <Show when=move || error.get().is_some()><p class="error">{move || error.get()}</p></Show>
@@ -844,7 +828,6 @@ pub fn ServicesConfig() -> impl IntoView {
     };
 
     view! {
-        <ConfigNav />
         <h1>"Services"</h1>
         <Show when=move || error.get().is_some()><p class="error">{move || error.get()}</p></Show>
         {message_view(message)}
@@ -1007,7 +990,6 @@ pub fn SecurityConfig() -> impl IntoView {
     };
 
     view! {
-        <ConfigNav />
         <h1>"Security levels"</h1>
         <p class="muted">"Four levels (D19): 0 open, 1 authenticated, 2 encrypted, 3 hardened. The internal level (links to RabbitMQ and CouchDB) is a local startup parameter of each instance; the external level can be set here (central configuration, D21) unless an instance pins it in its file or environment. An instance whose configuration is too weak for its levels refuses it."</p>
         <Show when=move || error.get().is_some()><p class="error">{move || error.get()}</p></Show>
@@ -1125,7 +1107,6 @@ pub fn SettingsConfig() -> impl IntoView {
         });
     };
     view! {
-        <ConfigNav />
         <h1>"Settings"</h1>
         {message_view(message)}
         <div class="card form">
