@@ -28,19 +28,20 @@ changes.
 Pages:
 
 - **Live view** (`/`, main page; "the map" in the code): live infrastructure graph, laid out like the
-  former proof of concept: one card per group (assignment by default,
-  label value or state) with its hosts as dots on rings around
+  former proof of concept: one card per assignment (hosts without one in
+  "(unassigned)") with its hosts as dots on rings around
   it, linked to it (no root node, no circle around a group). Dots are
   coloured by the host's compliance with its effective expected state
   (D23, `pages::host_state`): outdated (checked against an older one) like
   unknown, invalid (assignments in conflict) amber, unassigned dark grey.
-  Grouped by assignment, the graph puts a host in its most specific
+  The graph puts a host in its most specific
   assignment (the last applied, D29), the areas display in each of them;
   a host with a job
   in progress (pending, running or abort requested) is drawn in the job
   colour instead, without animation.
   Cards have Assess/Reach buttons (a plain confirmation: each host runs its
-  own effective state); an assignment's dialog also offers "Run an
+  own effective state; the run then opens in the right panel, followed
+  live through `WatchJobs` on its command id, `src/runs.rs`); an assignment's dialog also offers "Run an
   attribute…", the one-shot dialog (`src/oneshot.rs`: YAML attribute, Assess
   or Reach once on the assignment's hosts, live per-host results and
   outcomes, the last 20 runs remembered by the browser; history only, never

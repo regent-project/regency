@@ -37,6 +37,13 @@ selects, and **Final expected state** shows the result as you edit: the
 suspected conflicts and every attribute with its origin. Clicking an
 assignment's name shows the result read-only.
 
+![Building an assignment in the web UI: label filters kind=~"web|api" then env="prod" narrow the matching hosts from 2,479 to 658 live; the expected states baseline, web and prod-tuning are stacked (the last wins) and the final expected state shows each attribute's origin, swappiness from prod-tuning overriding baseline](../images/assignment.gif)
+
+*Building an assignment: two label filters select the production web and
+API hosts (658 of 2,479), and the stack `baseline`, `web`, `prod-tuning`
+gives a final state where `prod-tuning`'s `swappiness` overrides the
+baseline's.*
+
 ## Selectors
 
 | Matcher | Holds when |

@@ -17,7 +17,10 @@ replicas and RabbitMQ and CouchDB run as three-node clusters.
 ## Sizing hints
 
 - **Runners** scale with the number of hosts and the length of tasks;
-  `assess_concurrency` sets the parallel assessments per runner.
+  `assess_concurrency` and `reach_concurrency` set the assessments and
+  Reaches each runner runs at once (16 each by default: every one holds a
+  connection to its host). Raise them with the runner's resources and what
+  the hosts' SSH servers or bastions accept; add runners to go further.
 - **Schedulers** and **sourcesync** need two or three replicas for
   availability; work is spread by shards.
 - **dbwriter** scales with the outcome rate; two to four replicas handle

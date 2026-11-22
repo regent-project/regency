@@ -374,3 +374,194 @@ reach_partitions = {PARTITIONS}
         )
         .await;
 }
+
+/// A Reach that takes about a second (its remediation sleeps).
+fn slow_reach(host: &str, key: &str) -> TaskEnvelope {
+    let builder = ManagedHostBuilder::new(
+        host,
+        "localhost",
+        Some(ConnectionMethod::Localhost(TargetUser::current_user())),
+    );
+    let state = ExpectedState::from_raw_yaml(
+        "Attributes:\n  - Name: nap\n    Privilege: !None\n    Detail: !Command\n      Cmd: \"sleep 1\"\n",
+    )
+    .unwrap();
+    let task = RegentTask::from(builder, state, Job::Reach).with_idempotency_key(key);
+    TaskEnvelope::new(task, chrono::Utc::now(), "c-test")
+}
+
+// `[runner] reach_concurrency` caps the Reaches run at once, every partition
+// together (a Reach of thousands of hosts would otherwise open
+// reach_prefetch × partitions connections at once).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs docker"]
+async fn reach_concurrency_caps_reaches_across_partitions() {
+    const CAP: usize = 2;
+    let infra = infra().await;
+    let pool = unique("p");
+    let dir = std::env::temp_dir().join(unique("runner-test-"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let health_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = format!(
+        r#"
+[rabbitmq]
+url = "{amqp}"
+stream_port = {stream_port}
+username = "regency"
+password = {{ SecRef = "{rp}" }}
+[couchdb]
+url = "{couch}"
+username = "{cu}"
+password = {{ SecRef = "{cp}" }}
+[health]
+listen = "127.0.0.1:{health_port}"
+[log]
+format = "text"
+[security]
+internal = 1
+external = 2
+[runner]
+pool = "{pool}"
+lock_retry_sec = 1
+reach_prefetch = 4
+reach_concurrency = {CAP}
+live = false
+[topology]
+reach_partitions = {PARTITIONS}
+"#,
+        amqp = infra.rabbitmq.url,
+        stream_port = infra.rabbitmq.stream_port,
+        rp = infra.rabbitmq.password.as_ref().unwrap().sec_ref(),
+        couch = infra.couchdb.url,
+        cu = infra.couchdb.username.as_deref().unwrap(),
+        cp = infra.couchdb.password.as_ref().unwrap().sec_ref(),
+    );
+    let config_path = dir.join("runner.toml");
+    std::fs::write(&config_path, config).unwrap();
+
+    let connection = regencylib::amqp::connect(&infra.rabbitmq, &infra.secrets, "test")
+        .await
+        .unwrap();
+    let channel = connection.create_channel().await.unwrap();
+    let topology_config = TopologyConfig {
+        reach_partitions: PARTITIONS,
+        ..Default::default()
+    };
+    topology::declare_exchanges(&channel).await.unwrap();
+    topology::declare_pool(&channel, &topology_config, &pool)
+        .await
+        .unwrap();
+    topology::declare_control_stream(&channel, &topology_config)
+        .await
+        .unwrap();
+    topology::declare_live_stream(&channel, &topology_config)
+        .await
+        .unwrap();
+    // outcomes read below; lifecycle events need a queue too (published
+    // with `mandatory`: unroutable = refused)
+    let queue = unique("test.runner.");
+    let lifecycle_queue = unique("test.runner.");
+    for (q, exchange) in [(&queue, EX_OUTCOMES), (&lifecycle_queue, EX_LIFECYCLE)] {
+        channel
+            .queue_declare(
+                q.as_str().into(),
+                QueueDeclareOptions {
+                    exclusive: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await
+            .unwrap();
+        channel
+            .queue_bind(
+                q.as_str().into(),
+                exchange.into(),
+                "#".into(),
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+            .await
+            .unwrap();
+    }
+    let mut outcomes = channel
+        .basic_consume(
+            queue.as_str().into(),
+            "".into(),
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .unwrap();
+
+    let _child = tokio::process::Command::new(env!("CARGO_BIN_EXE_regency-runner"))
+        .args(["--config", config_path.to_str().unwrap()])
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut ready = false;
+    for _ in 0..100 {
+        if let Ok(r) = reqwest::get(format!("http://127.0.0.1:{health_port}/readyz")).await
+            && r.status().is_success()
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(ready, "runner not ready");
+    tokio::time::sleep(Duration::from_secs(2)).await; // partitions acquired
+
+    // six hosts spread over the partitions: without the cap, all at once
+    let publisher = Publisher::new(&connection).await.unwrap();
+    let mut partitions = std::collections::BTreeSet::new();
+    let total = 6;
+    for _ in 0..total {
+        let host = unique("h");
+        let partition = bucket(&host, PARTITIONS);
+        partitions.insert(partition);
+        let route = topology::reach_key(&pool, PARTITIONS, partition);
+        publisher
+            .publish_json(
+                EX_TASKS,
+                &route,
+                &slow_reach(&host, &unique("run:c:")).to_bytes().unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        partitions.len() > 1,
+        "hosts all in one partition: {partitions:?}"
+    );
+
+    let mut spans = Vec::new();
+    while spans.len() < total {
+        let delivery = tokio::time::timeout(Duration::from_secs(60), outcomes.next())
+            .await
+            .expect("outcome")
+            .unwrap()
+            .unwrap();
+        delivery.ack(BasicAckOptions::default()).await.unwrap();
+        let result = decode_outcome(&delivery.data).unwrap().result;
+        assert!(result.task_ran_to_completion(), "{:?}", result.outcome());
+        spans.push((result.started_at(), result.finished_at()));
+    }
+    // most Reaches running at the same instant
+    let most = spans
+        .iter()
+        .map(|(start, _)| {
+            spans
+                .iter()
+                .filter(|(s, f)| s <= start && start < f)
+                .count()
+        })
+        .max()
+        .unwrap();
+    assert!(most <= CAP, "{most} Reaches at once (cap {CAP}): {spans:?}");
+    assert_eq!(most, CAP, "the cap is also the parallelism: {spans:?}");
+}

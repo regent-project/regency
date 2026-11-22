@@ -8,6 +8,7 @@ mod client;
 mod config;
 mod expected;
 mod feeds;
+mod icons;
 mod jobchart;
 mod labelpicker;
 // D26: the same label selectors as the services (regencylib), for previews
@@ -19,6 +20,7 @@ mod map;
 mod onboarding;
 mod oneshot;
 mod pages;
+mod runs;
 
 use leptos::prelude::*;
 use leptos_router::components::{A, Route, Router, Routes};
@@ -93,7 +95,7 @@ const NAV_KEY: &str = "regency.nav";
 fn NavItem(href: &'static str, icon: &'static str, label: &'static str) -> impl IntoView {
     view! {
         <A href=href attr:title=label>
-            <span class="nav-icon" aria-hidden="true">{icon}</span>
+            <span class="nav-icon"><icons::Icon name=icon /></span>
             <span class="nav-label">{label}</span>
         </A>
     }
@@ -146,9 +148,35 @@ fn FleetStats() -> impl IntoView {
             }
         }).collect::<Vec<_>>()}
         <Show when=move || feeds.error.with(Option::is_some)>
-            <span class="stats-warning" title=move || feeds.error.get().unwrap_or_default()>"⚠ reconnecting…"</span>
+            <span class="stats-warning" title=move || feeds.error.get().unwrap_or_default()><icons::Icon name="warning" />"Reconnecting…"</span>
         </Show>
     </div>    }
+}
+
+/// The signed-in user (avatar + name) and a dropdown with "Log out".
+#[component]
+fn UserMenu() -> impl IntoView {
+    let session = expect_context::<Session>();
+    let open = RwSignal::new(false);
+    view! {
+        <div class="user-menu">
+            <button class="user" aria-haspopup="menu" aria-expanded=move || open.get().to_string()
+                on:click=move |_| open.update(|o| *o = !*o)>
+                <pages::WhoAmI />
+                <icons::Icon name="chevron-down" />
+            </button>
+            <Show when=move || open.get()>
+                // a click anywhere else closes the menu
+                <div class="menu-backdrop" on:click=move |_| open.set(false)></div>
+                <div class="dropdown" role="menu">
+                    <button role="menuitem" on:click=move |_| {
+                        save_token(None);
+                        session.token.set(None);
+                    }><icons::Icon name="logout" />"Log out"</button>
+                </div>
+            </Show>
+        </div>
+    }
 }
 
 #[component]
@@ -179,9 +207,31 @@ fn App() -> impl IntoView {
         <Show when=move || session.token.get().is_some() fallback=pages::Login>
             <Router>
                 <div class="app" class:nav-folded=move || nav_folded.get()>
-                <header class="masthead">
-                    <button class="icon nav-toggle" title="Fold the menu" aria-label="Fold the menu" on:click=fold_nav>"☰"</button>
-                    <span class="brand"><img src="/regent-logo.png" alt="" />"regency"</span>
+                <aside class="sidebar">
+                    <A href="/" attr:class="sidebar-brand" attr:title="regency">
+                        <img src="/regent-logo.png" alt="" /><span class="nav-label">"regency"</span>
+                    </A>
+                    <nav>
+                        <div class="nav-section">"Menu"</div>
+                        <NavItem href="/" icon="dashboard" label="Live view" />
+                        <NavItem href="/hosts" icon="server" label="Hosts" />
+                        <NavItem href="/states" icon="clipboard" label="States" />
+                        <NavItem href="/assignments" icon="layers" label="Assignments" />
+                        <div class="nav-section">"Activity"</div>
+                        <NavItem href="/jobs" icon="clock" label="Jobs" />
+                        <div class="nav-section">"Administration"</div>
+                        <NavItem href="/config/hosts" icon="edit" label="Host definitions" />
+                        <NavItem href="/config/sources" icon="branch" label="Sources" />
+                        <NavItem href="/config/services" icon="box" label="Services" />
+                        <NavItem href="/config/security" icon="shield" label="Security" />
+                        <NavItem href="/config/settings" icon="sliders" label="Settings" />
+                    </nav>
+                </aside>
+                <div class="content">
+                <header class="topbar">
+                    <button class="icon-button" title="Fold the menu" aria-label="Fold the menu" on:click=fold_nav>
+                        <icons::Icon name="menu" />
+                    </button>
                     <feeds::FeedsRunner />
                     <FleetStats />
                     <div class="stats jobs-stats">
@@ -189,30 +239,16 @@ fn App() -> impl IntoView {
                         <jobchart::JobChart jobs=feeds.jobs compact=true />
                     </div>
                     <span class="spacer"></span>
-                    <button class="icon" title="Light / dark theme" aria-label="Light / dark theme"
+                    <button class="icon-button round" title="Light / dark theme" aria-label="Light / dark theme"
                         on:click=move |_| theme.toggle()>
-                        {move || if theme.0.get() == "dark" { "☀" } else { "☾" }}
+                        {move || if theme.0.get() == "dark" {
+                            view! { <icons::Icon name="sun" /> }.into_any()
+                        } else {
+                            view! { <icons::Icon name="moon" /> }.into_any()
+                        }}
                     </button>
-                    <span class="user"><span class="avatar" aria-hidden="true">"👤"</span><pages::WhoAmI /></span>
-                    <button class="logout" on:click=move |_| {
-                        save_token(None);
-                        session.token.set(None);
-                    }>"Log out"</button>
+                    <UserMenu />
                 </header>
-                <nav class="sidebar">
-                    <NavItem href="/" icon="◉" label="Live view" />
-                    <NavItem href="/hosts" icon="▤" label="Hosts" />
-                    <NavItem href="/states" icon="☑" label="States" />
-                    <NavItem href="/assignments" icon="⇄" label="Assignments" />
-                    <div class="nav-section">"Activity"</div>
-                    <NavItem href="/jobs" icon="⟳" label="Jobs" />
-                    <div class="nav-section">"Administration"</div>
-                    <NavItem href="/config/hosts" icon="✎" label="Host definitions" />
-                    <NavItem href="/config/sources" icon="⎇" label="Sources" />
-                    <NavItem href="/config/services" icon="⚙" label="Services" />
-                    <NavItem href="/config/security" icon="⛨" label="Security" />
-                    <NavItem href="/config/settings" icon="☷" label="Settings" />
-                </nav>
                 <main>
                     <Routes fallback=|| view! { <p>"Not found."</p> }>
                         <Route path=path!("/") view=map::Map />
@@ -235,6 +271,7 @@ fn App() -> impl IntoView {
                         <Route path=path!("/config/settings") view=config::SettingsConfig />
                     </Routes>
                 </main>
+                </div>
                 </div>
             </Router>
         </Show>

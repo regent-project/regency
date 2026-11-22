@@ -86,8 +86,8 @@ picked up by the next firing.
 
 ## The live views
 
-- **Map** (home page): one card per assignment (or label value, or
-  state), with its hosts as dots colored by their state against their
+- **Map** (home page): one card per assignment (hosts without one in
+  *(unassigned)*), with its hosts as dots colored by their state against their
   effective expected state ([Assignments](assignments.md)): grey when
   unassigned. Two displays: **graph** (hosts on rings around the card, the
   least compliant nearest; a host with several assignments around its last
@@ -95,15 +95,23 @@ picked up by the next firing.
   hosts; a host with several assignments drawn in each).
   Each card has **Assess** and **Reach** buttons (each host runs its own
   effective state; an assignment's dialog can also run a hand-written
-  attribute once); a click on a card folds or unfolds its hosts. A host with
+  attribute once). Once confirmed, the run opens in the right panel and
+  is followed live: whether the command was accepted, LIVE then FINISHED,
+  a progress bar, counts and its hosts (those needing attention first;
+  click one to see it). A click on a card folds or unfolds its hosts. A host with
   a job in progress (pending, running or abort requested) turns light blue
   until it finishes. Zoom with the wheel, pan by dragging;
   hovering a host shows a tip next to the cursor; clicking it opens the
-  right panel (its assignments and effective state; nothing is shown there
-  until a host is selected), **Details** opens its page. Proactive hosts
+  right panel (its assignments and effective state), **Details** opens
+  its page. The right panel floats over the map; drag its left edge to
+  resize it. Proactive hosts
   are diamonds ([Proactive hosts](proactive-hosts.md)).
-- **Hosts**: a live table with a filter (id, state, `label=value`,
-  assignment).
+- **Hosts**: a live table with filters, all applied together: a plain
+  search (words found anywhere in the host's id, state, labels,
+  assignments or error; no syntax), a state, an assignment (or
+  *Unassigned*) and a label selector (`{kind=~"web|api", env!="dev"}`,
+  written by hand or built from the hosts' labels, as on the Assignments
+  page).
 - **Host page**: state, failing attributes and needed remediations,
   certificate status (proactive hosts), outcome history with full details,
   and its **effective expected state**: its assignments in order, each with

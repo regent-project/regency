@@ -872,8 +872,8 @@ pub fn ServicesConfig() -> impl IntoView {
                                 <td><span class=format!("badge {state}")>{label}</span>
                                     {(!s.config_error.is_empty()).then(|| view! { <div class="error">{s.config_error.clone()}</div> })}</td>
                                 <td>{format!("internal {} · external {}", s.security_internal, s.security_external)}</td>
-                                <td>{format_ms(s.started_at)}</td>
-                                <td>{format_ms(s.last_seen)}</td>
+                                <td><span class="ts">{format_ms(s.started_at)}</span></td>
+                                <td><span class="ts">{format_ms(s.last_seen)}</span></td>
                                 <td><button on:click=move |_| selected.set(Some(id.clone()))>"Effective config"</button></td>
                             </tr>
                         }

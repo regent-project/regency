@@ -27,6 +27,13 @@ pub struct RunnerSection {
     /// concurrently; a second Reach for a busy host waits locally).
     #[serde(default = "default_reach_prefetch")]
     pub reach_prefetch: u16,
+    /// Reaches run at once by this runner, all partitions together (each
+    /// opens a connection to its host); the others wait their turn, still
+    /// pending. Without it, a Reach of thousands of hosts would run up to
+    /// `reach_prefetch` × owned partitions at once (1024 by default) and
+    /// overwhelm SSH servers, bastions or the runner itself. 0 reads as 1.
+    #[serde(default = "default_concurrency")]
+    pub reach_concurrency: u16,
     /// D7 look-back on `regency.control`: longest task TTL + consumer_timeout.
     #[serde(default = "default_lookback")]
     pub control_lookback_sec: u64,
@@ -78,6 +85,7 @@ impl Default for RunnerSection {
             pool: default_pool(),
             assess_concurrency: default_concurrency(),
             reach_prefetch: default_reach_prefetch(),
+            reach_concurrency: default_concurrency(),
             control_lookback_sec: default_lookback(),
             shutdown_grace_sec: default_grace(),
             lock_retry_sec: default_lock_retry(),

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use lapin::{Channel, Connection};
-use regencylib::amqp::{Publisher, closed, connect_retrying, consume, consume_on};
+use regencylib::amqp::{Handled, Publisher, closed, connect_retrying, consume, consume_on};
 use regencylib::control::{self, Aborts};
 use regencylib::shard::{self, ShardSpec, Watchdog};
 use regencylib::telemetry::{Health, counter, gauge, shutdown_signal};
@@ -276,6 +276,10 @@ async fn reach_partitions(
         watchdog_timeout: Duration::from_secs(60),
     };
     let watchdog = Watchdog::new();
+    // shared by every owned partition: Reaches running at once
+    let slots = Arc::new(tokio::sync::Semaphore::new(usize::from(
+        config.runner.reach_concurrency.max(1),
+    )));
     let (owned_tx, mut owned_rx) = watch::channel(BTreeSet::new());
     let ownership = shard::run(&spec, &connection, &watchdog, &owned_tx, session);
     let manage = async {
@@ -323,10 +327,25 @@ async fn reach_partitions(
                 let tag = format!("{name}/part-{partition}");
                 let prefetch = config.runner.reach_prefetch;
                 let cancel = token.clone();
+                let slots = slots.clone();
+                let stop = token.clone();
                 let task = tokio::spawn(async move {
                     let handler = move |delivery| {
                         let executor = executor.clone();
-                        async move { executor.handle(delivery).await }
+                        let slots = slots.clone();
+                        let stop = stop.clone();
+                        async move {
+                            // at most reach_concurrency Reaches at once (FIFO);
+                            // given back if the partition stops meanwhile
+                            let _slot = tokio::select! {
+                                slot = slots.acquire_owned() => match slot {
+                                    Ok(slot) => slot,
+                                    Err(_) => return Handled::Requeue,
+                                },
+                                _ = stop.cancelled() => return Handled::Requeue,
+                            };
+                            executor.handle(delivery).await
+                        }
                     };
                     if let Err(e) =
                         consume_on(&channel, &queue, &tag, prefetch, &cancel, handler).await

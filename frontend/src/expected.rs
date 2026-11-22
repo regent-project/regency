@@ -179,7 +179,6 @@ pub fn load_assignments(into: RwSignal<Vec<AssignmentEntry>>, error: RwSignal<Op
 /// What a map group stands for: the hosts its Assess / Reach run on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GroupTarget {
-    Label(String, String),
     /// An assignment (D23) and its host selector.
     Assignment(String, api::HostSelector),
 }
@@ -187,17 +186,12 @@ pub enum GroupTarget {
 impl GroupTarget {
     pub fn selector(&self) -> api::HostSelector {
         match self {
-            GroupTarget::Label(key, value) => api::HostSelector {
-                labels: [(key.clone(), value.clone())].into_iter().collect(),
-                ..Default::default()
-            },
             GroupTarget::Assignment(_, selector) => selector.clone(),
         }
     }
 
     pub fn describe(&self) -> String {
         match self {
-            GroupTarget::Label(key, value) => format!("label {key}={value}"),
             GroupTarget::Assignment(reference, _) => format!("assignment {reference}"),
         }
     }

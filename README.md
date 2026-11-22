@@ -7,7 +7,7 @@
   [![CI](https://github.com/regent-project/regency/actions/workflows/ci.yml/badge.svg)](https://github.com/regent-project/regency/actions/workflows/ci.yml)
   [![Discord](https://img.shields.io/badge/Discord-Join%20our%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/2gxAW7uzsx)
 
-  <img src="book/src/images/demo.gif" alt="regency: 3000 hosts in 12 groups, a Reach fixes the drifting ones (red) live" width="900" />
+  <img src="book/src/images/demo.gif" alt="regency, dark theme: 3,600 hosts grouped by assignment; a Reach of the biggest assignment (baseline, 2,454 hosts) fixes the drifting ones (red) and is followed live in the run panel (sped up); then one host: its Reach log and its expected state, attribute by attribute. Hosts still red afterwards are regops agents, which apply their own Git state" width="900" />
 </div>
 
 regency is the fleet-scale control plane of
@@ -35,6 +35,13 @@ by priority. If two of them set the same attribute differently, regency
 reports the conflict and runs nothing on that host until it is fixed.
 Hosts running the regops agent report their own labels, so they are
 selected the same way.
+
+<p align="center"><img src="book/src/images/assignment.gif" alt="Building an assignment in the web UI: label filters kind=~"web|api" then env="prod" narrow the matching hosts from 2,479 to 658 live; the expected states baseline, web and prod-tuning are stacked (the last wins) and the final expected state shows each attribute's origin, swappiness from prod-tuning overriding baseline" width="900" /></p>
+
+The same in the web UI: label filters picked from the labels in use narrow
+the matching hosts as you type, and the stack of expected states shows its
+final state, each attribute with the state it comes from and the ones it
+overrides.
 
 ## Quick start
 

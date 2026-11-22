@@ -42,6 +42,9 @@ file = 'C:\ProgramData\regency\logs\runner.log'
 [runner]
 pool = "default"
 # assess_concurrency = 16
+# Reaches run at once, every partition together (one connection to its host
+# each; the others wait, still pending)
+# reach_concurrency = 16
 # SSH identity of this runner, generated at first start (ed25519) when
 # missing; its public key is shown in the web UI (Add hosts) to authorize it
 # on hosts (D25)

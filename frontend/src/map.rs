@@ -39,6 +39,7 @@ use crate::feeds::Feeds;
 use crate::live::{HostLive, HostTip, RunLogView, running_jobs};
 use crate::oneshot::OneShotDialog;
 use crate::pages::{assignments_line, badge, host_state};
+use crate::runs::{ActiveRun, RunPanel, RunStatus};
 use crate::{Session, Theme};
 
 pub const DOT: f64 = 7.0;
@@ -95,13 +96,6 @@ impl Display {
             Display::Areas => "areas",
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GroupBy {
-    Assignment,
-    Label,
-    State,
 }
 
 /// Colour of a host's dot.
@@ -384,8 +378,6 @@ impl Members<'_> {
 /// selector of each assignment (D23), for its Assess / Reach.
 fn members<'a>(
     hosts: &'a BTreeMap<String, api::HostSummary>,
-    group_by: GroupBy,
-    label_key: &str,
     collapsed: &BTreeSet<String>,
     every_group: bool,
     assignments: &BTreeMap<String, api::HostSelector>,
@@ -393,14 +385,12 @@ fn members<'a>(
     let mut members: BTreeMap<String, (Option<GroupTarget>, Vec<&api::HostSummary>)> =
         BTreeMap::new();
     for host in hosts.values() {
-        let groups: Vec<(String, Option<GroupTarget>)> = match group_by {
-            GroupBy::Assignment if host.assignments.is_empty() => {
-                vec![("(unassigned)".to_string(), None)]
-            }
+        let groups: Vec<(String, Option<GroupTarget>)> = if host.assignments.is_empty() {
+            vec![("(unassigned)".to_string(), None)]
+        } else {
             // graph: one group per host, its most specific assignment (the
             // last applied); areas: every assignment
-            GroupBy::Assignment => host
-                .assignments
+            host.assignments
                 .iter()
                 .rev()
                 .take(if every_group { usize::MAX } else { 1 })
@@ -410,15 +400,7 @@ fn members<'a>(
                     });
                     (reference.clone(), target)
                 })
-                .collect(),
-            GroupBy::Label => vec![match host.labels.get(label_key) {
-                Some(value) => (
-                    format!("{label_key}={value}"),
-                    Some(GroupTarget::Label(label_key.to_string(), value.clone())),
-                ),
-                None => (format!("(no {label_key})"), None),
-            }],
-            GroupBy::State => vec![(host_state(host).replace('_', " "), None)],
+                .collect()
         };
         for (name, target) in groups {
             members
@@ -481,12 +463,10 @@ fn shelves(sizes: &[(f64, f64)], gap: f64, center: bool) -> Vec<(f64, f64)> {
 fn layout(
     hosts: &BTreeMap<String, api::HostSummary>,
     display: Display,
-    group_by: GroupBy,
-    label_key: &str,
     collapsed: &BTreeSet<String>,
     assignments: &BTreeMap<String, api::HostSelector>,
 ) -> Layout {
-    let groups = |every| members(hosts, group_by, label_key, collapsed, every, assignments);
+    let groups = |every| members(hosts, collapsed, every, assignments);
     let mut layout = match display {
         // name order in both displays: a host changing state stays where it
         // is
@@ -706,35 +686,14 @@ pub fn Map() -> impl IntoView {
     });
 
     let display = RwSignal::new(Display::saved());
-    // D23: the colours mean "against the assignments", so group by them first
-    let group_by = RwSignal::new(GroupBy::Assignment);
-    let label_key = RwSignal::new(String::new());
+    // hosts are grouped by assignment (D23: colours mean "against the
+    // assignments"), hosts without one in "(unassigned)"
     let collapsed = RwSignal::new(BTreeSet::<String>::new());
-    let label_keys = Memo::new(move |_| {
-        hosts.with(|hosts| {
-            let keys: BTreeSet<&str> = hosts
-                .values()
-                .flat_map(|host| host.labels.keys().map(String::as_str))
-                .collect();
-            keys.into_iter().map(str::to_string).collect::<Vec<_>>()
-        })
-    });
     let rings = Memo::new(move |_| jobs.with(rings));
     let map = Memo::new(move |_| {
         hosts.with(|hosts| {
-            label_key.with(|label_key| {
-                collapsed.with(|collapsed| {
-                    selectors.with(|selectors| {
-                        layout(
-                            hosts,
-                            display.get(),
-                            group_by.get(),
-                            label_key,
-                            collapsed,
-                            selectors,
-                        )
-                    })
-                })
+            collapsed.with(|collapsed| {
+                selectors.with(|selectors| layout(hosts, display.get(), collapsed, selectors))
             })
         })
     });
@@ -1007,33 +966,50 @@ pub fn Map() -> impl IntoView {
             hosts: count,
         }));
     };
+    // the run asked last: followed live in the right panel
+    let active_run = RwSignal::new(None::<ActiveRun>);
+    // the page's owner: a run's status outlives the confirmation dialog
+    // (where `confirm` runs, disposed once closed)
+    let page_owner = StoredValue::new(Owner::current().expect("the Live view has an owner"));
     let confirm = move || {
         let Some(run) = pending.get_untracked() else {
             return;
         };
         pending.set(None);
+        let id = command_id("run");
+        let status =
+            page_owner.with_value(|owner| owner.with(|| RwSignal::new(RunStatus::Sending)));
+        // the panel opens at once, before backend answers
+        selected.set(None);
+        active_run.set(Some(ActiveRun {
+            command_id: id.clone(),
+            job: run.job,
+            target: run.target.describe(),
+            expected: run.hosts,
+            started_at: js_sys::Date::now() as i64,
+            status,
+        }));
         spawn_local(async move {
             let request = api::RunNowRequest {
-                command_id: command_id("run"),
+                command_id: id,
                 selector: Some(run.target.selector()),
                 job: run.job as i32,
                 pool: String::new(),
                 one_shot_yaml: String::new(),
             };
-            let text = match client().run_now(authed(request, &session.token())).await {
-                Ok(_) => format!(
-                    "{} of {} accepted",
-                    job_label(run.job as i32),
-                    run.target.describe()
-                ),
+            let result = match client().run_now(authed(request, &session.token())).await {
+                Ok(_) => RunStatus::Accepted,
                 Err(status) => {
                     session.check(&status);
-                    format!("refused: {}", status.message())
+                    RunStatus::Refused(status.message().to_string())
                 }
             };
-            let _ = message.try_set(Some(text));
+            let _ = status.try_set(result);
         });
     };
+    // the right panel shows the selected host, else the run
+    let showing_host = Memo::new(move |_| selected.with(Option::is_some));
+    let panel_open = Memo::new(move |_| showing_host.get() || active_run.with(Option::is_some));
 
     // the host panel is open whenever a host is selected
     let right_open = RwSignal::new(true);
@@ -1104,7 +1080,7 @@ pub fn Map() -> impl IntoView {
         }
     };
     let page_class = move || {
-        if selected.with(Option::is_some) {
+        if panel_open.get() {
             "map-page"
         } else {
             "map-page no-panel"
@@ -1141,26 +1117,6 @@ pub fn Map() -> impl IntoView {
                     })
                 }}
                 <div class="toolbar">
-                    <span class="muted">"Group by"</span>
-                    <select on:change=move |ev| {
-                        let value = event_target_value(&ev);
-                        collapsed.set(BTreeSet::new());
-                        center.set(None);
-                        group_by.set(match value.as_str() {
-                            "state" => GroupBy::State,
-                            "assignment" => GroupBy::Assignment,
-                            key => {
-                                label_key.set(key.trim_start_matches("label:").to_string());
-                                GroupBy::Label
-                            }
-                        });
-                    }>
-                        <option value="assignment">"assignment"</option>
-                        <For each=move || label_keys.get() key=|k| k.clone() let:key>
-                            <option value=format!("label:{key}")>{format!("label {key}")}</option>
-                        </For>
-                        <option value="state">"state"</option>
-                    </select>
                     <span class="muted">"Display"</span>
                     <select title="Graph: hosts around their group; areas: hosts inside their group"
                         on:change=move |ev| {
@@ -1246,7 +1202,8 @@ pub fn Map() -> impl IntoView {
                             let running = rings.with(|rings| m.running(rings));
                             m.groups.iter().cloned().zip(running).collect::<Vec<_>>()
                         })
-                        key=|(g, running)| (g.name.clone(), position_key(g.x, g.y), g.total, g.ok, g.bad, *running, g.collapsed)
+                        // the target too: the buttons appear once the assignments are loaded
+                        key=|(g, running)| (g.name.clone(), position_key(g.x, g.y), g.total, g.ok, g.bad, *running, g.collapsed, g.target.is_some())
                         let:card>
                         {group_card(card.0, card.1, collapsed, moved, ask)}
                     </For>
@@ -1269,10 +1226,19 @@ pub fn Map() -> impl IntoView {
                         </details>
                 </div>
             </section>
-            // the host panel: only for a selected host (a click on it)
-            <Show when=move || selected.with(Option::is_some)>
+            // the right panel: a selected host (a click on it), else the
+            // run asked last
+            <Show when=move || panel_open.get()>
             {splitter(right_width, right_open, -1.0)}
             <aside class="map-side map-right">
+                {
+                let navigate = navigate.clone();
+                move || if showing_host.get() {
+                    let navigate = navigate.clone();
+                    view! {
+                    {move || active_run.with(Option::is_some).then(|| view! {
+                        <button class="small back" on:click=move |_| selected.set(None)>"← Back to the run"</button>
+                    })}
                     <div class="host-head">
                         <h2>{move || selected.get().unwrap_or_default()}</h2>
                         <button class="primary" on:click={
@@ -1298,6 +1264,15 @@ pub fn Map() -> impl IntoView {
                     }}
                     <h2>"Expected state"</h2>
                     <HostStateExplorer host=Signal::derive(move || selected_host.with(|h| h.as_ref().map(|(host, _)| host.clone()))) />
+                    }.into_any()
+                } else {
+                    active_run.get().map(|run| view! {
+                        <RunPanel run=run
+                            on_close=Callback::new(move |()| active_run.set(None))
+                            on_host=Callback::new(move |id: String| selected.set(Some(id))) />
+                    }).into_any()
+                }
+                }
             </aside>
             </Show>
         </div>
@@ -1311,8 +1286,7 @@ pub fn Map() -> impl IntoView {
                             <h2>{format!("{} {}", job_label(run.job as i32), run.target.describe())}</h2>
                             <p class="muted">{format!("{} hosts on the map; the selection is resolved again by the scheduler.", run.hosts)}</p>
                             {match &run.target {
-                                GroupTarget::Assignment(_, selector) => Some(view! { <p class="muted">{format!("Selects {}.", describe_selector(selector))}</p> }),
-                                _ => None,
+                                GroupTarget::Assignment(_, selector) => view! { <p class="muted">{format!("Selects {}.", describe_selector(selector))}</p> },
                             }}
                             {reach.then(|| view! { <p class="reach-warning">"Reach changes the hosts to match their expected state."</p> })}
                             <div class="actions">
@@ -1360,8 +1334,8 @@ fn host_summary(host: api::HostSummary, job: Option<String>, with_name: bool) ->
             {job.map(|state| view! { <dt>"Job"</dt><dd>{badge(state)}</dd> })}
             {host.conflicting.then(|| view! { <dt>"Flag"</dt><dd>"conflicting definitions"</dd> })}
             {(!host.pending_fingerprints.is_empty()).then(|| view! { <dt>"Flag"</dt><dd>"certificate pending"</dd> })}
-            <dt>"Last outcome"</dt><dd>{format_ms(host.state_at)}</dd>
-            <dt>"Last seen"</dt><dd>{format_ms(host.last_seen)}</dd>
+            <dt>"Last outcome"</dt><dd><span class="ts">{format_ms(host.state_at)}</span></dd>
+            <dt>"Last seen"</dt><dd><span class="ts">{format_ms(host.last_seen)}</span></dd>
             <dt>"Labels"</dt><dd>{host.labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")}</dd>
         </dl>
         {(!host.error.is_empty()).then(|| view! { <p class="error">{host.error.clone()}</p> })}
@@ -1418,12 +1392,12 @@ fn group_card(
         let (t1, t2) = (target.clone(), target);
         view! {
             <g class="btn assess" on:click=move |ev| { ev.stop_propagation(); ask(t1.clone(), api::JobKind::Assess, count); }>
-                <rect x=left + 12.0 y=by width=bw height="22" rx="4" />
+                <rect x=left + 12.0 y=by width=bw height="22" rx="6" />
                 <text x=left + 12.0 + bw / 2.0 y=by + 15.0 text-anchor="middle">"Assess"</text>
                 <title>"Assess every host of this group"</title>
             </g>
             <g class="btn reach" on:click=move |ev| { ev.stop_propagation(); ask(t2.clone(), api::JobKind::Reach, count); }>
-                <rect x=left + 24.0 + bw y=by width=bw height="22" rx="4" />
+                <rect x=left + 24.0 + bw y=by width=bw height="22" rx="6" />
                 <text x=left + 24.0 + bw * 1.5 y=by + 15.0 text-anchor="middle">"Reach"</text>
                 <title>"Reach the expected state on every host of this group"</title>
             </g>
@@ -1512,14 +1486,7 @@ mod tests {
     #[test]
     fn groups_by_assignment() {
         let hosts = fleet();
-        let map = layout(
-            &hosts,
-            Display::Areas,
-            GroupBy::Assignment,
-            "",
-            &BTreeSet::new(),
-            &selectors(),
-        );
+        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
         let names: Vec<&str> = map.groups.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names.len(), 5, "{names:?}");
         let base = map.groups.iter().find(|g| g.name == "git/base").unwrap();
@@ -1544,14 +1511,7 @@ mod tests {
     #[test]
     fn graph_groups_by_most_specific_assignment() {
         let hosts = fleet();
-        let map = layout(
-            &hosts,
-            Display::Graph,
-            GroupBy::Assignment,
-            "",
-            &BTreeSet::new(),
-            &selectors(),
-        );
+        let map = layout(&hosts, Display::Graph, &BTreeSet::new(), &selectors());
         let total = |name: &str| map.groups.iter().find(|g| g.name == name).unwrap().total;
         // each host under its last (most specific) assignment only: the
         // shared web+db host under git/db, nothing left under git/base
@@ -1604,14 +1564,7 @@ mod tests {
         // states vary across the fleet: the cells must not follow them,
         // or every host would move when one changes state
         let hosts = fleet();
-        let map = layout(
-            &hosts,
-            Display::Areas,
-            GroupBy::Label,
-            "kind",
-            &BTreeSet::new(),
-            &selectors(),
-        );
+        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
         for group in &map.groups {
             let mut cells: Vec<(f64, f64, &str)> = map
                 .of_host
@@ -1634,14 +1587,7 @@ mod tests {
     fn graph_keeps_hosts_in_name_order() {
         // like areas: ring places follow names, not states
         let hosts = fleet();
-        let map = layout(
-            &hosts,
-            Display::Graph,
-            GroupBy::Label,
-            "kind",
-            &BTreeSet::new(),
-            &selectors(),
-        );
+        let map = layout(&hosts, Display::Graph, &BTreeSet::new(), &selectors());
         for group in &map.groups {
             let ids: Vec<&str> = map
                 .hosts
@@ -1658,14 +1604,7 @@ mod tests {
     #[test]
     fn areas_hold_their_hosts() {
         let hosts = fleet();
-        let map = layout(
-            &hosts,
-            Display::Areas,
-            GroupBy::Assignment,
-            "",
-            &BTreeSet::new(),
-            &selectors(),
-        );
+        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
         assert!(!map.links);
         assert_eq!(map.areas.len(), 5);
         // the shared host is drawn in its three assignments, and counted in each
@@ -1706,14 +1645,7 @@ mod tests {
         }
         // folded: the card alone, its hosts not drawn there
         let folded: BTreeSet<String> = ["git/web".to_string()].into();
-        let map = layout(
-            &hosts,
-            Display::Areas,
-            GroupBy::Assignment,
-            "",
-            &folded,
-            &selectors(),
-        );
+        let map = layout(&hosts, Display::Areas, &folded, &selectors());
         let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
         let area = web.area.unwrap();
         assert!(area.folded && area.w < CARD_W + 40.0 && web.total == 41);
@@ -1721,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_by_label_without_overlap() {
+    fn graph_groups_without_overlap() {
         let hosts = fleet();
         let job = |id: &str, host: &str, state: &str, created_at| {
             let job = api::JobSummary {
@@ -1743,25 +1675,15 @@ mod tests {
         .collect();
         let rings = rings(&jobs);
         assert_eq!(rings, [("h1".to_string(), Ring::Started)].into());
-        let map = layout(
-            &hosts,
-            Display::Graph,
-            GroupBy::Label,
-            "kind",
-            &BTreeSet::new(),
-            &selectors(),
-        );
+        let map = layout(&hosts, Display::Graph, &BTreeSet::new(), &selectors());
         assert_eq!(map.groups.len(), 4);
         assert_eq!(map.hosts.len(), 122);
-        let web = map.groups.iter().find(|g| g.name == "kind=web").unwrap();
-        assert_eq!(
-            web.target,
-            Some(GroupTarget::Label("kind".into(), "web".into()))
-        );
+        let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
+        assert!(matches!(&web.target, Some(GroupTarget::Assignment(r, _)) if r == "git/web"));
         assert!(
             map.groups
                 .iter()
-                .any(|g| g.name == "(no kind)" && g.target.is_none())
+                .any(|g| g.name == "(unassigned)" && g.target.is_none())
         );
         assert_eq!(map.running(&rings).iter().sum::<usize>(), 1);
         // worst hosts on the inner ring
@@ -1785,20 +1707,13 @@ mod tests {
             }
         }
         // folded: no hosts placed
-        let folded: BTreeSet<String> = ["kind=web".to_string(), "kind=db".to_string()].into();
-        let map = layout(
-            &hosts,
-            Display::Graph,
-            GroupBy::Label,
-            "kind",
-            &folded,
-            &selectors(),
-        );
-        let web = map.groups.iter().find(|g| g.name == "kind=web").unwrap();
-        assert!(web.collapsed && web.total == 41);
+        let folded: BTreeSet<String> = ["git/web".to_string(), "git/db".to_string()].into();
+        let map = layout(&hosts, Display::Graph, &folded, &selectors());
+        let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
+        assert!(web.collapsed && web.total == 40);
         assert!(map.hosts.iter().all(|p| (p.gx, p.gy) != (web.x, web.y)));
         // folded hosts still count in their group (h1 is a db), but are not placed
-        let db_index = map.groups.iter().position(|g| g.name == "kind=db").unwrap();
+        let db_index = map.groups.iter().position(|g| g.name == "git/db").unwrap();
         assert_eq!(map.running(&rings)[db_index], 1);
         assert!(map.placements("h1").next().is_none());
     }

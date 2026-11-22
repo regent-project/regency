@@ -12,6 +12,7 @@ use crate::Session;
 use crate::client::api::{self, host_event, job_event};
 use crate::client::{authed, client, command_id, format_ms, save_token};
 use crate::expected::{HostStateExplorer, job_label};
+use crate::labels::{HostLabels, LabelSelector};
 
 /// Run `task` until the component is dropped.
 pub fn spawn_scoped(task: impl std::future::Future<Output = ()> + 'static) {
@@ -113,7 +114,17 @@ pub fn agent_lines(host: &api::HostSummary) -> impl IntoView + use<> {
 
 pub fn badge(state: String) -> impl IntoView {
     let class = format!("badge {state}");
-    view! { <span class=class>{state.replace('_', " ")}</span> }
+    view! { <span class=class>{humanize(&state)}</span> }
+}
+
+/// A state as shown in a pill: `NOT_COMPLIANT` / `not_compliant` → `Not compliant`.
+pub fn humanize(state: &str) -> String {
+    let text = state.replace('_', " ").to_lowercase();
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
 }
 
 #[component]
@@ -143,18 +154,38 @@ pub fn Login() -> impl IntoView {
         });
     };
     view! {
+        <div class="login-page">
         <form class="login" on:submit=move |ev| { ev.prevent_default(); submit(); }>
-            <img src="/regent-logo.png" alt="" />
-            <h1>"regency"</h1>
-            <input placeholder="Username" autocomplete="username"
-                prop:value=move || username.get() on:input=move |ev| username.set(event_target_value(&ev)) />
-            <input placeholder="Password" type="password" autocomplete="current-password"
-                prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev)) />
-            <button class="primary" type="submit" disabled=move || busy.get()>"Log in"</button>
+            <div class="login-brand"><img src="/regent-logo.png" alt="" /><span>"regency"</span></div>
+            <h1>"Sign in"</h1>
+            <p class="muted">"Enter your username and password to sign in."</p>
+            <label>"Username"
+                <input placeholder="Username" autocomplete="username"
+                    prop:value=move || username.get() on:input=move |ev| username.set(event_target_value(&ev)) />
+            </label>
+            <label>"Password"
+                <input placeholder="Password" type="password" autocomplete="current-password"
+                    prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev)) />
+            </label>
+            <button class="primary" type="submit" disabled=move || busy.get()>"Sign in"</button>
             <Show when=move || error.get().is_some()>
                 <p class="error">{move || error.get()}</p>
             </Show>
         </form>
+        <aside class="login-aside">
+            <div class="login-logo"><img src="/regent-logo.png" alt="" /></div>
+            <div class="login-name">"regency"</div>
+            <p>"Configuration management for your whole fleet"</p>
+        </aside>
+        </div>
+    }
+}
+
+/// A Cedar principal (`User::"alice"`) as a name to show (`alice`).
+fn display_name(principal: &str) -> String {
+    match principal.split_once("::") {
+        Some((_, name)) => name.trim_matches('"').to_string(),
+        None => principal.to_string(),
     }
 }
 
@@ -173,7 +204,18 @@ pub fn WhoAmI() -> impl IntoView {
             Err(status) => session.check(&status),
         }
     });
-    view! { <span class="muted">{move || principal.get()}</span> }
+    // avatar: the first letter of the name
+    let initial = move || {
+        display_name(&principal.get())
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_default()
+    };
+    view! {
+        <span class="avatar" aria-hidden="true">{initial}</span>
+        <span class="user-name">{move || display_name(&principal.get())}</span>
+    }
 }
 
 /// Live updates are applied in batches: the first message of a batch, then
@@ -298,35 +340,75 @@ pub fn Hosts() -> impl IntoView {
         error,
         ..
     } = expect_context::<crate::feeds::Feeds>();
-    let filter = RwSignal::new(String::new());
+    let session = expect_context::<Session>();
     // D25: the "Add a host" dialog
     let adding = RwSignal::new(false);
-    // `?state=<state>`: hosts in exactly that state (`host_state`), e.g. from
-    // the masthead's fleet counts
+
+    // filters, all optional and combined (AND):
+    // - plain search: words anywhere in the host's id, state, labels,
+    //   assignments or error, no syntax;
+    let search = RwSignal::new(String::new());
+    // - state, kept in the URL (`?state=`, e.g. from the header's counts);
     let query = use_query_map();
     let state = Memo::new(move |_| query.with(|q| q.get("state")).filter(|s| !s.is_empty()));
-
-    let visible = move || {
-        let needle = filter.get().to_lowercase();
-        let state = state.get();
-        hosts.with(|hosts| {
-            hosts
-                .values()
-                .filter(|h| state.as_deref().is_none_or(|s| host_state(h) == s))
-                .filter(|h| {
-                    needle.is_empty()
-                        || h.host_id.to_lowercase().contains(&needle)
-                        || host_state(h).contains(&needle)
-                        || h.labels
-                            .iter()
-                            .any(|(k, v)| format!("{k}={v}").contains(&needle))
-                        || h.assignments.iter().any(|i| i.contains(&needle))
-                })
-                .cloned()
-                .collect::<Vec<_>>()
+    let navigate = leptos_router::hooks::use_navigate();
+    // - assignment (`(unassigned)` for hosts without one);
+    let assignment = RwSignal::new(String::new());
+    // - labels: a Loki-style selector (D26), built or written
+    let selector_text = RwSignal::new(String::new());
+    let selector_code = RwSignal::new(false);
+    // bumped to rebuild the builder from the text (mode switch, clear)
+    let builder_epoch = RwSignal::new(0u32);
+    let selector = Memo::new(move |_| {
+        selector_text.with(|text| {
+            let text = text.trim();
+            if text.is_empty() || text == "{}" {
+                Ok(None)
+            } else {
+                LabelSelector::parse(text).map(Some)
+            }
         })
-    };
-    let counts = move || {
+    });
+    // the sources defining each host, for the built-in `source` label
+    let hostdefs = RwSignal::new(Vec::<crate::config::Entry>::new());
+    crate::config::load_catalog_with(session, "hostdef", hostdefs, RwSignal::new(None));
+    let sources = Memo::new(move |_| {
+        hostdefs.with(|defs| {
+            let mut sources: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for def in defs {
+                sources
+                    .entry(crate::config::str_of(&def.item, "host_id"))
+                    .or_default()
+                    .push(crate::config::str_of(&def.item, "source_id"));
+            }
+            sources
+        })
+    });
+    let labelled = Memo::new(move |_| {
+        hosts.with(|hosts| {
+            sources.with(|sources| {
+                hosts
+                    .values()
+                    .map(|h| (h.host_id.clone(), labels_of(h, sources.get(&h.host_id))))
+                    .collect::<Vec<_>>()
+            })
+        })
+    });
+    let assignment_names = Memo::new(move |_| {
+        hosts.with(|hosts| {
+            let mut names: Vec<String> = hosts
+                .values()
+                .flat_map(|h| h.assignments.iter().cloned())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if hosts.values().any(|h| h.assignments.is_empty()) {
+                names.push(UNASSIGNED.to_string());
+            }
+            names
+        })
+    });
+    let state_counts = Memo::new(move |_| {
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
         hosts.with(|hosts| {
             for host in hosts.values() {
@@ -334,33 +416,143 @@ pub fn Hosts() -> impl IntoView {
             }
         });
         counts.into_iter().collect::<Vec<_>>()
+    });
+    let filtering = move || {
+        !search.with(|s| s.trim().is_empty())
+            || state.with(Option::is_some)
+            || !assignment.with(String::is_empty)
+            || selector.with(|s| !matches!(s, Ok(None)))
+    };
+    let clear = {
+        let navigate = navigate.clone();
+        move |_| {
+            search.set(String::new());
+            assignment.set(String::new());
+            selector_text.set(String::new());
+            builder_epoch.update(|e| *e += 1);
+            navigate("/hosts", Default::default());
+        }
+    };
+
+    let visible = move || {
+        let words = search_words(&search.get());
+        let state = state.get();
+        let assignment = assignment.get();
+        // an invalid selector filters nothing (its error is shown)
+        let selector = selector.get().ok().flatten();
+        let sources = sources.get();
+        hosts.with(|hosts| {
+            hosts
+                .values()
+                .filter(|h| state.as_deref().is_none_or(|s| host_state(h) == s))
+                .filter(|h| match assignment.as_str() {
+                    "" => true,
+                    UNASSIGNED => h.assignments.is_empty(),
+                    name => h.assignments.iter().any(|a| a == name),
+                })
+                .filter(|h| {
+                    selector
+                        .as_ref()
+                        .is_none_or(|s| s.matches(&labels_of(h, sources.get(&h.host_id))))
+                })
+                .filter(|h| search_matches(h, &words))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    };
+    let label_body = move || {
+        builder_epoch.track();
+        if selector_code.get() {
+            view! {
+                <input class="mono selector-code" spellcheck="false" placeholder=r#"{env="prod", role=~"web|api"}"#
+                    prop:value=move || selector_text.get()
+                    on:input=move |ev| selector_text.set(event_target_value(&ev)) />
+            }
+            .into_any()
+        } else {
+            view! {
+                <crate::labelpicker::SelectorBuilder
+                    selector=Signal::derive(move || selector_text.get())
+                    set_selector=Callback::new(move |text: String| selector_text.set(text))
+                    hosts=Signal::derive(move || labelled.get()) />
+            }
+            .into_any()
+        }
     };
     view! {
         <h1>"Hosts"</h1>
         <Show when=move || adding.get()>
             <crate::onboarding::AddHostDialog on_close=Callback::new(move |()| adding.set(false)) />
         </Show>
-        <div class="counts">
-            <For each=counts key=|c| c.clone() let:count>
-                {badge(count.0.clone())} <span>{count.1}</span>
-            </For>
+        <div class="card filters">
+            <div class="filter-row">
+                <label class="filter">"Search"
+                    <input type="search" placeholder="Host, label, assignment…" class="filter-search"
+                        prop:value=move || search.get() on:input=move |ev| search.set(event_target_value(&ev)) />
+                </label>
+                <label class="filter">"State"
+                    <select on:change={
+                        let navigate = navigate.clone();
+                        move |ev| {
+                            let value = event_target_value(&ev);
+                            let to = if value.is_empty() {
+                                "/hosts".to_string()
+                            } else {
+                                format!("/hosts?state={}", js_sys::encode_uri_component(&value))
+                            };
+                            navigate(&to, Default::default());
+                        }
+                    }>
+                        <option value="" selected=move || state.with(Option::is_none)>"All states"</option>
+                        {move || state_counts.get().into_iter().map(|(name, n)| {
+                            let current = state.get().as_deref() == Some(name.as_str());
+                            view! { <option value=name.clone() selected=current>{format!("{} ({n})", humanize(&name))}</option> }
+                        }).collect::<Vec<_>>()}
+                    </select>
+                </label>
+                <label class="filter">"Assignment"
+                    <select on:change=move |ev| assignment.set(event_target_value(&ev))>
+                        <option value="" selected=move || assignment.with(String::is_empty)>"All assignments"</option>
+                        {move || assignment_names.get().into_iter().map(|name| {
+                            let current = assignment.get() == name;
+                            let text = if name == UNASSIGNED { "Unassigned".to_string() } else { name.clone() };
+                            view! { <option value=name selected=current>{text}</option> }
+                        }).collect::<Vec<_>>()}
+                    </select>
+                </label>
+                <span class="spacer"></span>
+                <button class="primary" on:click=move |_| adding.set(true)>"Add host"</button>
+            </div>
+            <div class="filter-labels">
+                <div class="field-head">
+                    <span class="field-label">"Labels (Loki-style selector, all filters must hold)"</span>
+                    <div class="modes" role="tablist">
+                        <button type="button" role="tab" class:active=move || !selector_code.get()
+                            title="Build the selector from the hosts' labels"
+                            on:click=move |_| if selector_code.get_untracked() {
+                                selector_code.set(false);
+                                builder_epoch.update(|e| *e += 1);
+                            }>"Builder"</button>
+                        <button type="button" role="tab" class:active=move || selector_code.get()
+                            title="Write the selector as text"
+                            on:click=move |_| selector_code.set(true)>"Code"</button>
+                    </div>
+                </div>
+                {label_body}
+                {move || selector.get().err().map(|e| view! { <p class="error">{format!("Label selector: {e}")}</p> })}
+            </div>
         </div>
         <div class="toolbar">
-            {move || state.get().map(|s| view! {
-                <span class="filter-chip">"State: " {badge(s)}
-                    <a href="/hosts" title="Show every state" aria-label="Remove the state filter">"×"</a>
-                </span>
-            })}
-            <input placeholder="Filter: host, state, label=value, assignment" style="min-width: 320px"
-                prop:value=move || filter.get() on:input=move |ev| filter.set(event_target_value(&ev)) />
-            <button class="primary" on:click=move |_| adding.set(true)>"Add host"</button>
             <span class="muted">{move || if !ready.get() {
                 "loading…".to_string()
-            } else if state.with(Option::is_some) || !filter.with(String::is_empty) {
+            } else if filtering() {
                 format!("{} of {} hosts, live", visible().len(), hosts.with(|h| h.len()))
             } else {
                 format!("{} hosts, live", hosts.with(|h| h.len()))
             }}</span>
+            <Show when=filtering>
+                <button class="small" on:click=clear.clone()>"Clear filters"</button>
+            </Show>
         </div>
         <Show when=move || error.get().is_some()>
             <p class="error">{move || error.get()}</p>
@@ -368,7 +560,7 @@ pub fn Hosts() -> impl IntoView {
         <table>
             <thead><tr><th>"Host"</th><th>"State"</th><th>"Last outcome"</th><th>"Last seen"</th><th>"Labels"</th><th>"Assignments"</th></tr></thead>
             <tbody>
-                <For each=visible key=|h| (h.host_id.clone(), host_state(h).to_string(), h.state_at, h.last_seen, h.labels.len()) let:host>
+                <For each=visible key=|h| (h.host_id.clone(), host_state(h).to_string(), h.state_at, h.last_seen, h.labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>(), h.assignments.clone()) let:host>
                     <tr>
                         <td><a href=format!("/hosts/{}", host.host_id)>{host.host_id.clone()}</a>
                             {host.conflicting.then(|| view! { " " <span class="badge error">"conflicting definitions"</span> })}
@@ -376,8 +568,8 @@ pub fn Hosts() -> impl IntoView {
                         </td>
                         <td>{badge(host_state(&host).to_string())}
                             {(!host.error.is_empty()).then(|| view! { <div class="muted">{host.error.clone()}</div> })}</td>
-                        <td>{format_ms(host.state_at)}</td>
-                        <td>{format_ms(host.last_seen)}</td>
+                        <td><span class="ts">{format_ms(host.state_at)}</span></td>
+                        <td><span class="ts">{format_ms(host.last_seen)}</span></td>
                         <td>{host.labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")}</td>
                         <td>{host.assignments.join(", ")}</td>
                     </tr>
@@ -385,6 +577,57 @@ pub fn Hosts() -> impl IntoView {
             </tbody>
         </table>
     }
+}
+
+/// The Hosts page's choice for hosts without assignment.
+const UNASSIGNED: &str = "(unassigned)";
+
+/// A host's labels for label selectors (D26): its own (agent labels
+/// included, D28), built-in `host` and `source` (its definitions' sources,
+/// plus `regops` for a reporting agent).
+fn labels_of(host: &api::HostSummary, sources: Option<&Vec<String>>) -> HostLabels {
+    let labels: BTreeMap<String, String> = host
+        .labels
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let agent = (!host.agent.is_empty()).then_some("regops");
+    let sources = sources
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .chain(agent);
+    HostLabels::new(&host.host_id, sources, &labels)
+}
+
+/// The words of a plain search, lower case.
+fn search_words(text: &str) -> Vec<String> {
+    text.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Plain search: every word appears (case-insensitive) in the host's id,
+/// state, a label (`key=value`), an assignment or its error.
+fn search_matches(host: &api::HostSummary, words: &[String]) -> bool {
+    if words.is_empty() {
+        return true;
+    }
+    let state = host_state(host);
+    let mut haystack = format!(
+        "{} {} {} {}",
+        host.host_id,
+        state,
+        humanize(state),
+        host.error
+    );
+    for (k, v) in &host.labels {
+        haystack.push_str(&format!(" {k}={v}"));
+    }
+    for a in &host.assignments {
+        haystack.push(' ');
+        haystack.push_str(a);
+    }
+    let haystack = haystack.to_lowercase();
+    words.iter().all(|w| haystack.contains(w.as_str()))
 }
 
 #[component]
@@ -593,9 +836,9 @@ pub fn HostPage() -> impl IntoView {
                     <dt>"State"</dt><dd>{badge(host_state(&host).to_string())} " " <span class="muted">{host.error.clone()}</span></dd>
                     <dt>"Assignments"</dt><dd>{assignments_line(&host)}</dd>
                     {agent_lines(&host)}
-                    <dt>"Last outcome"</dt><dd>{format_ms(host.state_at)}</dd>
-                    <dt>"First seen"</dt><dd>{format_ms(host.first_seen)}</dd>
-                    <dt>"Last seen"</dt><dd>{format_ms(host.last_seen)}</dd>
+                    <dt>"Last outcome"</dt><dd><span class="ts">{format_ms(host.state_at)}</span></dd>
+                    <dt>"First seen"</dt><dd><span class="ts">{format_ms(host.first_seen)}</span></dd>
+                    <dt>"Last seen"</dt><dd><span class="ts">{format_ms(host.last_seen)}</span></dd>
                     <dt>"Labels"</dt><dd>{host.labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")}</dd>
                     <dt>"Certificate"</dt><dd>
                         {if host.pinned_fingerprint.is_empty() { "—".to_string() } else { format!("pinned {}", host.pinned_fingerprint) }}
@@ -650,7 +893,7 @@ pub fn HostPage() -> impl IntoView {
                         let (log_job, log_month, finished_at) = (job_id.clone(), month.clone(), outcome.finished_at);
                         view! {
                             <tr class:expanded=open>
-                                <td>{format_ms(outcome.finished_at)}</td>
+                                <td><span class="ts">{format_ms(outcome.finished_at)}</span></td>
                                 <td>{job_label(outcome.job)} {outcome.one_shot.then(|| view! { <span class="tag" title="One-shot attribute: kept in history, does not set the host's state">"one-shot"</span> })}</td>
                                 <td>{badge(outcome.compliance.clone())} " " <span class="muted">{outcome.error.clone()}</span></td>
                                 <td class="muted">{outcome.origin.clone()}</td>
@@ -800,7 +1043,7 @@ pub fn Jobs() -> impl IntoView {
                         let detail_job = job.clone();
                         view! {
                             <tr>
-                                <td>{format_ms(job.created_at)}</td>
+                                <td><span class="ts">{format_ms(job.created_at)}</span></td>
                                 <td><a href=format!("/hosts/{}", job.host_id)>{job.host_id.clone()}</a></td>
                                 <td>{job_label(job.job)}</td>
                                 <td>{badge(job.state.clone())}</td>
@@ -837,5 +1080,56 @@ pub fn Jobs() -> impl IntoView {
                 </For>
             </tbody>
         </table>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host() -> api::HostSummary {
+        api::HostSummary {
+            host_id: "web-01".into(),
+            compliance: "not_compliant".into(),
+            labels: [("env".to_string(), "prod".to_string())]
+                .into_iter()
+                .collect(),
+            assignments: vec!["git/web".into()],
+            effective_revision: "r".into(),
+            state_revision: "r".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn plain_search_needs_no_syntax() {
+        let h = host();
+        let ok = |text: &str| search_matches(&h, &search_words(text));
+        assert!(ok(""));
+        assert!(ok("WEB"));
+        assert!(ok("prod web-01"));
+        assert!(ok("env=prod"));
+        assert!(ok("not compliant"));
+        assert!(ok("git/web"));
+        assert!(!ok("staging"));
+        assert!(!ok("web staging"));
+    }
+
+    #[test]
+    fn label_selectors_see_built_in_labels() {
+        let h = host();
+        let sources = vec!["dataset".to_string()];
+        let labels = labels_of(&h, Some(&sources));
+        let sel = |text: &str| LabelSelector::parse(text).unwrap().matches(&labels);
+        assert!(sel(r#"{env="prod"}"#));
+        assert!(sel(r#"{host=~"web-.*", source="dataset"}"#));
+        assert!(!sel(r#"{env!="prod"}"#));
+        let mut agent = host();
+        agent.agent = "regops".into();
+        assert!(
+            LabelSelector::parse(r#"{source="regops"}"#)
+                .unwrap()
+                .matches(&labels_of(&agent, None))
+        );
     }
 }
