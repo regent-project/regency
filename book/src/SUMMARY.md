@@ -33,7 +33,7 @@
 # Operations
 
 - [Configuration](operations/configuration.md)
-- [Hosts and inventories](operations/hosts.md)
+- [Hosts and labels](operations/hosts.md)
 - [Sources (Git)](operations/sources.md)
 - [Assignments and effective expected states](operations/assignments.md)
 - [Running jobs and recurring orders](operations/jobs-orders.md)

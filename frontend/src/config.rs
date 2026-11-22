@@ -65,7 +65,7 @@ fn level_name(level: u32) -> &'static str {
 }
 
 /// Run a command RPC and report its result in `message`.
-fn report(
+pub(crate) fn report(
     message: RwSignal<Option<(bool, String)>>,
     session: Session,
     result: Result<String, tonic::Status>,
@@ -80,7 +80,7 @@ fn report(
     let _ = message.try_set(Some(value));
 }
 
-fn message_view(message: RwSignal<Option<(bool, String)>>) -> impl IntoView {
+pub(crate) fn message_view(message: RwSignal<Option<(bool, String)>>) -> impl IntoView {
     move || {
         message.get().map(|(ok, text)| {
             let class = if ok { "notice" } else { "error" };
@@ -92,13 +92,23 @@ fn message_view(message: RwSignal<Option<(bool, String)>>) -> impl IntoView {
 // ---------------------------------------------------------------- catalog
 
 #[derive(Clone, PartialEq)]
-struct Entry {
-    doc_id: String,
-    item: Value,
+pub(crate) struct Entry {
+    pub(crate) doc_id: String,
+    pub(crate) item: Value,
 }
 
 fn load_catalog(kind: &'static str, into: RwSignal<Vec<Entry>>, error: RwSignal<Option<String>>) {
-    let session = expect_context::<Session>();
+    load_catalog_with(expect_context::<Session>(), kind, into, error);
+}
+
+/// [`load_catalog`] with an explicit session (callable outside the component,
+/// e.g. from a timer).
+pub(crate) fn load_catalog_with(
+    session: Session,
+    kind: &'static str,
+    into: RwSignal<Vec<Entry>>,
+    error: RwSignal<Option<String>>,
+) {
     spawn_local(async move {
         let request = api::ListCatalogRequest {
             source_id: String::new(),
@@ -131,12 +141,33 @@ fn load_catalog(kind: &'static str, into: RwSignal<Vec<Entry>>, error: RwSignal<
     });
 }
 
-fn str_of(value: &Value, key: &str) -> String {
+pub(crate) fn str_of(value: &Value, key: &str) -> String {
     value
         .get(key)
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+/// `key=value, ...` into a JSON object.
+pub(crate) fn parse_pairs(text: &str) -> Result<serde_json::Map<String, Value>, String> {
+    let mut map = serde_json::Map::new();
+    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (k, v) = part
+            .split_once('=')
+            .ok_or_else(|| format!("`{part}`: expected key=value"))?;
+        map.insert(k.trim().to_string(), json!(v.trim()));
+    }
+    Ok(map)
+}
+
+/// `a, b, ...` into its non-empty trimmed parts.
+pub(crate) fn split_list(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// A content hash as the revision of API/frontend items (D9).
@@ -150,7 +181,10 @@ fn content_revision(item: &Value) -> String {
     format!("ui-{hash:016x}")
 }
 
-async fn upsert_item(session: Session, mut item: Value) -> Result<String, tonic::Status> {
+pub(crate) async fn upsert_item(
+    session: Session,
+    mut item: Value,
+) -> Result<String, tonic::Status> {
     item["revision"] = Value::Null;
     let revision = content_revision(&item);
     item["revision"] = json!(revision);
@@ -164,7 +198,7 @@ async fn upsert_item(session: Session, mut item: Value) -> Result<String, tonic:
         .map(|_| "accepted: the catalog updates in a moment".to_string())
 }
 
-async fn delete_item(
+pub(crate) async fn delete_item(
     session: Session,
     doc_id: String,
     source_id: String,
@@ -180,7 +214,7 @@ async fn delete_item(
         .map(|_| "deletion accepted".to_string())
 }
 
-const SSH_TEMPLATE: &str = r#"{
+pub(crate) const SSH_TEMPLATE: &str = r#"{
   "Ssh2": {
     "AuthMethod": { "Key": { "Username": "ops", "Key": { "SecRef": "ops_ed25519", "Provider": "files" } } },
     "HostKey": { "Fingerprints": ["SHA256:..."] }
@@ -193,7 +227,6 @@ struct HostForm {
     host_id: String,
     endpoint: String,
     connection: String,
-    inventories: String,
     labels: String,
     pool: String,
     vars: String,
@@ -214,15 +247,6 @@ impl HostForm {
             host_id: str_of(item, "host_id"),
             endpoint: str_of(builder, "Endpoint"),
             connection: pretty(&builder["HostConnectionMethod"]),
-            inventories: item["inventories"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default(),
             labels: item["labels"]
                 .as_object()
                 .map(|m| {
@@ -245,17 +269,6 @@ impl HostForm {
         }
     }
 
-    fn pairs(text: &str) -> Result<serde_json::Map<String, Value>, String> {
-        let mut map = serde_json::Map::new();
-        for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-            let (k, v) = part
-                .split_once('=')
-                .ok_or_else(|| format!("`{part}`: expected key=value"))?;
-            map.insert(k.trim().to_string(), json!(v.trim()));
-        }
-        Ok(map)
-    }
-
     fn to_item(&self) -> Result<Value, String> {
         if self.source_id.is_empty() || self.host_id.trim().is_empty() {
             return Err("source and host id are required".into());
@@ -265,14 +278,14 @@ impl HostForm {
         } else {
             serde_json::from_str(&self.connection).map_err(|e| format!("connection method: {e}"))?
         };
-        let vars = Self::pairs(&self.vars)?;
-        let inventories: Vec<String> = self
-            .inventories
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
+        let vars = parse_pairs(&self.vars)?;
+        // D29: labels decide the host's assignments; host and source are built in
+        let labels = parse_pairs(&self.labels)?;
+        let own: std::collections::BTreeMap<String, String> = labels
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
             .collect();
+        crate::labels::check_user_labels(&own)?;
         let mut item = json!({
             "type": "hostdef",
             "source_id": self.source_id,
@@ -283,8 +296,7 @@ impl HostForm {
                 "HostConnectionMethod": connection,
                 "HostVars": if vars.is_empty() { Value::Null } else { Value::Object(vars) },
             },
-            "inventories": inventories,
-            "labels": Self::pairs(&self.labels)?,
+            "labels": labels,
         });
         if !self.pool.trim().is_empty() {
             item["pool"] = json!(self.pool.trim());
@@ -324,11 +336,26 @@ pub fn HostsConfig() -> impl IntoView {
 
     let form = RwSignal::new(None::<HostForm>);
     let filter = RwSignal::new(String::new());
+    // D25: new SSH hosts use the runners' own key (default pool) when known
+    let instances = RwSignal::new(Vec::<InstanceView>::new());
+    load_instances(session, instances, error);
     let new_host = move || {
         let source_id = editable_sources().first().cloned().unwrap_or_default();
+        let key = instances.with_untracked(|i| {
+            crate::onboarding::runner_keys(i)
+                .remove("default")
+                .and_then(|keys| keys.into_iter().next())
+        });
+        let connection = match key {
+            Some(key) => SSH_TEMPLATE.replace(
+                r#""SecRef": "ops_ed25519""#,
+                &format!(r#""SecRef": {}"#, json!(key.path)),
+            ),
+            None => SSH_TEMPLATE.to_string(),
+        };
         form.set(Some(HostForm {
             source_id,
-            connection: SSH_TEMPLATE.to_string(),
+            connection,
             ..Default::default()
         }));
     };
@@ -383,7 +410,6 @@ pub fn HostsConfig() -> impl IntoView {
 
     view! {
         <h1>"Hosts"</h1>
-        <p class="muted">"Host definitions of the catalog (D11). Hosts from a Git source are edited in Git; hosts from API or frontend sources are edited here. Deleting a definition never deletes the host's history: use “Delete host data” on the host page for that."</p>
         <Show when=move || error.get().is_some()><p class="error">{move || error.get()}</p></Show>
         {message_view(message)}
         <div class="toolbar">
@@ -407,8 +433,7 @@ pub fn HostsConfig() -> impl IntoView {
                 </label>
                 {field("Host id", |f| f.host_id.clone(), |f, v| f.host_id = v, "web-01 (global host id, D9)")}
                 {field("Endpoint", |f| f.endpoint.clone(), |f, v| f.endpoint = v, "10.0.0.5:22 or localhost")}
-                {field("Inventories", |f| f.inventories.clone(), |f, v| f.inventories = v, "web, production")}
-                {field("Labels", |f| f.labels.clone(), |f, v| f.labels = v, "env=prod, team=web")}
+                {field("Labels (they decide the host's assignments)", |f| f.labels.clone(), |f, v| f.labels = v, "env=prod, role=web")}
                 {field("Runner pool", |f| f.pool.clone(), |f, v| f.pool = v, "default")}
                 {field("Host vars", |f| f.vars.clone(), |f, v| f.vars = v, "key=value, ...")}
                 <label>"Connection method (regent-sdk JSON; secrets as references only, D9)"
@@ -422,7 +447,7 @@ pub fn HostsConfig() -> impl IntoView {
             </div>
         </Show>
         <table>
-            <thead><tr><th>"Host"</th><th>"Source"</th><th>"Endpoint"</th><th>"Inventories"</th><th>"Labels"</th><th>"Pool"</th><th></th></tr></thead>
+            <thead><tr><th>"Host"</th><th>"Source"</th><th>"Endpoint"</th><th>"Labels"</th><th>"Pool"</th><th></th></tr></thead>
             <tbody>
                 <For each=visible key=|(e, kind)| (e.doc_id.clone(), str_of(&e.item, "revision"), kind.clone()) let:row>
                     {
@@ -438,7 +463,6 @@ pub fn HostsConfig() -> impl IntoView {
                                 <td><a href=format!("/hosts/{host_id}")>{host_id.clone()}</a></td>
                                 <td>{source_id.clone()} " " <span class="badge">{kind.clone()}</span></td>
                                 <td>{str_of(&item["builder"], "Endpoint")}</td>
-                                <td>{item["inventories"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default()}</td>
                                 <td>{item["labels"].as_object().map(|m| m.iter().map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default())).collect::<Vec<_>>().join(", ")).unwrap_or_default()}</td>
                                 <td>{str_of(&item, "pool")}</td>
                                 <td>{editable.then(|| view! {
@@ -459,7 +483,7 @@ pub fn HostsConfig() -> impl IntoView {
     }
 }
 
-fn confirm(text: &str) -> bool {
+pub(crate) fn confirm(text: &str) -> bool {
     web_sys::window()
         .and_then(|w| w.confirm_with_message(text).ok())
         .unwrap_or(false)
@@ -586,7 +610,6 @@ pub fn SourcesConfig() -> impl IntoView {
     };
     view! {
         <h1>"Sources"</h1>
-        <p class="muted">"Where inventories and expected states come from (D9, D11). Git sources are polled by sourcesync (layout: inventories/*.yaml, expected_states/*.yaml under the path); credentials are secret references resolved by sourcesync."</p>
         <Show when=move || error.get().is_some()><p class="error">{move || error.get()}</p></Show>
         {message_view(message)}
         <div class="toolbar">
@@ -655,12 +678,12 @@ pub fn SourcesConfig() -> impl IntoView {
 // ---------------------------------------------------------------- services
 
 #[derive(Clone, PartialEq)]
-struct InstanceView {
-    summary: api::Instance,
-    status: Value,
+pub(crate) struct InstanceView {
+    pub(crate) summary: api::Instance,
+    pub(crate) status: Value,
 }
 
-fn load_instances(
+pub(crate) fn load_instances(
     session: Session,
     into: RwSignal<Vec<InstanceView>>,
     error: RwSignal<Option<String>>,
@@ -861,7 +884,6 @@ pub fn ServicesConfig() -> impl IntoView {
         {move || effective().map(|(id, keys, origins)| view! {
             <div class="card">
                 <h2>{format!("Effective configuration of {id}")} " " <button on:click=move |_| selected.set(None)>"Close"</button></h2>
-                <p class="muted">"Keys set in the instance's file or environment are pinned: the central document cannot change them."</p>
                 <table>
                     <thead><tr><th>"Key"</th><th>"Value"</th><th>"From"</th></tr></thead>
                     <tbody>
@@ -888,7 +910,6 @@ pub fn ServicesConfig() -> impl IntoView {
             </div>
         })}
         <h2>"Central configuration"</h2>
-        <p class="muted">"Same sections and keys as the service's TOML file. Local-only keys ([rabbitmq], [couchdb], [secrets], [health], [log], [central], instance, security.internal, runner.pool) are refused. Saving validates the document against every live instance; each instance checks it again and restarts to apply it."</p>
         <div class="toolbar">
             <select on:change=move |ev| { service.set(event_target_value(&ev)); load_doc(); }>
                 {SERVICES.map(|s| view! { <option value=s selected=move || service.get() == s>{s}</option> })}
@@ -991,7 +1012,6 @@ pub fn SecurityConfig() -> impl IntoView {
 
     view! {
         <h1>"Security levels"</h1>
-        <p class="muted">"Four levels (D19): 0 open, 1 authenticated, 2 encrypted, 3 hardened. The internal level (links to RabbitMQ and CouchDB) is a local startup parameter of each instance; the external level can be set here (central configuration, D21) unless an instance pins it in its file or environment. An instance whose configuration is too weak for its levels refuses it."</p>
         <Show when=move || error.get().is_some()><p class="error">{move || error.get()}</p></Show>
         {message_view(message)}
         <For each=warnings key=|w| w.clone() let:warning>
@@ -1051,6 +1071,8 @@ pub fn SettingsConfig() -> impl IntoView {
     let retention = RwSignal::new(String::new());
     // D24: size limit of the log kept with each job, shown in KiB
     let run_log_kib = RwSignal::new(String::new());
+    // D25: endpoint URL shown to regops agents (empty = derived)
+    let endpoint_url = RwSignal::new(String::new());
     let message = RwSignal::new(None::<(bool, String)>);
     spawn_scoped(async move {
         if let Ok(response) = client()
@@ -1069,11 +1091,13 @@ pub fn SettingsConfig() -> impl IntoView {
                 .as_u64()
                 .unwrap_or(DEFAULT_RUN_LOG_MAX_BYTES);
             let _ = run_log_kib.try_set((bytes / 1024).to_string());
+            let _ = endpoint_url.try_set(str_of(&values, "endpoint_url"));
         }
     });
     let save = move || {
         let months = retention.get_untracked().trim().to_string();
         let kib = run_log_kib.get_untracked().trim().to_string();
+        let url = endpoint_url.get_untracked().trim().to_string();
         spawn_local(async move {
             let bytes = match kib.parse::<u64>() {
                 Ok(kib) => kib.saturating_mul(1024),
@@ -1088,6 +1112,11 @@ pub fn SettingsConfig() -> impl IntoView {
             for (key, value, accepted) in [
                 ("retention_months", months, "retention accepted"),
                 (RUN_LOG_MAX_BYTES, bytes.to_string(), "settings accepted"),
+                (
+                    "endpoint_url",
+                    Value::String(url.clone()).to_string(),
+                    "settings accepted",
+                ),
             ] {
                 let request = api::SetSettingsRequest {
                     command_id: command_id("settings"),
@@ -1116,8 +1145,10 @@ pub fn SettingsConfig() -> impl IntoView {
             <label>"Job log size limit, KiB (the live view of each job is kept with its outcome up to this size, D24; beyond it the log is cropped and marked ⚠; 0 = no log kept)"
                 <input type="number" min="0" prop:value=move || run_log_kib.get() on:input=move |ev| run_log_kib.set(event_target_value(&ev)) />
             </label>
+            <label>"Endpoint URL for regops agents (https://…; empty = the web client's host with the endpoint's port; shown by Hosts → Add host)"
+                <input placeholder="https://regency.example.com:8443" prop:value=move || endpoint_url.get() on:input=move |ev| endpoint_url.set(event_target_value(&ev)) />
+            </label>
             <div class="toolbar"><button class="primary" on:click=move |_| save()>"Save"</button></div>
         </div>
-        <p class="muted">"Each service's own settings are on the Services page (central configuration)."</p>
     }
 }

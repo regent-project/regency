@@ -47,6 +47,7 @@ Templates with every key: `packaging/config/<service>.toml` in the repository.
 | `[runner] reach_prefetch` | 4 | per owned partition |
 | `[runner] control_lookback_sec` | 86400 | how far back aborts are read at start |
 | `[runner] shutdown_grace_sec` | 60 | time left to running tasks on stop |
+| `[runner] ssh_key` | unset | the runner's SSH key file (OpenSSH, public key in `<file>.pub`), generated (ed25519) when missing; its public key is shown by **Hosts → Add host** |
 | `[runner] lock_retry_sec` | 5 | partition ownership round |
 
 ## dbwriter

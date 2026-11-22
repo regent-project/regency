@@ -12,8 +12,8 @@ use chrono::Utc;
 use regencylib::assignment::Assignments;
 use regencylib::couch::{Change, Couch, Since, follow};
 use regencylib::model::{
-    CatalogBody, CatalogItem, DB_CATALOG, DB_POLICIES, DB_STATE, DB_USERS, HostDef, HostDoc,
-    InventoryDef, JobDoc, PolicyDoc, UserDoc, jobs_db, month_offset,
+    AssignmentDef, CatalogBody, CatalogItem, DB_CATALOG, DB_POLICIES, DB_STATE, DB_USERS, HostDef,
+    HostDoc, JobDoc, PolicyDoc, SourceHeadDoc, UserDoc, jobs_db, month_offset,
 };
 use regencylib::policy::Authorizer;
 use regencylib::selector::{HostSelector, conflicting_hosts, resolve};
@@ -32,14 +32,15 @@ pub enum HostChange {
 struct Catalog {
     items: HashMap<String, CatalogItem>,
     hostdefs: Vec<HostDef>,
-    inventories: Vec<InventoryDef>,
+    assignment_defs: Vec<AssignmentDef>,
     conflicting: HashSet<String>,
-    /// host id → (labels, inventories as `source/name`), all sources merged
+    /// host id → (own labels, all labels with the built-in ones), all
+    /// sources merged (D26)
     by_host: HashMap<
         String,
         (
             std::collections::BTreeMap<String, String>,
-            std::collections::BTreeSet<String>,
+            regencylib::labels::HostLabels,
         ),
     >,
     assignments: Assignments,
@@ -50,6 +51,8 @@ struct Catalog {
 pub struct View {
     pub couch: Couch,
     hosts: RwLock<HashMap<String, HostDoc>>,
+    /// D28: the commit each Git source was last synchronized at.
+    source_heads: RwLock<HashMap<String, SourceHeadDoc>>,
     catalog: RwLock<Catalog>,
     catalog_version: AtomicU64,
     users: RwLock<HashMap<String, UserDoc>>,
@@ -84,6 +87,7 @@ impl View {
         Arc::new(Self {
             couch,
             hosts: RwLock::default(),
+            source_heads: RwLock::default(),
             catalog: RwLock::default(),
             catalog_version: AtomicU64::new(0),
             users: RwLock::default(),
@@ -187,6 +191,14 @@ impl View {
                     instances.insert(change.id.clone(), doc.status);
                 }
             }
+            DB_STATE if change.id.starts_with("source_head:") => {
+                let mut heads = self.source_heads.write().expect("source heads");
+                if change.deleted {
+                    heads.remove(&change.id);
+                } else if let Some(doc) = parse::<SourceHeadDoc>(&change) {
+                    heads.insert(change.id.clone(), doc);
+                }
+            }
             DB_STATE => {
                 let Some(host_id) = change.id.strip_prefix("host:") else {
                     return;
@@ -262,33 +274,29 @@ impl View {
                 _ => None,
             })
             .collect();
-        catalog.inventories = catalog
+        catalog.assignment_defs = catalog
             .items
             .values()
             .filter_map(|i| match &i.body {
-                CatalogBody::Inventory(d) => Some(d.clone()),
+                CatalogBody::Assignment(d) => Some(d.clone()),
                 _ => None,
             })
             .collect();
-        catalog.conflicting = conflicting_hosts(&catalog.hostdefs, &catalog.inventories)
-            .into_iter()
-            .collect();
-        let mut by_host: HashMap<
-            String,
-            (
-                std::collections::BTreeMap<_, _>,
-                std::collections::BTreeSet<_>,
-            ),
-        > = HashMap::new();
+        catalog.conflicting = conflicting_hosts(&catalog.hostdefs).into_iter().collect();
+        // D26: a host's labels, own and built-in
+        let mut defs_of: HashMap<&str, Vec<&HostDef>> = HashMap::new();
         for def in &catalog.hostdefs {
-            let (labels, inventories) = by_host.entry(def.host_id.clone()).or_default();
-            labels.extend(def.labels.clone());
-            inventories.extend(
-                def.inventories
-                    .iter()
-                    .map(|i| format!("{}/{}", def.source_id, i)),
-            );
+            defs_of.entry(def.host_id.as_str()).or_default().push(def);
         }
+        let by_host = defs_of
+            .into_iter()
+            .map(|(host_id, defs)| {
+                let own: std::collections::BTreeMap<String, String> =
+                    defs.iter().flat_map(|d| d.labels.clone()).collect();
+                let labels = regencylib::selector::host_labels(host_id, &defs);
+                (host_id.to_string(), (own, labels))
+            })
+            .collect();
         catalog.by_host = by_host;
         catalog.assignments = Assignments::from_catalog(catalog.items.values());
         self.catalog_version.fetch_add(1, Ordering::Relaxed);
@@ -348,28 +356,129 @@ impl View {
             .cloned()
     }
 
-    pub fn hostdefs(&self) -> (Vec<HostDef>, Vec<InventoryDef>) {
+    pub fn hostdefs(&self) -> (Vec<HostDef>, Vec<AssignmentDef>) {
         let catalog = self.catalog.read().expect("catalog");
-        (catalog.hostdefs.clone(), catalog.inventories.clone())
+        (catalog.hostdefs.clone(), catalog.assignment_defs.clone())
     }
 
     pub fn catalog_version(&self) -> u64 {
         self.catalog_version.load(Ordering::Relaxed)
     }
 
-    /// Labels, inventories (`source/name`), conflict flag and effective
-    /// expected state of a host, from the catalog (D11, D23).
+    /// Labels, conflict flag and effective expected state (every assignment
+    /// selecting it, D29) of a host, from the catalog (D11, D23).
     pub fn host_meta(&self, host_id: &str) -> crate::convert::HostMeta {
+        let report = self
+            .hosts
+            .read()
+            .expect("hosts")
+            .get(host_id)
+            .and_then(|h| h.agent.clone());
         let catalog = self.catalog.read().expect("catalog");
-        let (labels, inventories) = catalog.by_host.get(host_id).cloned().unwrap_or_default();
-        let effective = catalog
-            .assignments
-            .effective(host_id, &inventories, &labels);
+        let (labels, all_labels) = match &report {
+            // D28: the agent's labels join the definitions' (which win)
+            Some(report) => Self::agent_labels(&catalog, host_id, report),
+            None => catalog.by_host.get(host_id).cloned().unwrap_or_else(|| {
+                (
+                    Default::default(),
+                    regencylib::labels::HostLabels::new(
+                        host_id,
+                        std::iter::empty::<&str>(),
+                        &Default::default(),
+                    ),
+                )
+            }),
+        };
+        let effective = catalog.assignments.effective(&all_labels);
+        let agent = report.as_ref().map(|report| {
+            let head = self
+                .source_heads
+                .read()
+                .expect("source heads")
+                .values()
+                .find(|h| h.serves(&report.repo, &report.branch))
+                .cloned();
+            let repo_status = match &head {
+                None => "unknown",
+                Some(h) if !report.revision.is_empty() && h.revision == report.revision => {
+                    "up_to_date"
+                }
+                Some(_) => "behind",
+            };
+            let drift = match (&effective, &report.expected_state) {
+                (regencylib::assignment::Effective::Ready { state, .. }, Some(applied)) => {
+                    regencylib::assignment::drift(state, applied)
+                }
+                _ => None,
+            };
+            crate::convert::AgentMeta {
+                repo_status,
+                repo_head: head
+                    .as_ref()
+                    .map(|h| h.revision.clone())
+                    .unwrap_or_default(),
+                repo_source: head.map(|h| h.source_id).unwrap_or_default(),
+                drift,
+            }
+        });
         crate::convert::HostMeta {
             labels: labels.into_iter().collect(),
-            inventories: inventories.into_iter().collect(),
             conflicting: catalog.conflicting.contains(host_id),
             effective,
+            agent,
+        }
+    }
+
+    /// A proactive host's own labels (its agent's, then its definitions',
+    /// which win on the same key) and its labels with the built-in ones
+    /// (`source` gains the agent's name), D28.
+    fn agent_labels(
+        catalog: &Catalog,
+        host_id: &str,
+        report: &regencylib::model::AgentReport,
+    ) -> (
+        std::collections::BTreeMap<String, String>,
+        regencylib::labels::HostLabels,
+    ) {
+        let defs: Vec<&HostDef> = catalog
+            .hostdefs
+            .iter()
+            .filter(|d| d.host_id == host_id)
+            .collect();
+        let mut own = report.labels.clone();
+        own.extend(defs.iter().flat_map(|d| d.labels.clone()));
+        let sources = defs
+            .iter()
+            .map(|d| d.source_id.as_str())
+            .chain([report.agent.as_str()]);
+        let labels = regencylib::labels::HostLabels::new(host_id, sources, &own);
+        (own, labels)
+    }
+
+    /// Cedar resource of a host (D12), the assignments selecting it
+    /// computed from its definitions' and agent's labels (D28, D29).
+    pub fn host_resource(&self, host_id: &str) -> regencylib::policy::Resource {
+        let meta = self.host_meta(host_id);
+        let catalog = self.catalog.read().expect("catalog");
+        let mut sources: std::collections::BTreeSet<String> = catalog
+            .hostdefs
+            .iter()
+            .filter(|d| d.host_id == host_id)
+            .map(|d| d.source_id.clone())
+            .collect();
+        if let Some(report) = self
+            .hosts
+            .read()
+            .expect("hosts")
+            .get(host_id)
+            .and_then(|h| h.agent.as_ref())
+        {
+            sources.insert(report.agent.clone());
+        }
+        regencylib::policy::Resource::Host {
+            id: host_id.to_string(),
+            assignments: meta.effective.assignments(),
+            sources: sources.into_iter().collect(),
         }
     }
 
@@ -384,10 +493,20 @@ impl View {
             return None;
         }
         let catalog = self.catalog.read().expect("catalog");
-        let resolution = resolve(selector, &catalog.hostdefs, &catalog.inventories, None);
+        let resolution = resolve(selector, &catalog.hostdefs, &catalog.assignment_defs, None);
         let mut ids: HashSet<String> = selector.hosts.iter().cloned().collect();
         ids.extend(resolution.targets.into_iter().map(|t| t.host_id));
         ids.extend(resolution.conflicting);
+        // D28: proactive hosts, by their agent's labels
+        for host in self.hosts.read().expect("hosts").values() {
+            let Some(report) = &host.agent else { continue };
+            let (_, labels) = Self::agent_labels(&catalog, &host.host_id, report);
+            let assignments =
+                regencylib::selector::assignments_of(&labels, &catalog.assignment_defs);
+            if selector.matches(&host.host_id, &assignments, &labels) {
+                ids.insert(host.host_id.clone());
+            }
+        }
         Some(ids)
     }
 }

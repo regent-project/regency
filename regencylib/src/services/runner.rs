@@ -42,6 +42,12 @@ pub struct RunnerSection {
     /// setting).
     #[serde(default = "default_live")]
     pub live: bool,
+    /// D25: the runner's SSH identity, an OpenSSH private key file (public
+    /// key in `<file>.pub`), generated (ed25519) at startup when missing. Its
+    /// public key is advertised in the instance status; new SSH hosts
+    /// reference the file (`files` secret provider). Unset = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_key: Option<String>,
 }
 
 fn default_pool() -> String {
@@ -76,6 +82,7 @@ impl Default for RunnerSection {
             shutdown_grace_sec: default_grace(),
             lock_retry_sec: default_lock_retry(),
             live: default_live(),
+            ssh_key: None,
         }
     }
 }

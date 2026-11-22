@@ -7,7 +7,7 @@
 # dbwriters (they absorb the dataset's write load) and, once
 # backend is ready, loads a representative dataset (backend/examples/
 # dataset.rs: thousands of hosts, all of them this machine under
-# /tmp/regency-dev, inventories, labels, expected states, recurring orders).
+# /tmp/regency-dev, labels, expected states, assignments, recurring orders).
 #
 #   dev/run_locally [options]          (from anywhere)
 #

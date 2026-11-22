@@ -65,7 +65,7 @@ Secret (or in your `existingSecret`).
 ## Notes
 
 - Instances are named after their pod; the web UI lists them under
-  **Configuration → Services**.
+  **Administration → Services**.
 - The security levels set by the chart are in each service's configuration
   file, so they appear as *pinned* in the UI; change them with Helm values.
 - Kubernetes restarts a container that exits to apply a new central

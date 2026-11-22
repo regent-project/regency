@@ -167,10 +167,25 @@ first_cleanup_delay_sec = 0
         });
     }
     assert!(run_log.omitted_updates() > 0);
+    // D28: what a proactive host's agent says about itself
+    let reporter_bytes = {
+        use regent_sdk::proto::runtime::Serialize;
+        let mut reporter = regent_sdk::proto::ReporterInfo::new();
+        reporter.set_agent("regops");
+        reporter.set_agent_version("0.17.0");
+        reporter.set_source_revision("abc123");
+        reporter.set_source_repo("https://git.example/infra.git");
+        reporter.set_source_branch("main");
+        reporter.set_source_path("web.yaml");
+        reporter.set_expected_state_json(r#"{"Attributes":[]}"#);
+        reporter.labels_mut().insert("role", "web");
+        reporter.labels_mut().insert("host", "spoofed");
+        reporter.serialize().unwrap()
+    };
     for r in [&first, &second] {
         let mut envelope = outcome_envelope(
             r.to_proto_bytes().unwrap(),
-            vec![],
+            reporter_bytes.clone(),
             created_at,
             "c1",
             "runner/test",
@@ -203,6 +218,20 @@ first_cleanup_delay_sec = 0
     })
     .await;
     assert_eq!(host_doc.doc.state.compliance, "compliant");
+    let agent = host_doc
+        .doc
+        .agent
+        .as_ref()
+        .expect("agent report kept (D28)");
+    assert_eq!(agent.agent, "regops");
+    assert_eq!(agent.revision, "abc123");
+    assert_eq!(agent.repo, "https://git.example/infra.git");
+    assert_eq!(
+        agent.labels,
+        std::collections::BTreeMap::from([("role".to_string(), "web".to_string())]),
+        "the built-in host label is refused"
+    );
+    assert!(agent.expected_state.is_some());
     tokio::time::sleep(Duration::from_secs(1)).await;
     let outcome: Stored<OutcomeDoc> = couch
         .get(&outcomes_db(&month), &outcome_doc_id(&key))
@@ -331,6 +360,18 @@ first_cleanup_delay_sec = 0
                 revision: "1".into(),
             }),
         ),
+        // D28: a Git source's synchronized head
+        Command::new(
+            unique("c"),
+            "sourcesync",
+            CommandBody::CatalogSourceSynced(regencylib::model::SourceHeadDoc {
+                source_id: refused_source.clone(),
+                repo: "https://git.example/infra.git".into(),
+                branch: "main".into(),
+                revision: "def456".into(),
+                at: chrono::Utc::now(),
+            }),
+        ),
     ];
     for command in &commands {
         publisher
@@ -359,6 +400,17 @@ first_cleanup_delay_sec = 0
             .filter(|s| s.doc.retention_months() == Some(5))
     })
     .await;
+    let head: Stored<regencylib::model::SourceHeadDoc> = eventually("source head", || async {
+        couch
+            .get::<regencylib::model::SourceHeadDoc>(
+                DB_STATE,
+                &regencylib::model::source_head_doc_id(&refused_source),
+            )
+            .await
+            .ok()?
+    })
+    .await;
+    assert_eq!(head.doc.revision, "def456");
     // re-applying the same order keeps its revision (D3 keys stay stable)
     publisher
         .publish_json(

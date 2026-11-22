@@ -13,8 +13,8 @@ use tonic::Status;
 pub fn selector_from(message: api::HostSelectorView<'_>) -> HostSelector {
     HostSelector {
         hosts: message.hosts().iter().map(|h| h.to_string()).collect(),
-        inventories: message
-            .inventories()
+        assignments: message
+            .assignments()
             .iter()
             .map(|i| i.to_string())
             .collect(),
@@ -23,7 +23,21 @@ pub fn selector_from(message: api::HostSelectorView<'_>) -> HostSelector {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        selector: None,
     }
+}
+
+/// [`selector_from`], with its label selector (refused when unreadable).
+pub fn selector_checked(message: api::HostSelectorView<'_>) -> Result<HostSelector, Status> {
+    let mut selector = selector_from(message);
+    let text = message.selector().to_string();
+    if !text.trim().is_empty() {
+        selector.selector = Some(
+            regencylib::labels::LabelSelector::parse(&text)
+                .map_err(|e| Status::invalid_argument(format!("selector: {e}")))?,
+        );
+    }
+    Ok(selector)
 }
 
 pub fn job_from(kind: api::JobKind) -> Result<Job, Status> {
@@ -48,17 +62,27 @@ fn ms(at: chrono::DateTime<chrono::Utc>) -> i64 {
 /// What the catalog says about a host (D11, D23).
 pub struct HostMeta {
     pub labels: Vec<(String, String)>,
-    pub inventories: Vec<String>,
     pub conflicting: bool,
     pub effective: Effective,
+    /// D28: a proactive host's repository freshness and drift.
+    pub agent: Option<AgentMeta>,
+}
+
+/// D28: how a proactive host's state source compares with regency's.
+pub struct AgentMeta {
+    /// `up_to_date`, `behind` or `unknown`
+    pub repo_status: &'static str,
+    pub repo_head: String,
+    pub repo_source: String,
+    pub drift: Option<String>,
 }
 
 pub fn host_summary(doc: &HostDoc, meta: &HostMeta) -> api::HostSummary {
     let HostMeta {
         labels,
-        inventories,
         conflicting,
         effective,
+        agent,
     } = meta;
     let mut summary = api::HostSummary::new();
     summary.set_host_id(doc.host_id.as_str());
@@ -95,17 +119,31 @@ pub fn host_summary(doc: &HostDoc, meta: &HostMeta) -> api::HostSummary {
     for (k, v) in labels {
         summary.labels_mut().insert(k.as_str(), v.as_str());
     }
-    for inventory in inventories {
-        summary.inventories_mut().push(inventory.as_str());
-    }
     summary.set_conflicting(*conflicting);
-    for layer in effective.layers() {
-        summary.assignments_mut().push(layer.assignment.as_str());
+    // D29: every assignment selecting the host, in order
+    for assignment in effective.assignments() {
+        summary.assignments_mut().push(assignment.as_str());
     }
     summary.set_effective_revision(effective.revision().unwrap_or_default());
     summary.set_state_revision(doc.state_revision.as_deref().unwrap_or_default());
     if let Effective::Invalid { reason, .. } = effective {
         summary.set_assignment_error(reason.as_str());
+    }
+    if let Some(report) = &doc.agent {
+        summary.set_agent(report.agent.as_str());
+        summary.set_agent_version(report.agent_version.as_str());
+        summary.set_agent_repo(report.repo.as_str());
+        summary.set_agent_branch(report.branch.as_str());
+        summary.set_agent_path(report.path.as_str());
+        summary.set_agent_revision(report.revision.as_str());
+    }
+    if let Some(agent) = agent {
+        summary.set_repo_status(agent.repo_status);
+        summary.set_repo_head(agent.repo_head.as_str());
+        summary.set_repo_source(agent.repo_source.as_str());
+        if let Some(drift) = &agent.drift {
+            summary.set_state_drift(drift.as_str());
+        }
     }
     summary
 }

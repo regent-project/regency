@@ -27,6 +27,11 @@ pub fn spawn_scoped(task: impl std::future::Future<Output = ()> + 'static) {
 /// assignment), `invalid` (assignments that cannot be composed),
 /// `outdated` (checked against an older effective state).
 pub fn host_state(host: &api::HostSummary) -> &str {
+    // D28: a proactive host checks its own state: its colour is its last
+    // pass's, assigned or not
+    if !host.agent.is_empty() {
+        return &host.compliance;
+    }
     if host.assignments.is_empty() {
         "unassigned"
     } else if !host.assignment_error.is_empty() {
@@ -40,16 +45,70 @@ pub fn host_state(host: &api::HostSummary) -> &str {
 
 /// The host's assignments, lowest priority first, and why they fail.
 pub fn assignments_line(host: &api::HostSummary) -> impl IntoView + use<> {
-    let text = if host.assignments.is_empty() {
+    let text = if host.assignments.is_empty() && !host.agent.is_empty() {
+        "none: it applies its own Git state".to_string()
+    } else if host.assignments.is_empty() {
         "none: nothing is checked on this host".to_string()
     } else {
-        host.assignments.join(" → ")
+        // D29: they add up
+        host.assignments.join(" + ")
     };
     let error = host.assignment_error.clone();
     view! {
         <span>{text}</span>
         {(!error.is_empty()).then(|| view! { <div class="error">{error}</div> })}
     }
+}
+
+/// D28: a proactive host's agent, where its expected state comes from and
+/// how that compares with regency (`dt`/`dd` pairs of a host's `dl`).
+pub fn agent_lines(host: &api::HostSummary) -> impl IntoView + use<> {
+    let proactive = !host.agent.is_empty();
+    let short = |sha: &str| sha.chars().take(10).collect::<String>();
+    let source = [
+        host.agent_repo.as_str(),
+        host.agent_branch.as_str(),
+        host.agent_path.as_str(),
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let (status, status_title) = match host.repo_status.as_str() {
+        "up_to_date" => (
+            "up to date",
+            format!("Same commit as regency's Git source {}", host.repo_source),
+        ),
+        "behind" => (
+            "behind",
+            format!(
+                "regency's Git source {} is at {}: the host has not pulled it yet",
+                host.repo_source,
+                short(&host.repo_head)
+            ),
+        ),
+        _ => (
+            "unknown",
+            "No regency Git source on this repository and branch: its head is not known"
+                .to_string(),
+        ),
+    };
+    let revision = short(&host.agent_revision);
+    let drift = host.state_drift.clone();
+    let agent = format!("{} {}", host.agent, host.agent_version);
+    proactive.then(|| {
+        view! {
+            <dt>"Proactive"</dt><dd>{agent}</dd>
+            <dt>"Its state"</dt><dd>{if source.is_empty() { "—".to_string() } else { source }}</dd>
+            <dt>"Commit"</dt><dd>
+                {if revision.is_empty() { "—".to_string() } else { revision }} " "
+                <span class=format!("badge repo-{}", host.repo_status) title=status_title>{status}</span>
+            </dd>
+            {(!drift.is_empty()).then(|| view! {
+                <dt>"Drift"</dt><dd class="drift" title="Its Git expected state differs from its assignment's final state">{format!("⚠ {drift}")}</dd>
+            })}
+        }
+    })
 }
 
 pub fn badge(state: String) -> impl IntoView {
@@ -119,7 +178,7 @@ pub fn WhoAmI() -> impl IntoView {
 
 /// Live updates are applied in batches: the first message of a batch, then
 /// whatever else arrives within this delay. Thousands of hosts (the initial
-/// snapshot, a recurring order firing on a whole inventory) then cost a few
+/// snapshot, a recurring order firing on a whole assignment) then cost a few
 /// signal updates instead of one per message.
 const BATCH_MS: i32 = 150;
 
@@ -240,6 +299,8 @@ pub fn Hosts() -> impl IntoView {
         ..
     } = expect_context::<crate::feeds::Feeds>();
     let filter = RwSignal::new(String::new());
+    // D25: the "Add a host" dialog
+    let adding = RwSignal::new(false);
     // `?state=<state>`: hosts in exactly that state (`host_state`), e.g. from
     // the masthead's fleet counts
     let query = use_query_map();
@@ -259,7 +320,7 @@ pub fn Hosts() -> impl IntoView {
                         || h.labels
                             .iter()
                             .any(|(k, v)| format!("{k}={v}").contains(&needle))
-                        || h.inventories.iter().any(|i| i.contains(&needle))
+                        || h.assignments.iter().any(|i| i.contains(&needle))
                 })
                 .cloned()
                 .collect::<Vec<_>>()
@@ -276,6 +337,9 @@ pub fn Hosts() -> impl IntoView {
     };
     view! {
         <h1>"Hosts"</h1>
+        <Show when=move || adding.get()>
+            <crate::onboarding::AddHostDialog on_close=Callback::new(move |()| adding.set(false)) />
+        </Show>
         <div class="counts">
             <For each=counts key=|c| c.clone() let:count>
                 {badge(count.0.clone())} <span>{count.1}</span>
@@ -287,8 +351,9 @@ pub fn Hosts() -> impl IntoView {
                     <a href="/hosts" title="Show every state" aria-label="Remove the state filter">"×"</a>
                 </span>
             })}
-            <input placeholder="Filter: host, state, label=value, inventory" style="min-width: 320px"
+            <input placeholder="Filter: host, state, label=value, assignment" style="min-width: 320px"
                 prop:value=move || filter.get() on:input=move |ev| filter.set(event_target_value(&ev)) />
+            <button class="primary" on:click=move |_| adding.set(true)>"Add host"</button>
             <span class="muted">{move || if !ready.get() {
                 "loading…".to_string()
             } else if state.with(Option::is_some) || !filter.with(String::is_empty) {
@@ -301,7 +366,7 @@ pub fn Hosts() -> impl IntoView {
             <p class="error">{move || error.get()}</p>
         </Show>
         <table>
-            <thead><tr><th>"Host"</th><th>"State"</th><th>"Last outcome"</th><th>"Last seen"</th><th>"Labels"</th><th>"Inventories"</th></tr></thead>
+            <thead><tr><th>"Host"</th><th>"State"</th><th>"Last outcome"</th><th>"Last seen"</th><th>"Labels"</th><th>"Assignments"</th></tr></thead>
             <tbody>
                 <For each=visible key=|h| (h.host_id.clone(), host_state(h).to_string(), h.state_at, h.last_seen, h.labels.len()) let:host>
                     <tr>
@@ -314,7 +379,7 @@ pub fn Hosts() -> impl IntoView {
                         <td>{format_ms(host.state_at)}</td>
                         <td>{format_ms(host.last_seen)}</td>
                         <td>{host.labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")}</td>
-                        <td>{host.inventories.join(", ")}</td>
+                        <td>{host.assignments.join(", ")}</td>
                     </tr>
                 </For>
             </tbody>
@@ -499,8 +564,25 @@ pub fn HostPage() -> impl IntoView {
         }
     };
 
+    // a host defined in the catalog but never run has no host doc yet: its
+    // effective state still comes from the catalog, so it can be assessed
+    let explored = Signal::derive({
+        let host_id = host_id.clone();
+        move || {
+            summary.get().or_else(|| {
+                ready.get().then(|| api::HostSummary {
+                    host_id: host_id.clone(),
+                    ..Default::default()
+                })
+            })
+        }
+    });
+
     view! {
         <h1>{host_id.clone()}</h1>
+        <Show when=move || ready.get() && summary.with(Option::is_none)>
+            <p class="muted">"No outcome yet for this host: it appears on the map and in the tables after its first job."</p>
+        </Show>
         <Show when=move || error.get().is_some()>
             <p class="error">{move || error.get()}</p>
         </Show>
@@ -510,10 +592,10 @@ pub fn HostPage() -> impl IntoView {
                 <dl>
                     <dt>"State"</dt><dd>{badge(host_state(&host).to_string())} " " <span class="muted">{host.error.clone()}</span></dd>
                     <dt>"Assignments"</dt><dd>{assignments_line(&host)}</dd>
+                    {agent_lines(&host)}
                     <dt>"Last outcome"</dt><dd>{format_ms(host.state_at)}</dd>
                     <dt>"First seen"</dt><dd>{format_ms(host.first_seen)}</dd>
                     <dt>"Last seen"</dt><dd>{format_ms(host.last_seen)}</dd>
-                    <dt>"Inventories"</dt><dd>{host.inventories.join(", ")}</dd>
                     <dt>"Labels"</dt><dd>{host.labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")}</dd>
                     <dt>"Certificate"</dt><dd>
                         {if host.pinned_fingerprint.is_empty() { "—".to_string() } else { format!("pinned {}", host.pinned_fingerprint) }}
@@ -532,7 +614,7 @@ pub fn HostPage() -> impl IntoView {
         <h2>"Live"</h2>
         <crate::live::HostLive running=running />
         <h2>"Effective expected state"</h2>
-        <HostStateExplorer host=summary />
+        <HostStateExplorer host=explored />
         <p class="muted">{move || message.get()}</p>
 
         <h2>"History " <button on:click=move |_| load_history()>"Refresh"</button>

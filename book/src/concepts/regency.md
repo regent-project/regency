@@ -10,7 +10,7 @@ a whole fleet.
 | Thousands of hosts | tasks are distributed through RabbitMQ to any number of runners |
 | Regular checks | recurring **orders** (every N minutes, or cron) fire tasks automatically |
 | History and live state | every outcome is stored in CouchDB; the web UI shows the fleet live |
-| Several sources of truth | inventories and expected states from Git, the API or the UI, in one catalog |
+| Several sources of truth | hosts, expected states and assignments from Git, the API or the UI, in one catalog |
 | Hosts that pull their own configuration | regops agents report to regency's endpoint |
 | Access control | users, groups, API tokens, OIDC, and Cedar policies |
 | Production operations | replicated services, clustered infrastructure, packages, images, Helm |
@@ -44,7 +44,7 @@ compliant between runs, and regency runners can still assess it on demand.
 
 ## One host, one identity
 
-A host has one global `host_id`, whatever the inventories it appears in.
+A host has one global `host_id`, whatever the sources defining it.
 Its history, its live state and its remediation queue are tied to that id.
 If two sources describe the same host differently, regency flags the host as
 *conflicting* and refuses to touch it until the sources agree — it never

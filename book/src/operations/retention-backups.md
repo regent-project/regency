@@ -3,7 +3,7 @@
 ## Retention
 
 Jobs and outcomes live in **monthly** databases. `retention_months`
-(default 3, **Configuration → Settings**) sets how many months are kept:
+(default 3, **Administration → Settings**) sets how many months are kept:
 with 3, in November, August to November are kept. Every dbwriter runs the
 cleanup daily; the current and previous months are never dropped.
 

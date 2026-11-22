@@ -28,12 +28,17 @@ secrets = [
   "sourcesync.rabbitmq", "sourcesync.couchdb",
   "session-key", "enrollment-key",
 ]
+# The runner generates its own SSH key (runner.toml, [runner] ssh_key) in
+# secrets_dir at its first start.
 from_env = { "bootstrap-admin" = "REGENCY_ADMIN_PASSWORD" }
 announce = ["bootstrap-admin"]
 
 [prepare.tls]
 dir = "/var/lib/regency/tls"
 names = ["localhost", "regency"]
+# D25: also this machine's hostname, FQDN and IP addresses (in the image:
+# the container's; agents can still use server_name = "regency")
+local_names = true
 
 [[process]]
 name = "init"

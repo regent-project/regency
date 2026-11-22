@@ -28,8 +28,8 @@ pub async fn handle(state: &State, dispatcher: &Dispatcher, delivery: Delivery) 
             Some(one_shot) => Body::OneShot(one_shot),
             None => Body::Effective(&assignments),
         };
-        let (hostdefs, inventories) = state.hosts();
-        let resolution = resolve(&run.selector, &hostdefs, &inventories, run.pool.as_deref());
+        let (hostdefs, assignments) = state.hosts();
+        let resolution = resolve(&run.selector, &hostdefs, &assignments, run.pool.as_deref());
         for host_id in resolution.conflicting.iter().chain(&resolution.unknown) {
             warn!(host_id = %host_id, "host skipped (conflicting definitions or unknown)");
         }

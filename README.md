@@ -7,13 +7,34 @@
   [![CI](https://github.com/regent-project/regency/actions/workflows/ci.yml/badge.svg)](https://github.com/regent-project/regency/actions/workflows/ci.yml)
   [![Discord](https://img.shields.io/badge/Discord-Join%20our%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/2gxAW7uzsx)
 
-  <img src="book/src/images/demo.gif" alt="regency: 3000 hosts in 12 inventories, a Reach fixes the drifting ones (red) live" width="900" />
+  <img src="book/src/images/demo.gif" alt="regency: 3000 hosts in 12 groups, a Reach fixes the drifting ones (red) live" width="900" />
 </div>
 
 regency is the fleet-scale control plane of
 [regent-sdk](https://github.com/regent-project/regent-sdk): describe what your
 hosts should look like, and regency checks them (**Assess**), fixes them
 (**Reach**), records every outcome and shows the whole fleet live.
+
+## Hosts selected by labels, the Kubernetes way
+
+You don't maintain lists of hosts. Each host carries labels, and each
+**assignment** selects its hosts with a label selector, as a Kubernetes
+Service selects pods or a Loki query selects streams. A host gets every
+assignment that matches it:
+
+```yaml
+# assignments/web.yaml
+Selector: '{role="web", env=~"prod|staging"}'   # '{}' = every host
+Priority: 10                                     # lower runs first
+ExpectedStates: [nginx, nginx-prod]              # the last one wins
+```
+
+Label a host `role=web` and it gets the web expected states on its next
+run. Remove the label and it no longer does. A host's assignments add up
+by priority. If two of them set the same attribute differently, regency
+reports the conflict and runs nothing on that host until it is fixed.
+Hosts running the regops agent report their own labels, so they are
+selected the same way.
 
 ## Quick start
 

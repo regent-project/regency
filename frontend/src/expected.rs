@@ -11,28 +11,75 @@ use crate::client::api;
 use crate::client::{authed, client, command_id};
 use crate::pages::spawn_scoped;
 
-/// An expected state to display: an effective state (D23) and the
-/// assignment each attribute comes from.
-#[derive(Clone, PartialEq)]
+/// An expected state to display: a final state (D27) with the blame of
+/// each attribute and the suspected conflicts.
+#[derive(Clone, PartialEq, Default)]
 pub struct StateEntry {
     pub reference: String,
     pub revision: String,
     /// The `ExpectedState`'s attributes (regent-sdk serde JSON).
     pub attributes: Vec<Value>,
-    /// For an effective state (D23): the assignment of each attribute.
+    /// The expected state each attribute comes from.
     pub origins: Vec<String>,
+    /// The earlier states each attribute overrides (same Name), oldest
+    /// first.
+    pub overrides: Vec<Vec<String>>,
+    /// The assignment each attribute comes from (D29; empty for a stack
+    /// composed alone).
+    pub assignments: Vec<String>,
+    /// Later assignments declaring the same attribute, applied once (D29).
+    pub also_in: Vec<Vec<String>>,
+    /// Suspected conflicts: message, positions of the attributes involved.
+    pub warnings: Vec<(String, Vec<usize>)>,
 }
 
-/// An assignment of the catalog (D23): hosts + expected state + priority.
+impl StateEntry {
+    /// From the parts of a `GetEffectiveState` / `ComposeStates` reply.
+    pub fn composed(
+        state_json: &str,
+        revision: &str,
+        blame: &[api::AttributeBlame],
+        warnings: &[api::CompositionWarning],
+    ) -> Option<Self> {
+        if state_json.is_empty() {
+            return None;
+        }
+        let value: Value = serde_json::from_str(state_json).ok()?;
+        Some(Self {
+            reference: String::new(),
+            revision: revision.to_string(),
+            attributes: value["Attributes"].as_array().cloned().unwrap_or_default(),
+            origins: blame.iter().map(|b| b.origin.clone()).collect(),
+            overrides: blame.iter().map(|b| b.overrides.clone()).collect(),
+            assignments: blame.iter().map(|b| b.assignment.clone()).collect(),
+            also_in: blame.iter().map(|b| b.also_in.clone()).collect(),
+            warnings: warnings
+                .iter()
+                .map(|w| {
+                    (
+                        w.message.clone(),
+                        w.attributes.iter().map(|&i| i as usize).collect(),
+                    )
+                })
+                .collect(),
+        })
+    }
+}
+
+/// An assignment of the catalog (D23, D27, D29): the hosts its label
+/// selector matches + a stack of expected states (base first, last wins).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AssignmentEntry {
     /// `{source_id}/{name}`
     pub reference: String,
     pub source_id: String,
     pub name: String,
-    pub expected_state: String,
-    pub priority: i32,
+    pub expected_states: Vec<String>,
+    /// The hosts it runs (its own reference, D29).
     pub selector: api::HostSelector,
+    /// Its label selector, as text.
+    pub hosts: String,
+    pub priority: i32,
     pub revision: String,
 }
 
@@ -42,38 +89,37 @@ impl AssignmentEntry {
         if item["type"] != "assignment" {
             return None;
         }
-        let strings = |v: &Value| -> Vec<String> {
-            v.as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let selector = &item["selector"];
         let source_id = item["source_id"].as_str()?.to_string();
         let name = item["name"].as_str()?.to_string();
+        let reference = format!("{source_id}/{name}");
         Some(Self {
-            reference: format!("{source_id}/{name}"),
+            selector: api::HostSelector {
+                assignments: vec![reference.clone()],
+                ..Default::default()
+            },
+            reference,
             source_id,
             name,
-            expected_state: item["expected_state"].as_str()?.to_string(),
+            expected_states: stack_of(&item),
+            hosts: item["selector"].as_str().unwrap_or_default().to_string(),
             priority: item["priority"].as_i64().unwrap_or(0) as i32,
-            selector: api::HostSelector {
-                hosts: strings(&selector["hosts"]),
-                inventories: strings(&selector["inventories"]),
-                labels: selector["labels"]
-                    .as_object()
-                    .map(|m| {
-                        m.iter()
-                            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            },
             revision: item["revision"].as_str().unwrap_or_default().to_string(),
         })
+    }
+}
+
+/// The expected states of an assignment item, base first (D27; a document
+/// written before it has one `expected_state`).
+pub fn stack_of(item: &Value) -> Vec<String> {
+    match item["expected_states"].as_array() {
+        Some(list) if !list.is_empty() => list
+            .iter()
+            .filter_map(|s| s.as_str().map(str::to_string))
+            .collect(),
+        _ => item["expected_state"]
+            .as_str()
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default(),
     }
 }
 
@@ -82,8 +128,11 @@ pub fn describe_selector(selector: &api::HostSelector) -> String {
     if !selector.hosts.is_empty() {
         parts.push(format!("hosts {}", selector.hosts.join(", ")));
     }
-    if !selector.inventories.is_empty() {
-        parts.push(format!("inventories {}", selector.inventories.join(", ")));
+    if !selector.assignments.is_empty() {
+        parts.push(format!("assignments {}", selector.assignments.join(", ")));
+    }
+    if !selector.selector.is_empty() {
+        parts.push(format!("hosts {}", selector.selector));
     }
     if !selector.labels.is_empty() {
         let mut labels: Vec<String> = selector
@@ -97,7 +146,7 @@ pub fn describe_selector(selector: &api::HostSelector) -> String {
     parts.join(" · ")
 }
 
-/// Load every assignment of the catalog into `into` (lowest priority first).
+/// Load every assignment of the catalog into `into` (by reference).
 pub fn load_assignments(into: RwSignal<Vec<AssignmentEntry>>, error: RwSignal<Option<String>>) {
     let session = expect_context::<Session>();
     spawn_scoped(async move {
@@ -116,11 +165,7 @@ pub fn load_assignments(into: RwSignal<Vec<AssignmentEntry>>, error: RwSignal<Op
                     .iter()
                     .filter_map(AssignmentEntry::from_catalog)
                     .collect();
-                list.sort_by(|a, b| {
-                    a.priority
-                        .cmp(&b.priority)
-                        .then_with(|| a.reference.cmp(&b.reference))
-                });
+                list.sort_by(|a, b| a.reference.cmp(&b.reference));
                 let _ = into.try_set(list);
             }
             Err(status) => {
@@ -134,8 +179,6 @@ pub fn load_assignments(into: RwSignal<Vec<AssignmentEntry>>, error: RwSignal<Op
 /// What a map group stands for: the hosts its Assess / Reach run on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GroupTarget {
-    /// `{source_id}/{name}`
-    Inventory(String),
     Label(String, String),
     /// An assignment (D23) and its host selector.
     Assignment(String, api::HostSelector),
@@ -144,10 +187,6 @@ pub enum GroupTarget {
 impl GroupTarget {
     pub fn selector(&self) -> api::HostSelector {
         match self {
-            GroupTarget::Inventory(inventory) => api::HostSelector {
-                inventories: vec![inventory.clone()],
-                ..Default::default()
-            },
             GroupTarget::Label(key, value) => api::HostSelector {
                 labels: [(key.clone(), value.clone())].into_iter().collect(),
                 ..Default::default()
@@ -158,7 +197,6 @@ impl GroupTarget {
 
     pub fn describe(&self) -> String {
         match self {
-            GroupTarget::Inventory(inventory) => format!("inventory {inventory}"),
             GroupTarget::Label(key, value) => format!("label {key}={value}"),
             GroupTarget::Assignment(reference, _) => format!("assignment {reference}"),
         }
@@ -246,9 +284,9 @@ pub fn yamlish(value: &Value) -> String {
     out
 }
 
-/// A host's effective expected state (D23): its assignments (layers,
-/// lowest priority first), Assess / Reach now with it, and its attributes
-/// with the assignment each one comes from.
+/// A host's effective expected state (D23, D27): its assignment and the
+/// stack of expected states (base first), Assess / Reach now with it, and
+/// its attributes with the state each one comes from.
 #[component]
 pub fn HostStateExplorer(#[prop(into)] host: Signal<Option<api::HostSummary>>) -> impl IntoView {
     let session = expect_context::<Session>();
@@ -291,16 +329,7 @@ pub fn HostStateExplorer(#[prop(into)] host: Signal<Option<api::HostSummary>>) -
     let state = Signal::derive(move || {
         effective.with(|e| {
             let e = e.as_ref()?;
-            if e.state_json.is_empty() {
-                return None;
-            }
-            let value: Value = serde_json::from_str(&e.state_json).ok()?;
-            Some(StateEntry {
-                reference: String::new(),
-                revision: e.revision.clone(),
-                attributes: value["Attributes"].as_array().cloned().unwrap_or_default(),
-                origins: e.origins.clone(),
-            })
+            StateEntry::composed(&e.state_json, &e.revision, &e.blame, &e.warnings)
         })
     });
     let runnable = move || state.with(Option::is_some);
@@ -334,23 +363,26 @@ pub fn HostStateExplorer(#[prop(into)] host: Signal<Option<api::HostSummary>>) -
             let _ = message.try_set(Some(text));
         });
     };
+    // D29: every assignment selecting the host, in order, with its stack
     let layers = move || {
         effective.with(|e| {
-            e.as_ref()
-                .map(|e| {
-                    e.layers
-                        .iter()
-                        .map(|l| {
-                            view! {
-                                <li>
-                                    <b>{l.assignment.clone()}</b>
-                                    <span class="muted">{format!(" priority {} · state {}", l.priority, l.expected_state)}</span>
-                                </li>
-                            }
-                        })
-                        .collect::<Vec<_>>()
+            let Some(e) = e.as_ref() else {
+                return Vec::new();
+            };
+            let mut groups: Vec<(String, i32, Vec<String>)> = Vec::new();
+            for l in &e.layers {
+                match groups.last_mut() {
+                    Some((a, _, states)) if *a == l.assignment => states.push(l.expected_state.clone()),
+                    _ => groups.push((l.assignment.clone(), l.priority, vec![l.expected_state.clone()])),
+                }
+            }
+            groups
+                .into_iter()
+                .map(|(assignment, priority, states)| view! {
+                    <li><b>{assignment}</b> <span class="muted small">{format!(" priority {priority}")}</span>
+                        ": " {states.join(" → ")}</li>
                 })
-                .unwrap_or_default()
+                .collect::<Vec<_>>()
         })
     };
     let unassigned = move || effective.with(|e| e.as_ref().is_some_and(|e| e.layers.is_empty()));
@@ -369,11 +401,11 @@ pub fn HostStateExplorer(#[prop(into)] host: Signal<Option<api::HostSummary>>) -
             <span class="muted">{move || message.get()}</span>
         </div>
         {move || load_error.get().map(|e| view! { <p class="error">{e}</p> })}
-        <Show when=unassigned>
+        <Show when=move || unassigned() && error().is_none()>
             <p class="muted">"No assignment selects this host: it has no expected state, nothing is checked on it."</p>
         </Show>
-        <ol class="layers">{layers}</ol>
-        {move || error().map(|e| view! { <p class="error">{format!("These assignments cannot be layered: {e}")}</p> })}
+        <ol class="layers" title="Assignments selecting the host, in the order they are applied (priority, then name), each with its expected states (base first, the last wins)">{layers}</ol>
+        {move || error().map(|e| view! { <p class="error">{e}</p> })}
         <Show when=runnable>
             <ExpectedStateView state=state />
         </Show>
@@ -394,6 +426,15 @@ pub fn ExpectedStateView(#[prop(into)] state: Signal<Option<StateEntry>>) -> imp
                 .enumerate()
                 .map(|(i, attribute)| {
                     let origin = entry.origins.get(i).cloned();
+                    let overrides = entry.overrides.get(i).cloned().unwrap_or_default();
+                    let from = entry.assignments.get(i).cloned().filter(|a| !a.is_empty());
+                    let also_in = entry.also_in.get(i).cloned().unwrap_or_default();
+                    let warned: Vec<String> = entry
+                        .warnings
+                        .iter()
+                        .filter(|(_, at)| at.contains(&i))
+                        .map(|(m, _)| m.clone())
+                        .collect();
                     let (kind, name) = attribute_title(attribute);
                     let detail = match &attribute["Detail"] {
                         Value::Object(map) if map.len() == 1 => {
@@ -417,7 +458,24 @@ pub fn ExpectedStateView(#[prop(into)] state: Signal<Option<StateEntry>>) -> imp
                                     <span class="index">{i + 1}</span>
                                     <span class="attr-type">{kind}</span>
                                     <span class="attr-name">{name.unwrap_or_default()}</span>
-                                    {origin.map(|o| view! { <span class="attr-origin" title="Assignment this attribute comes from">{o}</span> })}
+                                    {(!warned.is_empty()).then(|| view! { <span class="attr-warning" title=warned.join("\n")>"⚠"</span> })}
+                                    {origin.map(|o| {
+                                        let title = match &from {
+                                            Some(a) => format!("Expected state this attribute comes from, in assignment {a}"),
+                                            None => "Expected state this attribute comes from".to_string(),
+                                        };
+                                        view! { <span class="attr-origin" title=title>{o}</span> }
+                                    })}
+                                    {(!also_in.is_empty()).then(|| view! {
+                                        <span class="attr-overrides" title="Later assignments declaring the same attribute (same content): it is applied once">
+                                            {format!("also in {}", also_in.join(", "))}
+                                        </span>
+                                    })}
+                                    {(!overrides.is_empty()).then(|| view! {
+                                        <span class="attr-overrides" title="Earlier expected states whose attribute of the same Name this one replaces">
+                                            {format!("overrides {}", overrides.join(", "))}
+                                        </span>
+                                    })}
                                 </summary>
                                 <div class="attr-body">
                                     <span class="muted">{extra.join(" · ")}</span>
@@ -428,9 +486,24 @@ pub fn ExpectedStateView(#[prop(into)] state: Signal<Option<StateEntry>>) -> imp
                     }
                 })
                 .collect::<Vec<_>>();
+            let warnings = entry
+                .warnings
+                .iter()
+                .map(|(message, at)| {
+                    let positions: Vec<String> = at.iter().map(|i| format!("#{}", i + 1)).collect();
+                    view! { <li title=format!("Attributes {}", positions.join(", "))>{message.clone()}</li> }
+                })
+                .collect::<Vec<_>>();
+            let has_warnings = !warnings.is_empty();
+            let summary = if entry.revision.is_empty() {
+                format!("{count} attributes")
+            } else {
+                format!("{count} attributes, revision {}", entry.revision)
+            };
             view! {
+                {has_warnings.then(|| view! { <ul class="composition-warnings">{warnings}</ul> })}
                 <div class="toolbar">
-                    <span class="muted">{format!("{count} attributes, revision {}", entry.revision)}</span>
+                    <span class="muted">{summary}</span>
                     <button on:click=move |_| open.set(true)>"Expand all"</button>
                     <button on:click=move |_| open.set(false)>"Collapse all"</button>
                 </div>

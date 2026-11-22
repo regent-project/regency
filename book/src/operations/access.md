@@ -29,8 +29,10 @@ groups_claim = "groups"
 ## Authorization (Cedar)
 
 Every read and every command is checked with [Cedar](https://www.cedarpolicy.com)
-policies. Resources form a hierarchy — `Source` ⊃ `Inventory` ⊃ `Host` —
-plus expected states, orders, settings and policies.
+policies. Resources form a hierarchy — `Source` ⊃ `Assignment` ⊃ `Host` —
+plus expected states, orders, settings and policies. A host is in an
+`Assignment` while its labels match the assignment's selector, so a policy
+on an assignment follows the hosts' labels.
 
 Built-in roles, by group membership:
 
@@ -47,7 +49,7 @@ Your own policies narrow or widen this, for example:
 permit(
   principal in Group::"web-team",
   action in [Action::"assess", Action::"reach"],
-  resource in Inventory::"infra/web"
+  resource in Assignment::"infra/web"
 );
 ```
 

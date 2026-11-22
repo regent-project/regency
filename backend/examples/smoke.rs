@@ -10,7 +10,6 @@ use futures::StreamExt;
 use regencylib::api::regency_client::RegencyClient;
 use regencylib::model::*;
 use regencylib::proto as api;
-use regencylib::selector::HostSelector;
 use regent_sdk::ExpectedState;
 use regent_sdk::hosts::handlers::{ConnectionMethod, TargetUser};
 use regent_sdk::hosts::managed_host::ManagedHostBuilder;
@@ -56,7 +55,6 @@ async fn main() -> anyhow::Result<()> {
                 "localhost",
                 Some(ConnectionMethod::Localhost(TargetUser::current_user())),
             ),
-            inventories: Default::default(),
             labels: [("env".to_string(), "dev".to_string())].into(),
             pool: None,
         }),
@@ -65,12 +63,14 @@ async fn main() -> anyhow::Result<()> {
             name: "empty".into(),
             state: ExpectedState::new(),
         }),
+        // D29: the assignment selects its hosts by labels
         CatalogBody::Assignment(AssignmentDef {
             source_id: "smoke".into(),
             name: "dev".into(),
-            selector: HostSelector::parse_terms(["label:env=dev"]).map_err(anyhow::Error::msg)?,
-            expected_state: "smoke/empty".into(),
+            selector: regencylib::labels::LabelSelector::parse(r#"{env="dev"}"#)
+                .map_err(anyhow::Error::msg)?,
             priority: 0,
+            expected_states: vec!["smoke/empty".into()],
         }),
     ];
     for (i, body) in items.into_iter().enumerate() {

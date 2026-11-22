@@ -46,5 +46,5 @@ The health port is never authenticated: keep it on a private network.
 
 ## In the web UI
 
-**Configuration → Services** shows every instance's readiness checks,
+**Administration → Services** shows every instance's readiness checks,
 version and configuration errors, refreshed every 10 seconds.

@@ -18,6 +18,7 @@ pub mod control;
 pub mod couch;
 pub mod databases;
 pub mod hashing;
+pub mod labels;
 pub mod live;
 pub mod logging;
 pub mod messages;
@@ -30,6 +31,7 @@ pub mod security;
 pub mod selector;
 pub mod services;
 pub mod shard;
+pub mod sshkey;
 pub mod telemetry;
 #[cfg(feature = "testing")]
 pub mod testing;

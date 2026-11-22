@@ -90,6 +90,10 @@ async fn run(
     let secrets = config.common.secrets.pool()?;
     let health = Health::new();
     health.spawn(config.common.health.clone());
+    let mut central = central;
+    if let Some(path) = &config.runner.ssh_key {
+        advertise_ssh_key(&mut central, path, &config.runner.pool);
+    }
     central.spawn(&health);
     health.register("rabbitmq");
     health.register("control");
@@ -345,5 +349,28 @@ async fn reach_partitions(
     tokio::select! {
         result = ownership => if let Err(e) = result { warn!(error = %e, "partition ownership lost") },
         _ = manage => {}
+    }
+}
+
+/// D25: generate the runner's SSH key when missing and advertise its public
+/// key. A key that cannot be written is logged: the runner still serves the
+/// hosts whose definitions bring their own credentials.
+fn advertise_ssh_key(central: &mut regencylib::central::Resolved<Config>, path: &str, pool: &str) {
+    use regencylib::sshkey::{Ensured, ensure};
+    match ensure(
+        std::path::Path::new(path),
+        &format!("regency-runner-{pool}"),
+    ) {
+        Ok(Ensured::Generated(line)) => {
+            info!(path = %path, "SSH key generated for the runner");
+            central.advertised.insert("ssh_public_key".into(), line);
+        }
+        Ok(Ensured::Existing(line)) => {
+            central.advertised.insert("ssh_public_key".into(), line);
+        }
+        Ok(Ensured::NoPublicKey) => {
+            warn!(path = %path, "SSH key without its .pub file: its public key is not advertised");
+        }
+        Err(e) => error!(path = %path, error = %e, "cannot create the runner's SSH key"),
     }
 }

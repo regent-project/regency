@@ -97,8 +97,9 @@ REGENCY_AIO_IMAGE=regency-aio:local REGENCY_ADMIN_PASSWORD='choose-a-password' \
 On first start, the container:
 
 1. generates every service account password, the session and enrollment
-   keys, and a built-in CA with a certificate for the endpoint (kept in the
-   `regency` volume);
+   keys, a built-in CA with a certificate for the endpoint (naming
+   `localhost`, `regency` and the machine's hostname, FQDN and IP
+   addresses) and the runner's SSH key (all kept in the `regency` volume);
 2. runs `regencyctl init`: RabbitMQ users, permissions and queues, CouchDB
    databases, users and security, the bootstrap admin;
 3. starts every service under its own least-privilege account.
@@ -109,8 +110,12 @@ password is generated and printed **once** in these logs (`bootstrap-admin`).
 
 ## Log in
 
-Open <http://localhost:8080> and log in as `admin`. The **Map** shows your
-fleet — empty for now. Continue with [First steps](first-steps.md).
+Open <http://localhost:8080> and log in as `admin`. The **Live view**
+shows your fleet, empty for now. Regency is already able to manage hosts
+both ways: **Hosts → Add host** gives the runner's public key to
+authorize on hosts reached over SSH, and everything a regops agent needs
+(enrollment token, CA certificate, its `[Regency]` configuration). Continue
+with [First steps](first-steps.md).
 
 ## Stop, reset
 

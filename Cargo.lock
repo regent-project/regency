@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -592,6 +592,7 @@ dependencies = [
  "tower-http",
  "tower-layer",
  "tracing",
+ "url",
  "yaml_serde",
 ]
 
@@ -1609,7 +1610,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "dbwriter"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2038,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "endpoint"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2291,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "console_error_panic_hook",
  "futures",
@@ -2299,6 +2300,7 @@ dependencies = [
  "leptos",
  "leptos_router",
  "prost",
+ "regex",
  "serde",
  "serde_json",
  "toml",
@@ -6396,7 +6398,7 @@ dependencies = [
 
 [[package]]
 name = "regency-aio"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6411,11 +6413,12 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "x509-parser",
 ]
 
 [[package]]
 name = "regencyctl"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6434,7 +6437,7 @@ dependencies = [
 
 [[package]]
 name = "regencylib"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "argon2 0.5.3",
  "axum",
@@ -6443,6 +6446,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "cron",
+ "ed25519-dalek 2.2.0",
  "futures",
  "jsonwebtoken",
  "lapin",
@@ -6454,6 +6458,7 @@ dependencies = [
  "rcgen",
  "regencylib",
  "regent-sdk",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -6474,9 +6479,9 @@ dependencies = [
 
 [[package]]
 name = "regent-sdk"
-version = "0.25.0"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdad55335ce1a5f78f3e986af1a305297969ae837c31ead9aaff542386ca60cc"
+checksum = "6c1a151ff96e284dcdb0b744c65b586daa53be6f68c4602c9be52f4e0a658094"
 dependencies = [
  "bytes",
  "chrono",
@@ -6669,7 +6674,7 @@ dependencies = [
 
 [[package]]
 name = "runner"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6976,7 +6981,7 @@ dependencies = [
 
 [[package]]
 name = "scheduler"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7558,7 +7563,7 @@ dependencies = [
 
 [[package]]
 name = "sourcesync"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",

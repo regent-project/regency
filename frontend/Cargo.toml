@@ -17,6 +17,7 @@ tonic-web-wasm-client = "0.9"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
 toml = "1.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Storage", "Window", "Document", "Element", "HtmlMetaElement", "Location", "DomRect", "HtmlCanvasElement", "CanvasRenderingContext2d", "CssStyleDeclaration", "MouseEvent", "PointerEvent"] }

@@ -29,14 +29,14 @@ Pages:
 
 - **Live view** (`/`, main page; "the map" in the code): live infrastructure graph, laid out like the
   former proof of concept: one card per group (assignment by default,
-  inventory, label value or state) with its hosts as dots on rings around
+  label value or state) with its hosts as dots on rings around
   it, linked to it (no root node, no circle around a group). Dots are
   coloured by the host's compliance with its effective expected state
   (D23, `pages::host_state`): outdated (checked against an older one) like
   unknown, invalid (assignments in conflict) amber, unassigned dark grey.
   Grouped by assignment, the graph puts a host in its most specific
-  assignment (last layer), the areas display in each of them; a host in
-  several inventories gets dashed links to the others; a host with a job
+  assignment (the last applied, D29), the areas display in each of them;
+  a host with a job
   in progress (pending, running or abort requested) is drawn in the job
   colour instead, without animation.
   Cards have Assess/Reach buttons (a plain confirmation: each host runs its
@@ -69,8 +69,9 @@ Pages:
   last hour's jobs, restarted 5 s after they end, finished jobs pruned
   after an hour) that the Live view and the Hosts page reuse. Clicking a host selects it (`/?host=<id>`, shareable) and
   shows its summary (state, assignments) and its effective expected state
-  (`expected::HostStateExplorer`: the layers, lowest priority first, then
-  the attributes tagged with their assignment, from `GetEffectiveState`) in
+  (`expected::HostStateExplorer`: its assignment and stack of expected
+  states, base first, then the attributes tagged with their state and the
+  states they override, and the suspected conflicts, from `GetEffectiveState`) in
   the right panel, with Assess/Reach and a Details button to the host page; clicking empty space
   deselects it. The panel shrinks to a thin rail (its › button; click the
   rail to bring it back) and is resized by dragging its edge; the browser
@@ -78,7 +79,7 @@ Pages:
   A second display ("Display: areas", also remembered): each group is a
   rectangle holding its hosts in a grid, with its card (same
   counts, Assess/Reach, fold on click) in the top right corner; a host in
-  several inventories is drawn in each of them (no links). In both
+  several assignments is drawn in each of them (no links). In both
   displays hosts are in name order (they never move when a state changes),
   and host names zoom with the hosts (size in map units) once readable.
   Rendering (`src/map.rs`, `src/canvas.rs`), for thousands of hosts: group
@@ -88,14 +89,26 @@ Pages:
   batches (`pages::next_batch`, 150 ms). Measured with 3000 hosts: what costs
   is pixels, not canvas calls: keep lines ≥ 1 px and tiny dots as squares.
 - **Hosts** (`/hosts`): live table (filter by id, state, `label=value`,
-  inventory); `/hosts?state=<state>` shows only the hosts in that
+  assignment); `/hosts?state=<state>` shows only the hosts in that
   state (exactly, removable chip), the target of the masthead's fleet counts; host detail (state, assignments, remediations, certificate
   approval, effective expected state with Assess/Reach now, outcome history,
   deletion of the host's data).
 - **Jobs** (`/jobs`): live jobs of the last 24 h (abort).
 - **Configuration** (`/config/...`):
-  - *Hosts*: create, edit and delete host definitions of API/frontend
-    sources (Git-sourced ones are read-only);
+  - *Host definitions*: create, edit and delete host definitions of
+    API/frontend sources (Git-sourced ones are read-only);
+  - *Expected states*, *Assignments* (`src/catalog.rs`): the same for the
+    other catalog items (D11, D23, D29); expected states as YAML checked
+    live through `ConvertAttributes`; an assignment's hosts are a label
+    selector (D26/D29) evaluated in the browser by the same code as the
+    services (`regencylib/src/labels.rs`, compiled in as `crate::labels`),
+    edited with a Grafana-like filter builder (`src/labelpicker.rs`:
+    label / operator / value comboboxes fed by the labels in use) or as
+    text, next to a "Matching hosts" panel (count, searchable list of the
+    hosts with their labels, and for a searched host that does not match,
+    the filter excluding it); its priority orders it among a host's
+    assignments;
+    Assess / Reach on its hosts (`/inventories` now opens this page);
   - *Sources*: Git sources (repository, branch, path, poll interval,
     credentials reference), sync now;
   - *Services*: every instance (version, regent-sdk version, readiness,

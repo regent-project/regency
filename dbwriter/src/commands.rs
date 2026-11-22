@@ -8,8 +8,9 @@ use regencylib::couch::{Couch, CouchError};
 use regencylib::messages::{Command, CommandBody};
 use regencylib::model::{
     CatalogBody, CatalogItem, DB_CATALOG, DB_CONFIG, DB_ORDERS, DB_POLICIES, DB_SETTINGS, DB_STATE,
-    DB_USERS, HostDoc, JOBS_PREFIX, OUTCOMES_PREFIX, SETTINGS_DOC_ID, SettingsDoc, SourceKind,
-    Stored, UserDoc, host_doc_id, order_doc_id, policy_doc_id, user_doc_id,
+    DB_USERS, HostDoc, JOBS_PREFIX, OUTCOMES_PREFIX, SETTINGS_DOC_ID, SettingsDoc, SourceHeadDoc,
+    SourceKind, Stored, UserDoc, host_doc_id, order_doc_id, policy_doc_id, source_head_doc_id,
+    user_doc_id,
 };
 use regencylib::policy::Authorizer;
 use regencylib::validate::reject_inline_secrets;
@@ -215,14 +216,8 @@ pub async fn apply(couch: &Couch, command: &Command) -> Result<(), CommandError>
         }
         CommandBody::CatalogUpsert(item) => {
             reject_inline_secrets(item).or_else(refuse)?;
-            if let CatalogBody::Hostdef(def) = &item.body
-                && def.builder.id != def.host_id
-            {
-                return refuse("hostdef: builder id and host_id differ");
-            }
-            if let CatalogBody::Assignment(def) = &item.body {
-                def.validate().or_else(refuse)?;
-            }
+            // names, label keys (D26), references
+            item.validate().or_else(refuse)?;
             let is_source = matches!(item.body, CatalogBody::Source(_));
             check_owner(couch, item.source_id(), issuer, is_source).await?;
             let id = item.doc_id();
@@ -259,6 +254,16 @@ pub async fn apply(couch: &Couch, command: &Command) -> Result<(), CommandError>
             }
             delete_doc(couch, DB_CATALOG, doc_id).await?;
             info!(doc_id = %doc_id, source_id = %source_id, "catalog item deleted");
+        }
+        CommandBody::CatalogSourceSynced(head) => {
+            couch
+                .merge_upsert(
+                    DB_STATE,
+                    &source_head_doc_id(&head.source_id),
+                    head,
+                    SourceHeadDoc::merge,
+                )
+                .await?;
         }
         CommandBody::SourceRefresh { .. } | CommandBody::Run(_) => {
             // not routed here (D10); harmless if it ever is

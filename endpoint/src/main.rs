@@ -92,6 +92,8 @@ async fn run(
     let secrets = config.common.secrets.pool()?;
     let health = Health::new();
     health.spawn(config.common.health.clone());
+    let mut central = central;
+    central.advertised = advertised(&config);
     central.spawn(&health);
     let cancel = CancellationToken::new();
 
@@ -239,4 +241,75 @@ async fn run(
         .await?;
     info!("endpoint stopped");
     Ok(())
+}
+
+/// D25: what regops agents need to reach this endpoint, published in the
+/// instance status: its port, the names of its server certificate and the
+/// built-in CA's certificate (which signs the server certificate in the
+/// all-in-one). Public material only.
+fn advertised(config: &Config) -> std::collections::BTreeMap<String, String> {
+    let mut advertised = std::collections::BTreeMap::new();
+    if let Ok(address) = config.endpoint.listen.parse::<std::net::SocketAddr>() {
+        advertised.insert("port".to_string(), address.port().to_string());
+    }
+    match std::fs::read(&config.endpoint.cert) {
+        Ok(pem) => match server_names(&pem) {
+            Ok(names) => {
+                advertised.insert("server_names".to_string(), names.join(","));
+            }
+            Err(e) => warn!(error = %e, "cannot read the server certificate's names"),
+        },
+        Err(e) => warn!(error = %e, "cannot read the server certificate"),
+    }
+    if let Some(ca) = &config.ca {
+        match std::fs::read_to_string(&ca.cert) {
+            Ok(pem) => {
+                advertised.insert("ca_cert".to_string(), pem);
+            }
+            Err(e) => warn!(error = %e, "cannot read the built-in CA's certificate"),
+        }
+    }
+    advertised
+}
+
+/// DNS names and IP addresses of the first certificate of a PEM chain.
+fn server_names(pem: &[u8]) -> anyhow::Result<Vec<String>> {
+    use x509_parser::extensions::GeneralName;
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    let der = rustls_pemfile::certs(&mut &pem[..])
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no certificate"))??;
+    let (_, cert) = X509Certificate::from_der(der.as_ref())?;
+    let mut names = Vec::new();
+    if let Some(san) = cert.subject_alternative_name()? {
+        for name in &san.value.general_names {
+            match name {
+                GeneralName::DNSName(dns) => names.push(dns.to_string()),
+                GeneralName::IPAddress(bytes) => match bytes.len() {
+                    4 => names
+                        .push(std::net::Ipv4Addr::from(<[u8; 4]>::try_from(*bytes)?).to_string()),
+                    16 => names
+                        .push(std::net::Ipv6Addr::from(<[u8; 16]>::try_from(*bytes)?).to_string()),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+    Ok(names)
+}
+
+#[cfg(test)]
+mod advertised_tests {
+    #[test]
+    fn server_names_lists_dns_names_and_ips() {
+        let mut params = rcgen::CertificateParams::new(vec!["regency".to_string()]).unwrap();
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::IpAddress("192.168.1.40".parse().unwrap()));
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let names = super::server_names(cert.pem().as_bytes()).unwrap();
+        assert_eq!(names, vec!["regency", "192.168.1.40"]);
+    }
 }

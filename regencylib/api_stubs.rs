@@ -26,6 +26,7 @@ pub fn stubs() {
         .method(method("list_orders", "ListOrders", "ListOrdersRequest", "ListOrdersResponse", false))
         .method(method("list_catalog", "ListCatalog", "ListCatalogRequest", "ListCatalogResponse", false))
         .method(method("get_effective_state", "GetEffectiveState", "GetEffectiveStateRequest", "GetEffectiveStateResponse", false))
+        .method(method("compose_states", "ComposeStates", "ComposeStatesRequest", "ComposeStatesResponse", false))
         .method(method("get_attribute_schema", "GetAttributeSchema", "GetAttributeSchemaRequest", "GetAttributeSchemaResponse", false))
         .method(method("convert_attributes", "ConvertAttributes", "ConvertAttributesRequest", "ConvertAttributesResponse", false))
         .method(method("get_settings", "GetSettings", "GetSettingsRequest", "GetSettingsResponse", false))

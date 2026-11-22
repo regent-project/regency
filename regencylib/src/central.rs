@@ -386,6 +386,7 @@ impl Bootstrap {
             effective,
             origins,
             revisions: documents.revisions,
+            advertised: BTreeMap::new(),
         })
     }
 }
@@ -437,6 +438,9 @@ pub struct Resolved<T> {
     pub effective: toml::Table,
     pub origins: BTreeMap<String, Origin>,
     pub revisions: BTreeMap<String, String>,
+    /// Public material published in the instance status (D25); set before
+    /// [`Resolved::spawn`].
+    pub advertised: BTreeMap<String, String>,
 }
 
 /// An instance's status on `regency.status` (JSON), stored by dbwriter as
@@ -475,6 +479,11 @@ pub struct InstanceStatus {
     /// A new configuration is about to be applied (restart).
     #[serde(default)]
     pub restart_pending: bool,
+    /// Public material others need to work with this instance (D25), e.g. a
+    /// runner's `ssh_public_key`, the endpoint's `ca_cert`, `server_names`
+    /// and `port`. Never secrets.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub advertised: BTreeMap<String, String>,
 }
 
 impl InstanceStatus {
@@ -526,6 +535,7 @@ impl<T: DeserializeOwned + Serialize + Send + Sync + 'static> Resolved<T> {
             central: self.bootstrap.central.enabled,
             config_error: None,
             restart_pending: false,
+            advertised: self.advertised.clone(),
         }));
         spawn_status(
             common,
@@ -970,6 +980,7 @@ mod tests {
             central: true,
             config_error: None,
             restart_pending: false,
+            advertised: BTreeMap::new(),
         };
         validate(
             "backend",

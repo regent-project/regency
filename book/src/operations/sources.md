@@ -12,7 +12,7 @@ A **source** is where catalog items come from:
 
 ```text
 <path>/
-  inventories/
+  hosts/
     web.yaml
     databases.yaml
   expected_states/
@@ -23,11 +23,16 @@ A **source** is where catalog items come from:
     web.yaml
 ```
 
-An inventory is a regent-sdk inventory, with regency's optional `Pool` (for
-the whole inventory) and per-host `Labels` and `Pool`:
+A hosts file is a regent-sdk inventory file (the format `reg` reads), with
+regency's optional `Labels` and `Pool`, for the whole file and on each
+host. Values at the top of the file (connection method, variables, labels,
+pool) are copied into each of its hosts; a host's own values win. The
+file name means nothing.
 
 ```yaml
+# hosts/web.yaml
 Pool: dmz
+Labels: { role: web }
 DefaultConnectionMethod: !Ssh2
   AuthMethod: !Key
     Username: ops
@@ -38,33 +43,45 @@ GlobalVars:
 Hosts:
   - Id: web-01
     Endpoint: 10.0.1.11:22
-    Labels: { env: prod, tier: front }
+    Labels: { env: prod }
   - Id: web-02
     Endpoint: 10.0.1.12:22
-    Labels: { env: prod, tier: front }
+    Labels: { env: staging }
 ```
-
-The inventory is named after its file (`web` for `inventories/web.yaml`)
-unless it sets `Name`. Files end in `.yaml` or `.yml`; subdirectories are
-ignored.
 
 Expected states are regent-sdk expected states, named after their file
 (`infra/nginx` for `expected_states/nginx.yaml` in source `infra`).
 
-An assignment ([Assignments](assignments.md)) names an expected state, a
-priority and its hosts; names without a `/` refer to this source:
+An assignment ([Assignments](assignments.md)) gives the hosts its label
+selector matches ([Labels](hosts.md#labels)) a stack of expected states,
+base first, each one overriding the previous ones; names without a `/`
+refer to this source. A host gets every assignment matching it, applied by
+`Priority` (lower first, default 0), then by name:
 
 ```yaml
 # assignments/web.yaml
-ExpectedState: nginx          # or other-source/name
-Priority: 100                 # default 0
-Inventories: [web]            # any of Hosts, Inventories, Labels
-Labels: { tier: front }       # (a host matching any of them is selected)
+Selector: '{role="web", env=~"prod|staging"}'   # '{}' = every host
+Priority: 10
+ExpectedStates:               # base first, the last wins
+  - nginx
+  - nginx-prod                # or other-source/name
+# ExpectedState: nginx        # shorthand for a single state
 ```
+
+An assignment with the same `Priority` and name as another source's
+cannot be ordered against it: it is reported as an error and not synced
+until one of them changes.
+
+Files end in `.yaml` or `.yml`; subdirectories are ignored. Files in a
+former layout (hosts listed in `inventories/`, an `inventories/` folder of
+selectors, assignments with `Inventory` or `Hosts`) are reported as
+errors, and like any file error they never delete what the source defined
+before: move the hosts to `hosts/`, then put each inventory's selector in
+the assignments using it (`Selector:`) and delete `inventories/`.
 
 ## Adding a source
 
-**Configuration → Sources → New source**: id, repository URL, branch, path
+**Administration → Sources → New source**: id, repository URL, branch, path
 inside the repository, poll interval, and the credentials as a secret
 reference resolved by sourcesync (an access token). **Sync now** forces an
 immediate synchronization.

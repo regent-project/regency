@@ -2,11 +2,11 @@
 
 ## Run now
 
-From the map (a group's card) or a host's panel or page: **Assess** or
-**Reach**. Each host runs its own effective expected state
+From the map (a group's card), an assignment's row in **Assignments**, or a host's panel or page: **Assess** or **Reach**. Each host runs its own effective expected state
 ([Assignments](assignments.md)); hosts without an assignment are skipped.
 Over the API, `RunNow` takes a host selector, so one command can target a
-whole inventory or every `env=prod` host; with `one_shot_yaml` it runs a
+whole assignment, a label selector (`{env="prod", role=~"web|api"}`) or
+every `env=prod` host; with `one_shot_yaml` it runs a
 hand-written attribute once instead (history only). Each host gets its own job; follow them
 in **Jobs** (live, last 24 hours), where queued and running jobs can be
 **aborted**.

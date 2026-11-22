@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use regencylib::assignment::Assignments;
 use regencylib::couch::{Change, Couch, Since, follow};
 use regencylib::model::{
-    CatalogBody, CatalogItem, DB_CATALOG, DB_ORDERS, DB_POLICIES, HostDef, InventoryDef, Order,
+    AssignmentDef, CatalogBody, CatalogItem, DB_CATALOG, DB_ORDERS, DB_POLICIES, HostDef, Order,
     PolicyDoc,
 };
 use regencylib::policy::Authorizer;
@@ -132,19 +132,19 @@ impl State {
             .collect()
     }
 
-    /// Host definitions and inventories of the whole catalog.
-    pub fn hosts(&self) -> (Vec<HostDef>, Vec<InventoryDef>) {
+    /// Host definitions and assignments of the whole catalog.
+    pub fn hosts(&self) -> (Vec<HostDef>, Vec<AssignmentDef>) {
         let inner = self.inner.read().expect("state lock");
         let mut hostdefs = Vec::new();
-        let mut inventories = Vec::new();
+        let mut assignments = Vec::new();
         for item in inner.catalog.values() {
             match &item.body {
                 CatalogBody::Hostdef(def) => hostdefs.push(def.clone()),
-                CatalogBody::Inventory(def) => inventories.push(def.clone()),
+                CatalogBody::Assignment(def) => assignments.push(def.clone()),
                 _ => {}
             }
         }
-        (hostdefs, inventories)
+        (hostdefs, assignments)
     }
 
     /// Assignments and expected states at their latest revision (D11, D23).

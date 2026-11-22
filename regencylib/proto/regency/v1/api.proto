@@ -37,6 +37,9 @@ service Regency {
   rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
   rpc ListCatalog(ListCatalogRequest) returns (ListCatalogResponse);
   rpc GetEffectiveState(GetEffectiveStateRequest) returns (GetEffectiveStateResponse);
+  // D27: the final state of a stack of expected states (an assignment being
+  // edited), with the blame of each attribute and the suspected conflicts.
+  rpc ComposeStates(ComposeStatesRequest) returns (ComposeStatesResponse);
   // Attribute builder (D23 one-shot): the JSON Schema of an attribute, and
   // conversions between the YAML and JSON forms (checked with the SDK).
   rpc GetAttributeSchema(GetAttributeSchemaRequest) returns (GetAttributeSchemaResponse);
@@ -77,12 +80,15 @@ message Accepted {
   string command_id = 1;
 }
 
-// D16 host selector: union of ids, inventories (`source/name`) and hosts
-// carrying all the labels.
+// D16 host selector: union of ids, the hosts of assignments (`source/name`,
+// D29), hosts carrying all the labels and hosts matching a label selector.
 message HostSelector {
+  reserved 2;
+  reserved "inventories";  // inventories are gone (D29)
   repeated string hosts = 1;
-  repeated string inventories = 2;
   map<string, string> labels = 3;
+  repeated string assignments = 4;
+  string selector = 5;  // Loki-style, e.g. {env="prod", role=~"web|api"}; empty = none
 }
 
 enum JobKind {
@@ -126,10 +132,12 @@ message HostSummary {
   repeated string pending_fingerprints = 10;
   string pinned_fingerprint = 11;
   map<string, string> labels = 12;
-  repeated string inventories = 13;
+  reserved 13;
+  reserved "inventories";  // D29
   bool conflicting = 14;  // defined differently by several sources (D11)
-  // D23: assignments layered into the host's effective expected state,
-  // lowest priority first (`source/name`); empty = unassigned.
+  // D29: every assignment selecting the host, added up into its effective
+  // expected state, in order (priority, then name; `source/name`); empty =
+  // unassigned.
   repeated string assignments = 15;
   // Revision of the current effective state; empty if none can be composed.
   string effective_revision = 16;
@@ -142,6 +150,23 @@ message HostSummary {
   // outcome), to show its run log.
   string last_job = 19;
   string last_job_month = 20;
+  // D28: a proactive host's agent (e.g. "regops"); empty = passive host.
+  string agent = 21;
+  string agent_version = 22;
+  // Where its expected state comes from (repository URL without
+  // credentials, branch, file) and the commit it applied.
+  string agent_repo = 23;
+  string agent_branch = 24;
+  string agent_path = 25;
+  string agent_revision = 26;
+  // up_to_date / behind (the regency Git source on the same repository and
+  // branch is at `repo_head`) / unknown (no such source).
+  string repo_status = 27;
+  string repo_head = 28;
+  string repo_source = 29;
+  // How the applied state differs from its assignment's final state (D27);
+  // empty = same, or no assignment.
+  string state_drift = 30;
 }
 
 message WatchHostsRequest {
@@ -318,7 +343,7 @@ message ListOrdersResponse {
 
 message ListCatalogRequest {
   string source_id = 1;  // empty = all
-  string type = 2;       // source, inventory, hostdef, expected_state, assignment; empty = all
+  string type = 2;       // source, hostdef, expected_state, assignment; empty = all
 }
 
 message CatalogEntry {
@@ -337,8 +362,33 @@ message GetEffectiveStateRequest {
 
 message AssignmentLayer {
   string assignment = 1;      // source/name
-  int32 priority = 2;
+  int32 priority = 2;         // the assignment's priority (D29)
   string expected_state = 3;  // source/name
+}
+
+// Where a final attribute comes from (D27).
+message AttributeBlame {
+  string origin = 1;              // expected state (source/name)
+  repeated string overrides = 2;  // earlier states it replaced (same Name), oldest first
+  string assignment = 3;          // assignment it comes from (D29); empty in ComposeStates
+  repeated string also_in = 4;    // later assignments declaring it identically (applied once)
+}
+
+// A suspected conflict (D27): a warning, never blocking.
+message CompositionWarning {
+  string message = 1;
+  repeated uint32 attributes = 2;  // positions in the final state
+}
+
+message ComposeStatesRequest {
+  repeated string expected_states = 1;  // source/name, base first (last wins)
+}
+
+message ComposeStatesResponse {
+  string state_json = 1;                    // ExpectedState (SDK JSON); empty on error
+  repeated AttributeBlame blame = 2;        // one per attribute
+  repeated CompositionWarning warnings = 3;
+  string error = 4;                         // e.g. an unknown expected state
 }
 
 // JSON Schema of one regent-sdk Attribute (regent_sdk::schema::attribute()).
@@ -365,11 +415,13 @@ message ConvertAttributesResponse {
 }
 
 message GetEffectiveStateResponse {
-  repeated AssignmentLayer layers = 1;  // lowest priority first; empty = unassigned
+  repeated AssignmentLayer layers = 1;  // in order (D29); empty = unassigned
   string state_json = 2;                // ExpectedState (SDK JSON); empty if none
   string revision = 3;
-  repeated string origins = 4;          // assignment of each attribute
-  string error = 5;                     // why the layers cannot be composed
+  repeated string origins = 4;          // expected state of each attribute (D27)
+  string error = 5;                     // why there is no effective state
+  repeated AttributeBlame blame = 6;    // one per attribute (D27)
+  repeated CompositionWarning warnings = 7;
 }
 
 message GetSettingsRequest {}

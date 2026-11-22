@@ -44,7 +44,8 @@ exposing `/healthz`, `/readyz` and Prometheus `/metrics` on a health port.
 ## sourcesync
 
 - Polls each Git source at its interval (or on demand), reads
-  `inventories/*.yaml` and `expected_states/*.yaml` under the source's path,
+  `hosts/`, `expected_states/` and `assignments/` under the
+  source's path,
   and publishes the differences as catalog commands with the commit sha.
 - Sources are sharded across replicas like the scheduler's orders.
 

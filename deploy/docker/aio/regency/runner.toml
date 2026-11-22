@@ -28,3 +28,6 @@ restart_jitter_sec = 0
 
 [runner]
 pool = "default"
+# D25: SSH identity of the runner, generated at first start (ed25519); add
+# its public key (web UI: Add hosts) to the hosts' ~/.ssh/authorized_keys
+ssh_key = "/var/lib/regency/secrets/runner-ssh-key"

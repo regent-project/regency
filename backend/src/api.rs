@@ -108,7 +108,7 @@ impl Api {
     }
 
     fn host_resource(&self, host_id: &str) -> Resource {
-        Resource::host(host_id, &self.view.hostdefs().0)
+        self.view.host_resource(host_id)
     }
 
     async fn publish_command(
@@ -207,24 +207,17 @@ impl Api {
         Ok(None)
     }
 
-    fn catalog_resource(item: &CatalogItem) -> Resource {
+    fn catalog_resource(&self, item: &CatalogItem) -> Resource {
         match &item.body {
             CatalogBody::Source(d) => Resource::Source(d.source_id.clone()),
-            CatalogBody::Inventory(d) => Resource::Inventory(format!("{}/{}", d.source_id, d.name)),
-            CatalogBody::Hostdef(d) => Resource::Host {
-                id: d.host_id.clone(),
-                inventories: d
-                    .inventories
-                    .iter()
-                    .map(|i| format!("{}/{}", d.source_id, i))
-                    .collect(),
-                sources: vec![d.source_id.clone()],
-            },
+            CatalogBody::Inventory(d) => Resource::Source(d.source_id.clone()),
+            // D29: the assignments its labels put it in
+            CatalogBody::Hostdef(d) => Resource::host_of(&d.host_id, [d], &self.view.hostdefs().1),
             CatalogBody::ExpectedState(d) => {
                 Resource::ExpectedState(format!("{}/{}", d.source_id, d.name))
             }
-            // D23: authorized as a change of its source
-            CatalogBody::Assignment(d) => Resource::Source(d.source_id.clone()),
+            // D29: in its source
+            CatalogBody::Assignment(d) => Resource::Assignment(d.reference()),
         }
     }
 
@@ -237,6 +230,28 @@ impl Api {
         self.publish_command(caller, command_id, CommandBody::UserUpsert(user))
             .await
     }
+}
+
+fn blame_message(blame: &regencylib::assignment::Blame) -> api::AttributeBlame {
+    let mut message = api::AttributeBlame::new();
+    message.set_origin(blame.origin.as_str());
+    for state in &blame.overrides {
+        message.overrides_mut().push(state.as_str());
+    }
+    message.set_assignment(blame.assignment.as_str());
+    for assignment in &blame.also_in {
+        message.also_in_mut().push(assignment.as_str());
+    }
+    message
+}
+
+fn warning_message(warning: &regencylib::assignment::Warning) -> api::CompositionWarning {
+    let mut message = api::CompositionWarning::new();
+    message.set_message(warning.message.as_str());
+    for position in &warning.attributes {
+        message.attributes_mut().push(*position as u32);
+    }
+    message
 }
 
 /// Does a job match a WatchJobs filter (host ids: `None` = any)?
@@ -313,7 +328,7 @@ impl Regency for Api {
     ) -> Result<Response<Self::WatchHostsStream>, Status> {
         let span = rpc_span("WatchHosts");
         let caller = self.caller(&request).instrument(span.clone()).await?;
-        let selector = selector_from(request.get_ref().selector());
+        let selector = selector_checked(request.get_ref().selector())?;
         let (tx, rx) = mpsc::channel::<Result<api::HostEvent, Status>>(512);
         let view = self.view.clone();
         let api = ApiRef { view: view.clone() };
@@ -425,7 +440,7 @@ impl Regency for Api {
             FilterOneof::JobId(id) => JobFilter::Job(id.to_string()),
             FilterOneof::Origin(origin) => JobFilter::Origin(origin.to_string()),
             FilterOneof::Hosts(selector) => {
-                JobFilter::Hosts(self.view.selected(&selector_from(selector)))
+                JobFilter::Hosts(self.view.selected(&selector_checked(selector)?))
             }
             _ => JobFilter::Hosts(None),
         };
@@ -935,7 +950,7 @@ impl Regency for Api {
                     && !authorizer.is_authorized(
                         &caller.principal,
                         "read",
-                        &Self::catalog_resource(&item),
+                        &self.catalog_resource(&item),
                     )
                 {
                     continue;
@@ -962,25 +977,33 @@ impl Regency for Api {
             let host_id = request.get_ref().host_id().to_string();
             self.allow(&caller, "read", &self.host_resource(&host_id))?;
             let effective = self.view.host_meta(&host_id).effective;
+            let assignments = self.view.assignments();
             let mut response = api::GetEffectiveStateResponse::new();
             for layer in effective.layers() {
                 let mut message = api::AssignmentLayer::new();
                 message.set_assignment(layer.assignment.as_str());
-                message.set_priority(layer.priority);
+                if let Some(def) = assignments.get(&layer.assignment) {
+                    message.set_priority(def.priority);
+                }
                 message.set_expected_state(layer.expected_state.as_str());
                 response.layers_mut().push(message);
             }
             match &effective {
                 Effective::Ready {
                     state,
-                    origins,
+                    blame,
+                    warnings,
                     revision,
                     ..
                 } => {
                     response.set_state_json(serde_json::to_string(state).map_err(internal)?);
                     response.set_revision(revision.as_str());
-                    for origin in origins {
-                        response.origins_mut().push(origin.as_str());
+                    for b in blame {
+                        response.origins_mut().push(b.origin.as_str());
+                        response.blame_mut().push(blame_message(b));
+                    }
+                    for w in warnings {
+                        response.warnings_mut().push(warning_message(w));
                     }
                 }
                 Effective::Invalid { reason, .. } => response.set_error(reason.as_str()),
@@ -991,6 +1014,44 @@ impl Regency for Api {
         .instrument(rpc_span("GetEffectiveState"))
         .await
         .pipe(|r| self.done("GetEffectiveState", started, r))
+    }
+
+    async fn compose_states(
+        &self,
+        request: Request<api::ComposeStatesRequest>,
+    ) -> Result<Response<api::ComposeStatesResponse>, Status> {
+        let started = Instant::now();
+        async {
+            let caller = self.caller(&request).await?;
+            let stack: Vec<String> = request
+                .get_ref()
+                .expected_states()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            for state in &stack {
+                self.allow(&caller, "read", &Resource::ExpectedState(state.clone()))?;
+            }
+            let mut response = api::ComposeStatesResponse::new();
+            match self.view.assignments().compose_refs(&stack) {
+                Ok(composition) => {
+                    response.set_state_json(
+                        serde_json::to_string(&composition.state).map_err(internal)?,
+                    );
+                    for b in &composition.blame {
+                        response.blame_mut().push(blame_message(b));
+                    }
+                    for w in &composition.warnings {
+                        response.warnings_mut().push(warning_message(w));
+                    }
+                }
+                Err(error) => response.set_error(error.as_str()),
+            }
+            Ok(Response::new(response))
+        }
+        .instrument(rpc_span("ComposeStates"))
+        .await
+        .pipe(|r| self.done("ComposeStates", started, r))
     }
 
     async fn get_attribute_schema(
@@ -1162,7 +1223,7 @@ impl Regency for Api {
             let caller = self.caller(&request).await?;
             let message = request.get_ref();
             let job = job_from(message.job())?;
-            let selector: HostSelector = selector_from(message.selector());
+            let selector: HostSelector = selector_checked(message.selector())?;
             let pool = message.pool().to_string();
             if selector.is_empty() {
                 return Err(Status::invalid_argument("the host selector is empty"));
@@ -1181,8 +1242,8 @@ impl Regency for Api {
                 Some(state)
             };
             // D16: Cedar checks the resolved hosts
-            let (hostdefs, inventories) = self.view.hostdefs();
-            let resolution = resolve(&selector, &hostdefs, &inventories, None);
+            let (hostdefs, assignment_defs) = self.view.hostdefs();
+            let resolution = resolve(&selector, &hostdefs, &assignment_defs, None);
             if resolution.targets.is_empty() {
                 return Err(Status::failed_precondition(
                     "the selector matches no runnable host",
@@ -1190,15 +1251,13 @@ impl Regency for Api {
             }
             if one_shot.is_none() {
                 let assignments = self.view.assignments();
-                let ready = resolution.targets.iter().any(|t| {
-                    matches!(
-                        assignments.effective(&t.host_id, &t.inventories, &t.labels),
-                        Effective::Ready { .. }
-                    )
-                });
+                let ready = resolution
+                    .targets
+                    .iter()
+                    .any(|t| matches!(assignments.effective(&t.labels), Effective::Ready { .. }));
                 if !ready {
                     return Err(Status::failed_precondition(
-                        "no selected host has a valid assignment (D23): nothing to run",
+                        "no selected host has a valid assignment (D29): nothing to run",
                     ));
                 }
             }
@@ -1207,7 +1266,7 @@ impl Regency for Api {
             let resources = if caller.bootstrap {
                 Default::default()
             } else {
-                Resource::hosts(&hostdefs)
+                Resource::hosts(&hostdefs, &assignment_defs)
             };
             let denied: Vec<&str> = resolution
                 .targets
@@ -1220,7 +1279,7 @@ impl Regency for Api {
                             &resources
                                 .get(&t.host_id)
                                 .cloned()
-                                .unwrap_or_else(|| Resource::host_of(&t.host_id, [])),
+                                .unwrap_or_else(|| Resource::host_of(&t.host_id, [], &[])),
                         )
                 })
                 .map(|t| t.host_id.as_str())
@@ -1392,6 +1451,18 @@ impl Regency for Api {
             if key == regencylib::model::RUN_LOG_MAX_BYTES_KEY && value.as_u64().is_none() {
                 return Err(Status::invalid_argument(
                     "run_log_max_bytes must be an integer >= 0 (0 = no log kept)",
+                ));
+            }
+            if key == regencylib::model::ENDPOINT_URL_KEY
+                && !value.as_str().is_some_and(|url| {
+                    url.is_empty()
+                        || url::Url::parse(url).is_ok_and(|u| {
+                            u.scheme() == "https" && u.host_str().is_some()
+                        })
+                })
+            {
+                return Err(Status::invalid_argument(
+                    "endpoint_url must be an https:// URL, or empty (derived from the web client's address)",
                 ));
             }
             self.allow(&caller, "settings.set", &Resource::Settings)?;
@@ -1605,7 +1676,18 @@ impl Regency for Api {
             let item: CatalogItem = serde_json::from_str(&message.item_json().to_string())
                 .map_err(|e| Status::invalid_argument(format!("item_json: {e}")))?;
             reject_inline_secrets(&item).map_err(Status::invalid_argument)?;
-            self.allow(&caller, "catalog.upsert", &Self::catalog_resource(&item))?;
+            item.validate().map_err(Status::invalid_argument)?;
+            // D29: two assignments with the same priority and name cannot be
+            // ordered: the user changes one first
+            if let CatalogBody::Assignment(def) = &item.body {
+                let (_, others) = self.view.hostdefs();
+                if let Some(other) = regencylib::model::ambiguous_assignment(def, &others) {
+                    return Err(Status::failed_precondition(
+                        regencylib::model::ambiguity_message(def, other),
+                    ));
+                }
+            }
+            self.allow(&caller, "catalog.upsert", &self.catalog_resource(&item))?;
             self.publish_command(
                 &caller,
                 &message.command_id().to_string(),
@@ -1632,7 +1714,7 @@ impl Regency for Api {
                 .view
                 .catalog_item(&doc_id)
                 .ok_or_else(|| Status::not_found("no such catalog item"))?;
-            self.allow(&caller, "catalog.delete", &Self::catalog_resource(&item))?;
+            self.allow(&caller, "catalog.delete", &self.catalog_resource(&item))?;
             self.publish_command(
                 &caller,
                 &message.command_id().to_string(),
@@ -1904,7 +1986,7 @@ impl ApiRef {
             || cache.allowed(
                 authorizer,
                 &caller.principal,
-                &Resource::host(host_id, &self.view.hostdefs().0),
+                &self.view.host_resource(host_id),
             )
     }
 }

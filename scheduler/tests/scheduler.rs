@@ -1,7 +1,7 @@
 //! End-to-end: the scheduler binary fires an order and expands a run command.
 //! `cargo test -p scheduler -- --ignored` (docker; or REGENCY_TEST_EXTERNAL=1).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -50,20 +50,16 @@ async fn scheduler_fires_orders_and_runs() {
         poll_interval_sec: 300,
         credentials: None,
     }));
-    let inventory = item(CatalogBody::Inventory(InventoryDef {
-        source_id: source.clone(),
-        name: "web".into(),
-        default_connection_method: Some(ConnectionMethod::Localhost(TargetUser::current_user())),
-        global_vars: None,
-        pool: Some(pool.clone()),
-    }));
     let hostdef = item(CatalogBody::Hostdef(HostDef {
         source_id: source.clone(),
         host_id: host.clone(),
-        builder: ManagedHostBuilder::new(&host, "localhost", None),
-        inventories: BTreeSet::from(["web".to_string()]),
-        labels: BTreeMap::new(),
-        pool: None,
+        builder: ManagedHostBuilder::new(
+            &host,
+            "localhost",
+            Some(ConnectionMethod::Localhost(TargetUser::current_user())),
+        ),
+        labels: BTreeMap::from([("role".to_string(), "web".to_string())]),
+        pool: Some(pool.clone()),
     }));
     let state = item(CatalogBody::ExpectedState(ExpectedStateDef {
         source_id: source.clone(),
@@ -73,14 +69,12 @@ async fn scheduler_fires_orders_and_runs() {
     let assignment = item(CatalogBody::Assignment(AssignmentDef {
         source_id: source.clone(),
         name: "web".into(),
-        selector: HostSelector {
-            inventories: BTreeSet::from([format!("{source}/web")]),
-            ..Default::default()
-        },
-        expected_state: format!("{source}/base"),
+        // D29: the assignment selects its hosts by labels
+        selector: regencylib::labels::LabelSelector::parse(r#"{role="web"}"#).unwrap(),
         priority: 0,
+        expected_states: vec![format!("{source}/base")],
     }));
-    for doc in [&source_item, &inventory, &hostdef, &state, &assignment] {
+    for doc in [&source_item, &hostdef, &state, &assignment] {
         put(&couch, DB_CATALOG, &doc.doc_id(), doc).await;
     }
     let order = |id: &str, author: &str| Order {
@@ -214,7 +208,7 @@ reach_partitions = 2
             .managed_host_builder()
             .host_connection_method
             .is_some(),
-        "inventory default applied"
+        "the host's connection method"
     );
 
     // a run command

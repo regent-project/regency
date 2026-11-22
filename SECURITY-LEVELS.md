@@ -100,8 +100,8 @@ TLS is always on (regops requires it).
 | 2 | only verified host identities: SSH with a `HostKey` (known_hosts file or SHA-256 fingerprints), SSHOQ without `Insecure` TLS |
 | 3 | + no password authentication: SSH keys, SSHOQ keys or bearer tokens |
 
-SSH host key verification, in a host definition or an inventory's
-connection method:
+SSH host key verification, in a host's connection method (in Git, a hosts
+file's `DefaultConnectionMethod` applies it to every host of the file):
 
 ```yaml
 DefaultConnectionMethod: !Ssh2

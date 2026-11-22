@@ -3,13 +3,20 @@
 
 mod builder;
 mod canvas;
+mod catalog;
 mod client;
 mod config;
 mod expected;
 mod feeds;
 mod jobchart;
+mod labelpicker;
+// D26: the same label selectors as the services (regencylib), for previews
+#[path = "../../regencylib/src/labels.rs"]
+#[allow(dead_code)] // parts only the services use
+mod labels;
 mod live;
 mod map;
+mod onboarding;
 mod oneshot;
 mod pages;
 
@@ -195,8 +202,11 @@ fn App() -> impl IntoView {
                 <nav class="sidebar">
                     <NavItem href="/" icon="◉" label="Live view" />
                     <NavItem href="/hosts" icon="▤" label="Hosts" />
+                    <NavItem href="/states" icon="☑" label="States" />
+                    <NavItem href="/assignments" icon="⇄" label="Assignments" />
+                    <div class="nav-section">"Activity"</div>
                     <NavItem href="/jobs" icon="⟳" label="Jobs" />
-                    <div class="nav-section">"Configuration"</div>
+                    <div class="nav-section">"Administration"</div>
                     <NavItem href="/config/hosts" icon="✎" label="Host definitions" />
                     <NavItem href="/config/sources" icon="⎇" label="Sources" />
                     <NavItem href="/config/services" icon="⚙" label="Services" />
@@ -208,9 +218,17 @@ fn App() -> impl IntoView {
                         <Route path=path!("/") view=map::Map />
                         <Route path=path!("/hosts") view=pages::Hosts />
                         <Route path=path!("/hosts/:id") view=pages::HostPage />
+                        // D29: inventories are gone, assignments select their hosts
+                        <Route path=path!("/inventories") view=catalog::AssignmentsConfig />
+                        <Route path=path!("/states") view=catalog::ExpectedStatesConfig />
+                        <Route path=path!("/assignments") view=catalog::AssignmentsConfig />
                         <Route path=path!("/jobs") view=pages::Jobs />
                         <Route path=path!("/config") view=config::HostsConfig />
                         <Route path=path!("/config/hosts") view=config::HostsConfig />
+                        // former addresses (bookmarks)
+                        <Route path=path!("/config/inventories") view=catalog::AssignmentsConfig />
+                        <Route path=path!("/config/expected-states") view=catalog::ExpectedStatesConfig />
+                        <Route path=path!("/config/assignments") view=catalog::AssignmentsConfig />
                         <Route path=path!("/config/sources") view=config::SourcesConfig />
                         <Route path=path!("/config/services") view=config::ServicesConfig />
                         <Route path=path!("/config/security") view=config::SecurityConfig />

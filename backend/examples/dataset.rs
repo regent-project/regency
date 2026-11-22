@@ -1,8 +1,8 @@
 //! Representative development dataset for a running dev stack (dev/README.md;
 //! `dev/run_locally` runs it): API source `dataset` with thousands of hosts in
-//! a dozen inventories, labels, a few expected states layered by
-//! assignments (D23: `baseline` for every host but the unassigned `bastion`
-//! ones, `web`/`db`/`edge` on top) and
+//! labels, a few expected states and assignments selecting hosts by labels
+//! (D29: `baseline` for every host but the unassigned `bastion` ones, plus
+//! `web`/`db`/`edge` where their labels match) and
 //! recurring orders, then a first Assess of everything so the map fills at
 //! once.
 //!
@@ -42,6 +42,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use regencylib::api::regency_client::RegencyClient;
+use regencylib::labels::LabelSelector;
 use regencylib::model::*;
 use regencylib::proto as api;
 use regent_sdk::ExpectedState;
@@ -180,15 +181,16 @@ fn roll(host: &str, salt: &str) -> u64 {
 
 struct Host {
     id: String,
-    inventories: BTreeSet<String>,
     labels: BTreeMap<String, String>,
+    /// Runner pool of its group (`edge`), unless `--single-pool`.
+    pool: Option<&'static str>,
     unreachable: bool,
 }
 
 fn hosts(total: u32) -> Vec<Host> {
     let shares: u32 = INVENTORIES.iter().map(|i| i.1).sum();
     let mut list = Vec::new();
-    for (inventory, share, _, role) in INVENTORIES {
+    for (inventory, share, pool, role) in INVENTORIES {
         let count = (total * share).div_ceil(shares).max(1);
         for n in 1..=count {
             let region = REGIONS[(n as usize) % REGIONS.len()];
@@ -200,6 +202,7 @@ fn hosts(total: u32) -> Vec<Host> {
                 _ => "dev",
             };
             let mut labels: BTreeMap<String, String> = [
+                ("kind".to_string(), inventory.to_string()),
                 ("env".to_string(), env.to_string()),
                 ("region".to_string(), region.to_string()),
                 ("role".to_string(), role.to_string()),
@@ -209,18 +212,18 @@ fn hosts(total: u32) -> Vec<Host> {
                 let team = TEAMS[roll(&id, "team") as usize % TEAMS.len()];
                 labels.insert("team".into(), team.into());
             }
-            let mut inventories: BTreeSet<String> = [inventory.to_string()].into();
-            // a few hosts in two inventories (dashed links on the map)
-            if *inventory == "worker" && n % 5 == 0 {
-                inventories.insert("k8s".into());
+            // labels putting a few hosts in two assignments' groups (dashed
+            // links on the map)
+            if *inventory == "k8s" || (*inventory == "worker" && n % 5 == 0) {
+                labels.insert("platform".into(), "k8s".into());
             }
-            if *inventory == "cache" && n % 4 == 0 {
-                inventories.insert("db".into());
+            if *inventory == "db" || (*inventory == "cache" && n % 4 == 0) {
+                labels.insert("storage".into(), "db".into());
             }
             list.push(Host {
                 id,
-                inventories,
                 labels,
+                pool: *pool,
                 unreachable: *inventory == "legacy",
             });
         }
@@ -324,23 +327,24 @@ fn doc_id(body: &CatalogBody) -> String {
     }
 }
 
-fn selector(inventories: &[&str]) -> api::HostSelector {
+fn selector(assignments: &[&str]) -> api::HostSelector {
     let mut selector = api::HostSelector::new();
-    for inventory in inventories {
+    for assignment in assignments {
         selector
-            .inventories_mut()
-            .push(format!("{SOURCE}/{inventory}").as_str());
+            .assignments_mut()
+            .push(format!("{SOURCE}/{assignment}").as_str());
     }
     selector
 }
 
-/// (assignment = expected state, priority, inventories; empty = all but
-/// `bastion`, left unassigned like hosts not managed yet: grey on the map)
-const ASSIGNMENTS: &[(&str, i32, &[&str])] = &[
-    ("baseline", 0, &[]),
-    ("web", 100, &["web", "api"]),
-    ("db", 100, &["db"]),
-    ("edge", 100, &["edge"]),
+/// (assignment, selector, priority, expected states base first): like a
+/// Salt top file, a host gets every assignment matching its labels (D29);
+/// bastion is left unassigned like hosts not managed yet (grey on the map).
+const ASSIGNMENTS: &[(&str, &str, i32, &[&str])] = &[
+    ("baseline", r#"{kind!="bastion"}"#, 0, &["baseline"]),
+    ("web", r#"{kind=~"web|api"}"#, 10, &["web"]),
+    ("db", r#"{storage="db"}"#, 10, &["db"]),
+    ("edge", r#"{kind="edge"}"#, 10, &["edge"]),
 ];
 
 enum Every {
@@ -514,15 +518,6 @@ async fn main() -> anyhow::Result<()> {
         poll_interval_sec: 300,
         credentials: None,
     })];
-    for (name, _, pool, _) in INVENTORIES {
-        items.push(CatalogBody::Inventory(InventoryDef {
-            source_id: SOURCE.into(),
-            name: (*name).into(),
-            default_connection_method: None,
-            global_vars: None,
-            pool: pool.filter(|_| !args.single_pool).map(str::to_string),
-        }));
-    }
     for (name, yaml) in [
         ("baseline", BASELINE),
         ("web", WEB),
@@ -536,29 +531,13 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("expected state {name}: {e:?}"))?,
         }));
     }
-    let all: Vec<&str> = INVENTORIES
-        .iter()
-        .map(|i| i.0)
-        .filter(|i| *i != "bastion")
-        .collect();
-    for (name, priority, inventories) in ASSIGNMENTS {
-        let inventories = if inventories.is_empty() {
-            &all[..]
-        } else {
-            inventories
-        };
+    for (name, selector, priority, states) in ASSIGNMENTS {
         items.push(CatalogBody::Assignment(AssignmentDef {
             source_id: SOURCE.into(),
             name: (*name).into(),
-            selector: regencylib::selector::HostSelector {
-                inventories: inventories
-                    .iter()
-                    .map(|i| format!("{SOURCE}/{i}"))
-                    .collect(),
-                ..Default::default()
-            },
-            expected_state: format!("{SOURCE}/{name}"),
+            selector: LabelSelector::parse(selector).map_err(anyhow::Error::msg)?,
             priority: *priority,
+            expected_states: states.iter().map(|s| format!("{SOURCE}/{s}")).collect(),
         }));
     }
     for host in &hosts {
@@ -566,9 +545,8 @@ async fn main() -> anyhow::Result<()> {
             source_id: SOURCE.into(),
             host_id: host.id.clone(),
             builder: builder(host, args.ssh.as_ref()),
-            inventories: host.inventories.clone(),
             labels: host.labels.clone(),
-            pool: None,
+            pool: host.pool.filter(|_| !args.single_pool).map(str::to_string),
         }));
     }
     sync_catalog(&mut client, &token, items).await?;
@@ -583,7 +561,7 @@ async fn main() -> anyhow::Result<()> {
         let stamp = chrono::Utc::now().timestamp();
         let mut run = api::RunNowRequest::new();
         run.set_command_id(format!("dataset-assess-{stamp}").as_str());
-        run.set_selector(selector(&all));
+        run.set_selector(selector(&["baseline"]));
         run.set_job(api::JobKind::Assess);
         client.run_now(authed(run, &token)).await?;
         println!("first Assess sent (every host, its effective expected state)");
@@ -607,8 +585,8 @@ async fn prepare_agents(
         let id = format!("regops-{short}-{n:04}");
         let host = Host {
             id: id.clone(),
-            inventories: BTreeSet::new(),
             labels: BTreeMap::new(),
+            pool: None,
             unreachable: false,
         };
         prepare_files(&host)?;

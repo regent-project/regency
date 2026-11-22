@@ -38,6 +38,10 @@ pub struct TlsPrepare {
     pub dir: String,
     /// DNS names of the endpoint's server certificate.
     pub names: Vec<String>,
+    /// D25: also put this machine's hostname, FQDN and IP addresses in it,
+    /// so that regops agents on other machines can reach it by any of them.
+    #[serde(default)]
+    pub local_names: bool,
     #[serde(default = "default_days")]
     pub days: u32,
 }
@@ -122,11 +126,20 @@ fn prepare_tls(tls: &TlsPrepare) -> Result<(), String> {
     ca_params.not_after = now + time::Duration::days(i64::from(tls.days));
     let ca = ca_params.self_signed(&ca_keypair).map_err(err)?;
 
+    let mut names = tls.names.clone();
+    if tls.local_names {
+        for name in local_names() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
     let server_keypair = KeyPair::generate().map_err(err)?;
-    let mut params = CertificateParams::new(tls.names.clone()).map_err(err)?;
+    // names parsing as IP addresses become IP SANs
+    let mut params = CertificateParams::new(names.clone()).map_err(err)?;
     params.distinguished_name.push(
         DnType::CommonName,
-        tls.names.first().cloned().unwrap_or_default(),
+        names.first().cloned().unwrap_or_default(),
     );
     params.not_before = now - time::Duration::hours(1);
     params.not_after = now + time::Duration::days(i64::from(tls.days));
@@ -147,8 +160,65 @@ fn prepare_tls(tls: &TlsPrepare) -> Result<(), String> {
         };
         result.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
-    info!(dir = %dir.display(), names = ?tls.names, "endpoint TLS material generated (built-in CA)");
+    info!(dir = %dir.display(), names = ?names, "endpoint TLS material generated (built-in CA)");
     Ok(())
+}
+
+/// This machine's hostname, FQDN and IP addresses (best effort: what cannot
+/// be found is left out).
+fn local_names() -> Vec<String> {
+    let mut names = Vec::new();
+    let mut add = |name: &str| {
+        let name = name.trim().trim_end_matches('.').to_lowercase();
+        let valid = !name.is_empty()
+            && name != "localhost"
+            && !name.starts_with("127.")
+            && name != "::1"
+            && (name.parse::<std::net::IpAddr>().is_ok()
+                || name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'));
+        if valid && !names.contains(&name) {
+            names.push(name);
+        }
+    };
+    let command = |program: &str, args: &[&str]| {
+        std::process::Command::new(program)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    };
+    if let Ok(hostname) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        add(&hostname);
+    }
+    add(&command("hostname", &[]));
+    add(&command("hostname", &["--fqdn"]));
+    // every address of the host (Linux), else the one of the default route
+    let all = command("hostname", &["-I"]);
+    if all.trim().is_empty() {
+        if let Some(ip) = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|socket| {
+                socket.connect("192.0.2.1:9")?;
+                socket.local_addr()
+            })
+            .ok()
+            .map(|address| address.ip())
+            .filter(|ip| !ip.is_unspecified())
+        {
+            add(&ip.to_string());
+        }
+    } else {
+        for ip in all.split_whitespace() {
+            // skip link-local IPv6 (needs a zone, useless in a URL)
+            if !ip.to_lowercase().starts_with("fe80") {
+                add(ip);
+            }
+        }
+    }
+    names
 }
 
 /// `${NAME}` and `${NAME:-default}` from the supervisor's environment.
@@ -207,6 +277,7 @@ mod tests {
             tls: Some(TlsPrepare {
                 dir: dir.join("tls").display().to_string(),
                 names: vec!["localhost".into(), "regency".into()],
+                local_names: true,
                 days: 30,
             }),
         };
@@ -220,6 +291,23 @@ mod tests {
         );
         let pem = std::fs::read_to_string(dir.join("tls/endpoint.pem")).unwrap();
         assert!(pem.contains("BEGIN CERTIFICATE"));
+        // the configured names come first, then this machine's
+        let (_, der) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).unwrap();
+        let cert = der.parse_x509().unwrap();
+        let sans: Vec<String> = cert
+            .subject_alternative_name()
+            .unwrap()
+            .unwrap()
+            .value
+            .general_names
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        assert!(
+            sans[0].contains("localhost") && sans[1].contains("regency"),
+            "{sans:?}"
+        );
+        assert!(sans.len() >= 2 + local_names().len().min(1), "{sans:?}");
         assert!(dir.join("tls/ca.key").exists());
         let _ = std::fs::remove_dir_all(dir);
     }

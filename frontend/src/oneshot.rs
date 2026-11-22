@@ -67,14 +67,14 @@ enum Mode {
     Code,
 }
 
-enum Input {
+pub(crate) enum Input {
     Yaml(String),
     Json(String),
 }
 
 /// Both forms of the attributes, by backend (the SDK's serde): `(yaml,
 /// json, problem)`; `Err` when they are not attributes at all.
-async fn convert(
+pub(crate) async fn convert(
     session: Session,
     input: Input,
 ) -> Result<(String, String, Option<String>), String> {

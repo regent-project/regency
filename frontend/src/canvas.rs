@@ -37,7 +37,6 @@ pub struct Palette {
     muted: String,
     accent: String,
     link: String,
-    extra_link: String,
     area: String,
     area_line: String,
 }
@@ -68,7 +67,6 @@ impl Palette {
             muted: var("--muted", "#8796a3"),
             accent: var("--accent", "#6f9fbd"),
             link: var("--map-link", "#323e47"),
-            extra_link: var("--map-link-extra", "#2a353d"),
             area: var("--map-area", "#1f2830"),
             area_line: var("--map-area-line", "#3a4c59"),
         }
@@ -150,6 +148,16 @@ fn dash(pattern: &[f64]) -> JsValue {
 fn circle(ctx: &Ctx, x: f64, y: f64, r: f64) {
     ctx.move_to(x + r, y);
     let _ = ctx.arc(x, y, r, 0.0, TAU);
+}
+
+/// A proactive host's mark (D28): a diamond about as large as a dot.
+fn diamond(ctx: &Ctx, x: f64, y: f64, r: f64) {
+    let d = r * 1.3;
+    ctx.move_to(x, y - d);
+    ctx.line_to(x + d, y);
+    ctx.line_to(x, y + d);
+    ctx.line_to(x - d, y);
+    ctx.close_path();
 }
 
 /// A canvas set up for drawing in map units, and the part of the map in view.
@@ -265,7 +273,7 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         }
     }
 
-    // links: host -> its group, then dashed links to its other inventories
+    // links: host -> its group
     if f.layout.links {
         ctx.set_stroke_style_str(&palette.link);
         ctx.set_line_width(1.0 / vp.k);
@@ -279,20 +287,6 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         }
         ctx.stroke();
     }
-    if !f.layout.extra_links.is_empty() {
-        ctx.set_stroke_style_str(&palette.extra_link);
-        let _ = ctx.set_line_dash(&dash(&[4.0 / vp.k, 4.0 / vp.k]));
-        ctx.begin_path();
-        for [ax, ay, bx, by] in &f.layout.extra_links {
-            let (ex, ey) = link_end(*ax, *ay, *bx, *by);
-            if vp.segment_seen(*ax, *ay, ex, ey) {
-                ctx.move_to(*ax, *ay);
-                ctx.line_to(ex, ey);
-            }
-        }
-        ctx.stroke();
-        let _ = ctx.set_line_dash(&solid);
-    }
 
     // flags (under the dots)
     if hosts.iter().any(|p| p.flag) {
@@ -305,6 +299,16 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         }
         ctx.stroke();
         let _ = ctx.set_line_dash(&solid);
+    }
+    // D28: proactive hosts whose repository is behind its regency source
+    if hosts.iter().any(|p| p.behind) {
+        ctx.set_stroke_style_str(palette.tone(Tone::Warn));
+        ctx.set_line_width(vp.line(2.0));
+        ctx.begin_path();
+        for p in hosts.iter().filter(|p| p.behind) {
+            diamond(ctx, p.x, p.y, DOT + 2.5);
+        }
+        ctx.stroke();
     }
 
     // dots, one path per colour (a job in progress overrides the
@@ -343,7 +347,11 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         } else {
             ctx.begin_path();
             for p in of_fill {
-                circle(ctx, p.x, p.y, DOT);
+                if p.proactive {
+                    diamond(ctx, p.x, p.y, DOT);
+                } else {
+                    circle(ctx, p.x, p.y, DOT);
+                }
             }
             ctx.fill();
             ctx.stroke();

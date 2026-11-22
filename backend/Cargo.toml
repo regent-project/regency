@@ -34,6 +34,7 @@ yaml_serde = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
+url = { workspace = true }
 prometheus = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }

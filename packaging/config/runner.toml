@@ -40,6 +40,10 @@ format = "json"
 [runner]
 pool = "default"
 # assess_concurrency = 16
+# SSH identity of this runner, generated at first start (ed25519) when
+# missing; its public key is shown in the web UI (Add hosts) to authorize it
+# on hosts (D25)
+ssh_key = "/var/lib/regency/runner/ssh-key"
 
 # secret providers of this runner: credentials of the hosts it reaches (D9)
 # [secrets]

@@ -1,23 +1,26 @@
-//! Repository layout of a Git source (D11), relative to the source's `path`:
+//! Repository layout of a Git source (D11, D26), relative to the source's
+//! `path`:
 //!
-//! - `inventories/<name>.yaml`: regent-sdk inventory YAML (`Name`, `Hosts`,
-//!   `DefaultConnectionMethod`, `GlobalVars`), plus regency keys: `Pool` at
-//!   the top (the inventory's runner pool, D16), and `Labels` / `Pool` on each
-//!   host;
+//! - `hosts/<file>.yaml`: hosts, in regent-sdk inventory YAML (`Hosts`,
+//!   `DefaultConnectionMethod`, `GlobalVars`), plus regency keys `Labels`
+//!   and `Pool` at the top and on each host. Top-level values are copied
+//!   into each host of the file (conveniences of the file: regency has no
+//!   inventory defaults, D26); a host's own values win.
 //! - `expected_states/<name>.yaml`: a regent-sdk `ExpectedState`;
-//! - `assignments/<name>.yaml` (D23): `ExpectedState` (a name of this source
-//!   or `<source>/<name>`), `Priority` (integer, default 0) and the hosts:
-//!   any of `Hosts` (ids), `Inventories` (names of this source or
-//!   `<source>/<name>`), `Labels` (all must match).
+//! - `assignments/<name>.yaml` (D23, D27, D29): `Selector` (a label
+//!   selector, `{env="prod", role=~"web|api"}`; `{}` = every host),
+//!   `ExpectedStates` (names of this source or `<source>/<name>`, base
+//!   first, last wins; `ExpectedState` for one) and `Priority` (integer,
+//!   default 0: order among a host's assignments, lower first).
+//! - `inventories/` is gone (D29): its files are errors.
 //!
-//! Items are rejected when they carry inline credentials (D9).
+//! Items are rejected when they carry inline credentials (D9) or break the
+//! catalog's checks (names, label keys).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
-use regencylib::model::{
-    AssignmentDef, CatalogBody, CatalogItem, ExpectedStateDef, HostDef, InventoryDef,
-};
-use regencylib::selector::HostSelector;
+use regencylib::labels::LabelSelector;
+use regencylib::model::{AssignmentDef, CatalogBody, CatalogItem, ExpectedStateDef, HostDef};
 use regencylib::validate::reject_inline_secrets;
 use regent_sdk::hosts::handlers::ConnectionMethod;
 use regent_sdk::hosts::managed_host::ManagedHostBuilder;
@@ -51,19 +54,18 @@ fn stem<'a>(path: &'a str, dir: &str) -> Option<&'a str> {
         .or_else(|| rest.strip_suffix(".yml"))
 }
 
-/// `assignments/<name>.yaml` (D23).
+/// `assignments/<name>.yaml` (D23, D27, D29): a selector, `ExpectedStates`
+/// base first (last wins) or `ExpectedState` for one, a priority.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "PascalCase", deny_unknown_fields)]
 struct AssignmentFile {
-    expected_state: String,
+    selector: String,
+    #[serde(default)]
+    expected_states: Vec<String>,
+    #[serde(default)]
+    expected_state: Option<String>,
     #[serde(default)]
     priority: i32,
-    #[serde(default)]
-    hosts: BTreeSet<String>,
-    #[serde(default)]
-    inventories: BTreeSet<String>,
-    #[serde(default)]
-    labels: BTreeMap<String, String>,
 }
 
 /// A name of this source, or already `<source>/<name>`.
@@ -76,24 +78,80 @@ fn qualify(source_id: &str, name: &str) -> String {
 }
 
 fn parse_assignment(source_id: &str, name: &str, text: &str) -> Result<AssignmentDef, String> {
-    let file: AssignmentFile = yaml_serde::from_str(text).map_err(|e| e.to_string())?;
+    let file: AssignmentFile = yaml_serde::from_str(text).map_err(|e| {
+        let e = e.to_string();
+        if ["`Hosts`", "`Inventories`", "`Inventory`", "`Labels`", "`Selector`"]
+            .iter()
+            .any(|k| e.contains(k))
+        {
+            format!("{e} (since D29 an assignment selects its hosts by their labels: `Selector: '{{role=\"web\"}}'`, `{{}}` = every host)")
+        } else {
+            e
+        }
+    })?;
+    if file.expected_state.is_some() && !file.expected_states.is_empty() {
+        return Err("`ExpectedState` and `ExpectedStates` together: keep one".to_string());
+    }
     let def = AssignmentDef {
         source_id: source_id.to_string(),
         name: name.to_string(),
-        selector: HostSelector {
-            hosts: file.hosts,
-            inventories: file
-                .inventories
-                .iter()
-                .map(|i| qualify(source_id, i))
-                .collect(),
-            labels: file.labels,
-        },
-        expected_state: qualify(source_id, &file.expected_state),
+        selector: LabelSelector::parse(&file.selector).map_err(|e| format!("Selector: {e}"))?,
         priority: file.priority,
+        expected_states: file
+            .expected_states
+            .iter()
+            .chain(&file.expected_state)
+            .map(|state| qualify(source_id, state))
+            .collect(),
     };
     def.validate()?;
     Ok(def)
+}
+
+/// `hosts/<file>.yaml`: the file's hosts, file-level values copied in.
+fn parse_hosts(source_id: &str, text: &str) -> Result<Vec<HostDef>, String> {
+    let mut root: Value = yaml_serde::from_str(text).map_err(|e| e.to_string())?;
+    let mapping = root.as_mapping_mut().ok_or("a hosts file is a mapping")?;
+    let _name: Option<String> = take(mapping, "Name")?;
+    let pool: Option<String> = take(mapping, "Pool")?;
+    let labels: BTreeMap<String, String> = take(mapping, "Labels")?.unwrap_or_default();
+    let default_connection_method: Option<ConnectionMethod> =
+        take(mapping, "DefaultConnectionMethod")?;
+    let global_vars: Option<HashMap<String, String>> = take(mapping, "GlobalVars")?;
+    let raw_hosts: Vec<Value> = take(mapping, "Hosts")?.unwrap_or_default();
+    if let Some((key, _)) = mapping.iter().next() {
+        return Err(format!("unknown key {key:?}"));
+    }
+    let mut defs = Vec::new();
+    for mut raw in raw_hosts {
+        let host = raw.as_mapping_mut().ok_or("each host is a mapping")?;
+        let own_labels: BTreeMap<String, String> = take(host, "Labels")?.unwrap_or_default();
+        let host_pool: Option<String> = take(host, "Pool")?;
+        let mut builder: ManagedHostBuilder =
+            yaml_serde::from_value(raw).map_err(|e| format!("host: {e}"))?;
+        if builder.host_connection_method.is_none()
+            && let Some(method) = &default_connection_method
+        {
+            builder.set_connection_method(method.clone());
+        }
+        if let Some(global) = &global_vars {
+            let mut vars = global.clone();
+            if let Some(own) = &builder.host_vars {
+                vars.extend(own.clone());
+            }
+            builder.set_host_vars(Some(vars));
+        }
+        let mut host_labels = labels.clone();
+        host_labels.extend(own_labels);
+        defs.push(HostDef {
+            source_id: source_id.to_string(),
+            host_id: builder.id.clone(),
+            builder,
+            labels: host_labels,
+            pool: host_pool.or_else(|| pool.clone()),
+        });
+    }
+    Ok(defs)
 }
 
 /// Catalog items of a source (without the source doc itself), or the
@@ -102,7 +160,7 @@ fn parse_assignment(source_id: &str, name: &str, text: &str) -> Result<Assignmen
 pub fn parse(source_id: &str, sha: &str, files: &[File]) -> (Vec<CatalogItem>, Vec<String>) {
     let mut items = Vec::new();
     let mut errors = Vec::new();
-    let mut hosts: BTreeMap<String, HostDef> = BTreeMap::new();
+    let mut hosts: BTreeMap<String, (HostDef, String)> = BTreeMap::new();
     let item = |body| CatalogItem {
         body,
         revision: sha.to_string(),
@@ -129,31 +187,28 @@ pub fn parse(source_id: &str, sha: &str, files: &[File]) -> (Vec<CatalogItem>, V
                 Ok(def) => items.push(item(CatalogBody::Assignment(def))),
                 Err(e) => errors.push(format!("{}: {e}", file.path)),
             }
-        } else if let Some(file_stem) = stem(&file.path, "inventories") {
-            match parse_inventory(source_id, file_stem, text) {
-                Ok((inventory, defs)) => {
-                    let name = inventory.name.clone();
-                    items.push(item(CatalogBody::Inventory(inventory)));
+        } else if stem(&file.path, "inventories").is_some() {
+            errors.push(format!(
+                "{}: inventories are gone (D29): give each assignment its `Selector` and delete inventories/",
+                file.path
+            ));
+        } else if stem(&file.path, "hosts").is_some() {
+            match parse_hosts(source_id, text) {
+                Ok(defs) => {
                     for def in defs {
-                        match hosts.get_mut(&def.host_id) {
-                            Some(existing) => {
-                                if serde_json::to_value(&existing.builder).ok()
-                                    != serde_json::to_value(&def.builder).ok()
+                        match hosts.get(&def.host_id) {
+                            Some((existing, first)) => {
+                                if serde_json::to_value(existing).ok()
+                                    != serde_json::to_value(&def).ok()
                                 {
                                     errors.push(format!(
-                                        "{}: host {} is defined differently in another inventory of this source",
+                                        "{}: host {} is also defined, differently, in {first}",
                                         file.path, def.host_id
                                     ));
-                                    continue;
-                                }
-                                existing.inventories.insert(name.clone());
-                                existing.labels.extend(def.labels);
-                                if existing.pool.is_none() {
-                                    existing.pool = def.pool;
                                 }
                             }
                             None => {
-                                hosts.insert(def.host_id.clone(), def);
+                                hosts.insert(def.host_id.clone(), (def, file.path.clone()));
                             }
                         }
                     }
@@ -165,65 +220,24 @@ pub fn parse(source_id: &str, sha: &str, files: &[File]) -> (Vec<CatalogItem>, V
     items.extend(
         hosts
             .into_values()
-            .map(|def| item(CatalogBody::Hostdef(def))),
+            .map(|(def, _)| item(CatalogBody::Hostdef(def))),
     );
-    items.retain(|i| match reject_inline_secrets(i) {
-        Ok(()) => true,
-        Err(reason) => {
-            errors.push(format!("{}: {reason}", i.doc_id()));
-            false
-        }
-    });
-    (items, errors)
-}
-
-fn parse_inventory(
-    source_id: &str,
-    file_stem: &str,
-    text: &str,
-) -> Result<(InventoryDef, Vec<HostDef>), String> {
-    let mut root: Value = yaml_serde::from_str(text).map_err(|e| e.to_string())?;
-    let mapping = root.as_mapping_mut().ok_or("an inventory is a mapping")?;
-    let name: String = take(mapping, "Name")?.unwrap_or_else(|| file_stem.to_string());
-    let pool: Option<String> = take(mapping, "Pool")?;
-    let default_connection_method: Option<ConnectionMethod> =
-        take(mapping, "DefaultConnectionMethod")?;
-    let global_vars: Option<HashMap<String, String>> = take(mapping, "GlobalVars")?;
-    let raw_hosts: Vec<Value> = take(mapping, "Hosts")?.unwrap_or_default();
-    if let Some((key, _)) = mapping.iter().next() {
-        return Err(format!("unknown key {key:?}"));
-    }
-    let mut defs = Vec::new();
-    for mut raw in raw_hosts {
-        let host = raw.as_mapping_mut().ok_or("each host is a mapping")?;
-        let labels: BTreeMap<String, String> = take(host, "Labels")?.unwrap_or_default();
-        let host_pool: Option<String> = take(host, "Pool")?;
-        let builder: ManagedHostBuilder =
-            yaml_serde::from_value(raw).map_err(|e| format!("host: {e}"))?;
-        defs.push(HostDef {
-            source_id: source_id.to_string(),
-            host_id: builder.id.clone(),
-            builder,
-            inventories: BTreeSet::from([name.clone()]),
-            labels,
-            pool: host_pool,
-        });
-    }
-    Ok((
-        InventoryDef {
-            source_id: source_id.to_string(),
-            name,
-            default_connection_method,
-            global_vars,
-            pool,
+    items.retain(
+        |i| match reject_inline_secrets(i).and_then(|()| i.validate()) {
+            Ok(()) => true,
+            Err(reason) => {
+                errors.push(format!("{}: {reason}", i.doc_id()));
+                false
+            }
         },
-        defs,
-    ))
+    );
+    (items, errors)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn file(path: &str, content: &str) -> File {
         File {
@@ -233,12 +247,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_inventories_and_states() {
+    fn parses_hosts_inventories_and_states() {
         let files = [
             file(
-                "inventories/web.yaml",
+                "hosts/web.yaml",
                 r#"
 Pool: dmz
+Labels: { role: web }
 DefaultConnectionMethod: !Ssh2
   AuthMethod: !UsernamePassword
     SecRef: web_creds
@@ -249,19 +264,16 @@ Hosts:
     Labels: { env: prod }
   - Id: web-02
     Endpoint: 10.0.0.2:22
+    Pool: edge
 "#,
-            ),
-            file(
-                "inventories/all.yaml",
-                "Hosts:\n  - Id: web-01\n    Endpoint: 10.0.0.1:22\n    Labels: { tier: front }\n",
             ),
             file("expected_states/base.yaml", "Attributes: []\n"),
             file(
                 "assignments/front.yaml",
-                "ExpectedState: base\nPriority: 100\nInventories: [web, other/x]\nLabels: { env: prod }\n",
+                "Selector: '{role=\"web\"}'\nPriority: 10\nExpectedStates: [base, other/web]\n",
             ),
             file("README.md", "ignored"),
-            file("inventories/nested/x.yaml", "ignored"),
+            file("hosts/nested/x.yaml", "ignored"),
         ];
         let (items, errors) = parse("git1", "abc", &files);
         assert!(errors.is_empty(), "{errors:?}");
@@ -270,8 +282,6 @@ Hosts:
             ids,
             BTreeSet::from(
                 [
-                    "inventory:git1:web",
-                    "inventory:git1:all",
                     "hostdef:git1:web-01",
                     "hostdef:git1:web-02",
                     "expected_state:git1:base",
@@ -280,28 +290,24 @@ Hosts:
                 .map(String::from)
             )
         );
-        let web01 = items
-            .iter()
-            .find_map(|i| match &i.body {
-                CatalogBody::Hostdef(d) if d.host_id == "web-01" => Some(d),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(
-            web01.inventories,
-            BTreeSet::from(["web".to_string(), "all".to_string()])
-        );
+        let host = |id: &str| {
+            items
+                .iter()
+                .find_map(|i| match &i.body {
+                    CatalogBody::Hostdef(d) if d.host_id == id => Some(d.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let web01 = host("web-01");
+        assert_eq!(web01.labels.get("role").map(String::as_str), Some("web"));
         assert_eq!(web01.labels.get("env").map(String::as_str), Some("prod"));
-        assert_eq!(web01.labels.get("tier").map(String::as_str), Some("front"));
-        let web = items
-            .iter()
-            .find_map(|i| match &i.body {
-                CatalogBody::Inventory(d) if d.name == "web" => Some(d),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(web.pool.as_deref(), Some("dmz"));
-        assert!(web.default_connection_method.is_some());
+        assert_eq!(web01.pool.as_deref(), Some("dmz"));
+        assert!(
+            web01.builder.host_connection_method.is_some(),
+            "file default copied"
+        );
+        assert_eq!(host("web-02").pool.as_deref(), Some("edge"));
         let front = items
             .iter()
             .find_map(|i| match &i.body {
@@ -309,31 +315,65 @@ Hosts:
                 _ => None,
             })
             .unwrap();
-        assert_eq!(front.expected_state, "git1/base");
-        assert_eq!(front.priority, 100);
-        assert_eq!(
-            front.selector.inventories,
-            BTreeSet::from(["git1/web".to_string(), "other/x".to_string()])
-        );
+        assert_eq!(front.expected_states, ["git1/base", "other/web"]);
+        assert_eq!(front.selector.to_string(), r#"{role="web"}"#);
+        assert_eq!(front.priority, 10);
     }
 
     #[test]
-    fn refuses_inline_credentials_and_bad_files() {
+    fn refuses_inline_credentials_former_layouts_and_bad_files() {
         let files = [
             file(
-                "inventories/raw.yaml",
+                "hosts/raw.yaml",
                 "Hosts:\n  - Id: h\n    Endpoint: localhost\n    HostConnectionMethod: !Localhost\n      UserKind: !RawUser\n        Username: u\n        Password: p\n",
             ),
             file("expected_states/broken.yaml", "Attributes: 3\n"),
-            file("inventories/typo.yaml", "Hostz: []\n"),
+            file(
+                "inventories/old.yaml",
+                "Hosts:\n  - Id: x\n    Endpoint: x:22\n",
+            ),
+            file(
+                "assignments/bad.yaml",
+                "Selector: '{env=prod}'\nExpectedState: base\n",
+            ),
+            file("assignments/old.yaml", "ExpectedState: base\nHosts: [a]\n"),
+            file(
+                "hosts/reserved.yaml",
+                "Hosts:\n  - Id: r\n    Endpoint: r:22\n    Labels: { host: other }\n",
+            ),
+            file(
+                "assignments/inventory.yaml",
+                "ExpectedState: base\nInventory: web\n",
+            ),
+            file(
+                "assignments/empty.yaml",
+                "ExpectedStates: []\nSelector: '{}'\n",
+            ),
         ];
         let (items, errors) = parse("git1", "abc", &files);
-        assert_eq!(
-            items.len(),
-            1,
-            "only the inventory without hosts remains: {items:?}"
+        assert!(
+            items.is_empty(),
+            "{:?}",
+            items.iter().map(CatalogItem::doc_id).collect::<Vec<_>>()
         );
-        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert_eq!(errors.len(), 8, "{errors:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("D29") && e.contains("inventories are gone"))
+        );
+        assert!(errors.iter().any(|e| e.contains("Selector: ")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("at least one expected state"))
+        );
         assert!(errors.iter().any(|e| e.contains("D9")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("selects its hosts by their labels"))
+        );
+        assert!(errors.iter().any(|e| e.contains("built in")));
     }
 }

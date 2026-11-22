@@ -4,10 +4,10 @@
 //! read these types. Every merge is commutative and idempotent, so concurrent
 //! writers (and CouchDB `_conflicts` leaves) converge to the same document.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use crate::labels::LabelSelector;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Datelike, Months, Utc};
-use regent_sdk::hosts::handlers::ConnectionMethod;
 use regent_sdk::hosts::managed_host::ManagedHostBuilder;
 use regent_sdk::secrets::SecretReference;
 use regent_sdk::state::ExpectedState;
@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::messages::JobState;
 use crate::schedule::Schedule;
-use crate::selector::HostSelector;
 
 pub const DB_SETTINGS: &str = "regency_settings";
 pub const DB_ORDERS: &str = "regency_orders";
@@ -522,6 +521,92 @@ pub struct HostDoc {
     pub last_reach: Option<OutcomeRef>,
     #[serde(default)]
     pub certs: CertPins,
+    /// What a proactive host's agent last reported about itself (D28).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentReport>,
+}
+
+/// A proactive host's agent report (D28), from the newest pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentReport {
+    /// e.g. `regops`
+    pub agent: String,
+    #[serde(default)]
+    pub agent_version: String,
+    /// `finished_at` of the pass (newest wins).
+    pub at: DateTime<Utc>,
+    /// The host's labels, from the agent's configuration (checked: invalid
+    /// keys are dropped).
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    /// Where the applied expected state comes from (credentials removed by
+    /// the agent): repository URL, branch, file and commit.
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub revision: String,
+    /// The applied `ExpectedState` (serde JSON), if sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_state: Option<serde_json::Value>,
+}
+
+impl AgentReport {
+    /// From the `ReporterInfo` of a pass (D28); `None` without an agent
+    /// name. Invalid label keys are dropped and returned.
+    pub fn from_reporter(
+        reporter: &regent_sdk::proto::ReporterInfo,
+        at: DateTime<Utc>,
+    ) -> Option<(Self, Vec<String>)> {
+        let agent = reporter.agent().to_string();
+        if agent.is_empty() {
+            return None;
+        }
+        let mut labels = BTreeMap::new();
+        let mut dropped = Vec::new();
+        for (key, value) in reporter.labels().iter() {
+            let (key, value) = (key.to_string(), value.to_string());
+            if crate::labels::valid_key(&key) && !crate::labels::RESERVED.contains(&key.as_str()) {
+                labels.insert(key, value);
+            } else {
+                dropped.push(key);
+            }
+        }
+        let expected_state = Some(reporter.expected_state_json().to_string())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str(&s).ok());
+        Some((
+            Self {
+                agent,
+                agent_version: reporter.agent_version().to_string(),
+                at,
+                labels,
+                repo: reporter.source_repo().to_string(),
+                branch: reporter.source_branch().to_string(),
+                path: reporter.source_path().to_string(),
+                revision: reporter.source_revision().to_string(),
+                expected_state,
+            },
+            dropped,
+        ))
+    }
+
+    fn newest(a: &Option<Self>, b: &Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                let key = |r: &Self| (r.at, serde_json::to_string(r).ok());
+                Some(if key(y) > key(x) {
+                    y.clone()
+                } else {
+                    x.clone()
+                })
+            }
+            (x, y) => x.clone().or_else(|| y.clone()),
+        }
+    }
 }
 
 impl HostDoc {
@@ -539,6 +624,7 @@ impl HostDoc {
             last_assess: None,
             last_reach: None,
             certs: CertPins::default(),
+            agent: None,
         }
     }
 
@@ -604,6 +690,7 @@ impl HostDoc {
             last_assess: newest_ref(self.last_assess.clone(), other.last_assess.clone()),
             last_reach: newest_ref(self.last_reach.clone(), other.last_reach.clone()),
             certs: self.certs.merge(&other.certs),
+            agent: AgentReport::newest(&self.agent, &other.agent),
         }
     }
 
@@ -639,6 +726,9 @@ impl HostDoc {
 /// The single settings document of `regency_settings`.
 pub const SETTINGS_DOC_ID: &str = "settings:global";
 pub const DEFAULT_RETENTION_MONTHS: i64 = 3;
+/// D25: public URL of the endpoint shown to regops agents (`https://…`);
+/// absent or empty = the web client's host and the endpoint's port.
+pub const ENDPOINT_URL_KEY: &str = "endpoint_url";
 /// Size limit of a job's log kept with its outcome (D24), bytes (estimate).
 pub const RUN_LOG_MAX_BYTES_KEY: &str = "run_log_max_bytes";
 pub const DEFAULT_RUN_LOG_MAX_BYTES: u64 = 1024 * 1024;
@@ -781,8 +871,8 @@ pub struct SourceDef {
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-    /// Directory inside the repository holding `inventories/` and
-    /// `expected_states/`.
+    /// Directory inside the repository holding `hosts/`, `inventories/`,
+    /// `expected_states/` and `assignments/` (D26 layout).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default = "default_poll")]
@@ -796,16 +886,66 @@ fn default_poll() -> u64 {
     300
 }
 
+/// The commit a Git source was last synchronized at (D28), in
+/// `regency_state` as `source_head:{source_id}`; newest `at` wins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceHeadDoc {
+    pub source_id: String,
+    pub repo: String,
+    pub branch: String,
+    pub revision: String,
+    pub at: DateTime<Utc>,
+}
+
+pub fn source_head_doc_id(source_id: &str) -> String {
+    format!("source_head:{source_id}")
+}
+
+impl SourceHeadDoc {
+    pub fn merge(&self, other: &Self) -> Self {
+        if (other.at, &other.revision) > (self.at, &self.revision) {
+            other.clone()
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Does an agent's repository (D28) designate this source's? URLs are
+    /// compared without scheme, credentials, trailing `/` or `.git`, case
+    /// insensitively; the branch must be the same.
+    pub fn serves(&self, repo: &str, branch: &str) -> bool {
+        !repo.is_empty()
+            && self.branch == branch
+            && normalize_repo(&self.repo) == normalize_repo(repo)
+    }
+}
+
+/// A repository URL reduced to host and path (D28), e.g.
+/// `git@github.com:org/infra.git` and `https://u:t@github.com/org/infra/`
+/// both give `github.com/org/infra`.
+pub fn normalize_repo(url: &str) -> String {
+    let url = url.trim();
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest.to_string(),
+        // scp-like `user@host:path`
+        None => url.replacen(':', "/", 1),
+    };
+    let end = rest.find('/').unwrap_or(rest.len());
+    let rest = match rest[..end].rsplit_once('@') {
+        Some((_, host)) => format!("{host}{}", &rest[end..]),
+        None => rest,
+    };
+    let rest = rest.trim_end_matches('/');
+    rest.strip_suffix(".git").unwrap_or(rest).to_lowercase()
+}
+
+/// A former inventory document (D26, removed by D29: assignments select
+/// their hosts themselves). Only read so that it can be deleted (sourcesync
+/// removes those of Git sources); nothing else uses it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InventoryDef {
+pub struct FormerInventory {
     pub source_id: String,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_connection_method: Option<ConnectionMethod>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub global_vars: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pool: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -813,9 +953,8 @@ pub struct HostDef {
     pub source_id: String,
     pub host_id: String,
     pub builder: ManagedHostBuilder,
-    /// Names of this source's inventories the host belongs to.
-    #[serde(default)]
-    pub inventories: BTreeSet<String>,
+    /// The host's own labels (D26: they decide which inventories it is in;
+    /// `host` and `source` are built in, not stored).
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -829,18 +968,57 @@ pub struct ExpectedStateDef {
     pub state: ExpectedState,
 }
 
-/// Association of hosts and an expected state (D23). Every assignment
-/// selecting a host is one layer of its effective expected state, lowest
-/// `priority` first.
+/// An assignment (D23, D27, D29): the hosts whose labels match `selector`
+/// get its stack of expected states, the first being the base and each next
+/// one overriding the previous ones (last wins). A host gets every
+/// assignment selecting it; their final states add up, in `priority` order
+/// (lower first), then by name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "AssignmentDoc")]
 pub struct AssignmentDef {
     pub source_id: String,
     pub name: String,
-    pub selector: HostSelector,
-    /// `{source_id}/{name}` of an expected state.
-    pub expected_state: String,
+    /// The hosts it applies to (D26 matchers, `{}` = every host).
+    pub selector: LabelSelector,
+    /// Order among the assignments of a host: lower first (D29).
     #[serde(default)]
     pub priority: i32,
+    /// `{source_id}/{name}` of each expected state, base first (D27).
+    pub expected_states: Vec<String>,
+}
+
+/// Stored form, also reading a stack written as one `expected_state`
+/// (before D27). `selector` is required: a document without it (former
+/// shapes) is unreadable, never "every host".
+#[derive(Deserialize)]
+struct AssignmentDoc {
+    source_id: String,
+    name: String,
+    selector: LabelSelector,
+    #[serde(default)]
+    priority: i32,
+    #[serde(default)]
+    expected_states: Vec<String>,
+    #[serde(default)]
+    expected_state: Option<String>,
+}
+
+impl From<AssignmentDoc> for AssignmentDef {
+    fn from(doc: AssignmentDoc) -> Self {
+        let mut expected_states = doc.expected_states;
+        if expected_states.is_empty()
+            && let Some(one) = doc.expected_state
+        {
+            expected_states.push(one);
+        }
+        Self {
+            source_id: doc.source_id,
+            name: doc.name,
+            selector: doc.selector,
+            priority: doc.priority,
+            expected_states,
+        }
+    }
 }
 
 impl AssignmentDef {
@@ -849,26 +1027,70 @@ impl AssignmentDef {
         format!("{}/{}", self.source_id, self.name)
     }
 
+    /// Order of a host's assignments (D29): priority, then name, then
+    /// source (only to be deterministic: same priority and name is
+    /// [`ambiguous_with`](Self::ambiguous_with)).
+    pub fn order_key(&self) -> (i32, &str, &str) {
+        (self.priority, &self.name, &self.source_id)
+    }
+
+    /// Whether `other` cannot be ordered against this one (D29: same
+    /// priority and same name, from another source).
+    pub fn ambiguous_with(&self, other: &AssignmentDef) -> bool {
+        self.priority == other.priority
+            && self.name == other.name
+            && self.source_id != other.source_id
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.name.is_empty() || self.name.contains(['/', ':']) {
             return Err("assignment name must be non-empty, without '/' or ':'".to_string());
         }
-        if self.selector.is_empty() {
-            return Err("the host selector is empty".to_string());
+        if self.expected_states.is_empty() {
+            return Err("an assignment needs at least one expected state".to_string());
         }
-        if split_ref(&self.expected_state).is_none() {
-            return Err("expected_state must be <source_id>/<name>".to_string());
+        for (i, state) in self.expected_states.iter().enumerate() {
+            if split_ref(state).is_none() {
+                return Err(format!(
+                    "expected state {state:?} must be <source_id>/<name>"
+                ));
+            }
+            if self.expected_states[..i].contains(state) {
+                return Err(format!("expected state {state} is twice in the stack"));
+            }
         }
         Ok(())
     }
 }
 
+/// The assignment among `others` that cannot be ordered against `def`
+/// (same priority and name, D29), if any: such an assignment is refused.
+pub fn ambiguous_assignment<'a>(
+    def: &AssignmentDef,
+    others: impl IntoIterator<Item = &'a AssignmentDef>,
+) -> Option<&'a AssignmentDef> {
+    others.into_iter().find(|o| def.ambiguous_with(o))
+}
+
+/// Why an assignment is refused next to `other` (D29).
+pub fn ambiguity_message(def: &AssignmentDef, other: &AssignmentDef) -> String {
+    format!(
+        "assignments {} and {} have the same priority ({}) and the same name: their order is ambiguous; change the priority or the name of one of them",
+        def.reference(),
+        other.reference(),
+        def.priority
+    )
+}
+
 /// A catalog item (one CouchDB doc each).
+// few, rarely copied documents: boxing variants would only add noise
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CatalogBody {
     Source(SourceDef),
-    Inventory(InventoryDef),
+    /// Former inventory (D29): read to be deleted only.
+    Inventory(FormerInventory),
     Hostdef(HostDef),
     ExpectedState(ExpectedStateDef),
     Assignment(AssignmentDef),
@@ -883,6 +1105,34 @@ pub struct CatalogItem {
 }
 
 impl CatalogItem {
+    /// Checks of an item's content shared by backend, dbwriter and
+    /// sourcesync (names, label keys, references).
+    pub fn validate(&self) -> Result<(), String> {
+        let name_ok = |what: &str, name: &str| {
+            if name.is_empty() || name.contains(['/', ':']) {
+                Err(format!("{what} must be non-empty, without '/' or ':'"))
+            } else {
+                Ok(())
+            }
+        };
+        match &self.body {
+            CatalogBody::Source(d) => name_ok("source id", &d.source_id),
+            CatalogBody::Inventory(_) => Err(
+                "inventories are gone (D29): an assignment selects its hosts with a label selector"
+                    .to_string(),
+            ),
+            CatalogBody::ExpectedState(d) => name_ok("expected state name", &d.name),
+            CatalogBody::Assignment(d) => d.validate(),
+            CatalogBody::Hostdef(d) => {
+                name_ok("host id", &d.host_id)?;
+                if d.builder.id != d.host_id {
+                    return Err("hostdef: builder id and host_id differ".to_string());
+                }
+                crate::labels::check_user_labels(&d.labels)
+            }
+        }
+    }
+
     pub fn source_id(&self) -> &str {
         match &self.body {
             CatalogBody::Source(d) => &d.source_id,
@@ -1080,5 +1330,56 @@ mod tests {
                 "source_id": "git1", "name": "web", "state": {"Attributes": []}, "revision": "abc"}))
             .unwrap();
         assert_eq!(stored.doc.source_id(), "git1");
+    }
+
+    #[test]
+    fn assignments_select_and_stack() {
+        let old: AssignmentDef = serde_json::from_value(serde_json::json!({
+            "source_id": "ui", "name": "web", "selector": "{role=\"web\"}",
+            "expected_state": "ui/nginx"}))
+        .unwrap();
+        assert_eq!(old.expected_states, ["ui/nginx"]);
+        assert_eq!(old.priority, 0);
+        let new = serde_json::to_value(&old).unwrap();
+        assert_eq!(new["expected_states"], serde_json::json!(["ui/nginx"]));
+        assert_eq!(new["selector"], "{role=\"web\"}");
+        // former shapes (an inventory, D26/D27) are unreadable
+        assert!(
+            serde_json::from_value::<AssignmentDef>(serde_json::json!({
+                "source_id": "ui", "name": "web", "inventory": "ui/web",
+                "expected_states": ["ui/nginx"]}))
+            .is_err()
+        );
+        let mut other = old.clone();
+        other.source_id = "git".into();
+        assert!(old.ambiguous_with(&other));
+        assert!(ambiguity_message(&old, &other).contains("priority"));
+        other.priority = 10;
+        assert!(!old.ambiguous_with(&other));
+        assert!(!old.ambiguous_with(&old));
+        let mut twice = old.clone();
+        twice.expected_states.push("ui/nginx".into());
+        assert!(twice.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod d28_tests {
+    use super::*;
+
+    #[test]
+    fn repositories_compare_without_noise() {
+        let head = SourceHeadDoc {
+            source_id: "infra".into(),
+            repo: "https://github.com/Org/infra.git".into(),
+            branch: "main".into(),
+            revision: "abc".into(),
+            at: Utc::now(),
+        };
+        assert!(head.serves("git@github.com:org/infra", "main"));
+        assert!(head.serves("https://bot:x@github.com/org/infra/", "main"));
+        assert!(!head.serves("https://github.com/org/infra", "dev"));
+        assert!(!head.serves("https://github.com/org/other", "main"));
+        assert!(!head.serves("", "main"));
     }
 }

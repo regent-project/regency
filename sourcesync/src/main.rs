@@ -12,13 +12,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use clap::Parser;
 use regencylib::amqp::{Handled, Publisher, connect_retrying, consume};
 use regencylib::config::resolve_secret;
 use regencylib::couch::{Couch, Since, follow};
 use regencylib::hashing::bucket;
 use regencylib::messages::{Command, CommandBody};
-use regencylib::model::{CatalogBody, CatalogItem, DB_CATALOG, SourceDef, SourceKind};
+use regencylib::model::{
+    CatalogBody, CatalogItem, DB_CATALOG, SourceDef, SourceHeadDoc, SourceKind,
+};
 use regencylib::services::sourcesync::Config;
 use regencylib::shard::{self, ShardSpec, Watchdog};
 use regencylib::telemetry::{Health, counter, shutdown_signal};
@@ -97,6 +100,19 @@ impl Catalog {
             .collect()
     }
 
+    /// Assignments of every other source (D29 ambiguity check).
+    fn assignments_except(&self, source_id: &str) -> Vec<regencylib::model::AssignmentDef> {
+        self.0
+            .read()
+            .expect("catalog")
+            .values()
+            .filter_map(|i| match &i.body {
+                CatalogBody::Assignment(d) if d.source_id != source_id => Some(d.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn items_of(&self, source_id: &str) -> HashMap<String, CatalogItem> {
         self.0
             .read()
@@ -139,11 +155,32 @@ impl Syncer {
         };
         let dir = self.workdir.join(&source.source_id);
         let started = Instant::now();
-        let (sha, files) =
-            tokio::task::spawn_blocking(move || git::fetch(&repo, &branch, &path, &dir, token))
-                .await
-                .map_err(|e| e.to_string())??;
-        let (items, errors) = parse::parse(&source.source_id, &sha, &files);
+        let (fetch_repo, fetch_branch) = (repo.clone(), branch.clone());
+        let (sha, files) = tokio::task::spawn_blocking(move || {
+            git::fetch(&fetch_repo, &fetch_branch, &path, &dir, token)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let (mut items, mut errors) = parse::parse(&source.source_id, &sha, &files);
+        // D29: an assignment with the priority and name of another source's
+        // cannot be ordered against it: refused until one of them changes
+        let others = self.catalog.assignments_except(&source.source_id);
+        items.retain(|item| {
+            let CatalogBody::Assignment(def) = &item.body else {
+                return true;
+            };
+            match regencylib::model::ambiguous_assignment(def, &others) {
+                Some(other) => {
+                    errors.push(format!(
+                        "assignments/{}: {}",
+                        def.name,
+                        regencylib::model::ambiguity_message(def, other)
+                    ));
+                    false
+                }
+                None => true,
+            }
+        });
         for problem in &errors {
             warn!(sha = %sha, problem, "file skipped");
         }
@@ -197,6 +234,30 @@ impl Syncer {
                 deletes += 1;
             }
         }
+        // D28: the head proactive hosts on this repository are compared with
+        let command = Command::new(
+            format!(
+                "synced:{}:{sha}:{}",
+                source.source_id,
+                Utc::now().timestamp()
+            ),
+            ISSUER,
+            CommandBody::CatalogSourceSynced(SourceHeadDoc {
+                source_id: source.source_id.clone(),
+                repo,
+                branch,
+                revision: sha.clone(),
+                at: Utc::now(),
+            }),
+        );
+        publisher
+            .publish_json(
+                EX_COMMANDS,
+                command.routing_key(),
+                &command.to_bytes().map_err(|e| e.to_string())?,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         self.syncs
             .with_label_values(&[if errors.is_empty() { "ok" } else { "partial" }])
             .inc();

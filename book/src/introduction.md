@@ -11,7 +11,7 @@ pieces of infrastructure: **RabbitMQ** distributes the work, **CouchDB**
 keeps the state.
 
 ```text
-          you (web UI, API)                 Git (inventories, expected states)
+          you (web UI, API)                 Git (hosts, expected states)
                   │                                     │
                   ▼                                     ▼
             ┌──────────┐   commands    ┌─────────────────────────────┐
@@ -30,12 +30,19 @@ keeps the state.
 
 ## What you get
 
+- **Hosts selected by labels, the Kubernetes way.** No host lists to
+  maintain. Each host carries labels, and each assignment selects its hosts
+  with a label selector (`{role="web", env=~"prod|staging"}`), as a
+  Kubernetes Service selects pods. Label a host `role=web` and it gets the
+  web expected states. A host's assignments add up by priority, and
+  regency reports conflicts between them (see
+  [Assignments](operations/assignments.md)).
 - **Two ways to manage a host.** *Passive* hosts are reached by regency's
   runners over SSH or SSHOQ (SSH over QUIC); nothing is installed on them.
   *Proactive* hosts run the small [regops](https://github.com/regent-project/regops)
   agent, which pulls its expected state from Git, applies it itself and
   reports to regency. Both kinds show up the same way.
-- **GitOps or UI.** Inventories and expected states come from Git
+- **GitOps or UI.** Hosts, expected states and assignments come from Git
   repositories (synced automatically), from the API, or from the web UI.
 - **No single point of failure.** Every service runs as several replicas;
   RabbitMQ and CouchDB run as clusters.

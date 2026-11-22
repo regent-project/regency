@@ -139,25 +139,23 @@ impl Dispatcher {
         let key = (plan.key)(&target.host_id);
         let (expected_state, revision) = match &plan.body {
             Body::OneShot(state) => ((*state).clone(), None),
-            Body::Effective(assignments) => {
-                match assignments.effective(&target.host_id, &target.inventories, &target.labels) {
-                    Effective::Ready {
-                        state, revision, ..
-                    } => (state, Some(revision)),
-                    Effective::Unassigned => {
-                        debug!(host_id = %target.host_id, "host skipped: no assignment");
-                        self.published.with_label_values(&["unassigned"]).inc();
-                        return Ok(false);
-                    }
-                    Effective::Invalid { reason, .. } => {
-                        warn!(host_id = %target.host_id, reason, "host skipped: invalid assignments (D23)");
-                        self.published
-                            .with_label_values(&["invalid_assignments"])
-                            .inc();
-                        return Ok(false);
-                    }
+            Body::Effective(assignments) => match assignments.effective(&target.labels) {
+                Effective::Ready {
+                    state, revision, ..
+                } => (state, Some(revision)),
+                Effective::Unassigned => {
+                    debug!(host_id = %target.host_id, "host skipped: no assignment");
+                    self.published.with_label_values(&["unassigned"]).inc();
+                    return Ok(false);
                 }
-            }
+                Effective::Invalid { reason, .. } => {
+                    warn!(host_id = %target.host_id, reason, "host skipped: invalid assignments (D29)");
+                    self.published
+                        .with_label_values(&["invalid_assignments"])
+                        .inc();
+                    return Ok(false);
+                }
+            },
         };
         let task = RegentTask::from(target.builder.clone(), expected_state, plan.job)
             .with_idempotency_key(key.clone());

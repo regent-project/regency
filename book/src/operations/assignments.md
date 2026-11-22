@@ -1,45 +1,119 @@
 # Assignments and effective expected states
 
-An **assignment** says what a set of hosts should look like: a host
-selector, one expected state, and a priority. It is what gives a host's
-colour on the map a meaning: a host is green when it complies with the
-expected state its assignments give it, and nothing else.
+An **assignment** says what some hosts should look like: a **label
+selector** (the hosts it applies to, in the style of Loki or Kubernetes),
+a **priority** and a **stack of expected states**, like Helm values files
+(`-f values.yaml -f prod.yaml`): the first state is the base, and each next
+one overrides the previous ones. The result is the assignment's **final
+expected state**.
 
 | Field | Example |
 |---|---|
-| hosts | a selector: `inventory infra/web`, `label env=prod`, host ids (any of them matches) |
-| expected state | `infra/nginx` |
-| priority | `100` (default `0`; higher = more specific) |
+| hosts | `{role=~"web\|api", env="prod"}` (`{}` = every host) |
+| priority | `10` (order among a host's assignments, lower first; default 0) |
+| expected states | `infra/nginx`, then `infra/nginx-prod` |
+
+A host gets **every** assignment whose selector matches its labels, like a
+Salt top file targeting grains or Ansible groups: adding the label
+`monitoring="true"` to a host gives it the `monitoring` assignment, nothing
+else to edit. Their final states add up into the host's **effective
+expected state**, and that is what gives a host's colour on the map a
+meaning: a host is green when it complies with its effective state, and
+nothing else.
 
 Like the rest of the catalog, assignments come from a Git source
-(`assignments/*.yaml`, read-only in regency, see [Sources](sources.md)) or
-from the API.
+(`assignments/*.yaml`, read-only in regency, see [Sources](sources.md)),
+the API, or the web UI: **Assignments** creates, edits and deletes them.
+The expected states are picked from the catalog, so they are created first
+(**States**). The form reads like a sheet: source, name and priority on
+top, then two columns, **Hosts** and **Expected states**, whose rows line
+up. The hosts are chosen like Grafana's label filters on Loki
+(**Builder**: each filter is a chip, `env="prod"`, on one line; **+ Label
+filter** or a click on a chip edits one with a label, an operator and a
+value picked from the labels in use), or written as text (**Code**). The
+stack is a line of chips too, base first, each moved with ◀ ▶ or removed
+with ×. Below them, **Matching hosts** lists the hosts the selector
+selects, and **Final expected state** shows the result as you edit: the
+suspected conflicts and every attribute with its origin. Clicking an
+assignment's name shows the result read-only.
 
-## Layering: one effective state per host
+## Selectors
 
-A host selected by several assignments gets **one effective expected
-state**, built like Helm values, from the most generic layer to the most
-specific:
+| Matcher | Holds when |
+|---|---|
+| `key="value"` | the label equals `value` |
+| `key!="value"` | it does not (a missing label reads as `""`) |
+| `key=~"re"` | it matches the regular expression (anchored: the whole value) |
+| `key!~"re"` | it does not |
 
-1. its assignments are sorted by priority, lowest first;
-2. their attributes are added in that order;
-3. an attribute whose `Name` already came from a lower layer **replaces** it,
-   in place (so a `web` assignment at priority 100 can override the
-   `baseline` attribute named `swappiness`);
-4. unnamed attributes are always added.
+All the matchers must hold. Every host also has the built-in labels
+`host` (its id) and `source` (the sources defining it, `regops` for a
+reporting agent): `{host="web-01"}` is one host.
 
-Example: `baseline` (priority 0, every host) and `web` (priority 100,
-inventory `web`). A web host runs `baseline`'s attributes, with `web`'s
-added or overriding them by name. A database host runs `baseline` alone.
+## Overrides inside a stack: the last state wins
 
-The same attribute `Name` from two assignments of **equal** priority, with a
-different content, is a conflict: regency cannot tell which one wins. The
-host is flagged (*assignments in conflict*, amber on the map, both
-assignments named on its panel) and **no task is built for it** until the
-priorities or names are fixed.
+1. The states are taken in order, base first.
+2. Their attributes are added in that order.
+3. An attribute whose `Name` already came from an earlier state
+   **replaces** it, in place: `nginx-prod` can override `nginx`'s attribute
+   named `nginx workers`.
+4. Unnamed attributes are always added.
 
-The effective state has a revision (a hash of its content): it changes when
-an assignment, its expected state or the layering changes.
+Each attribute of the final state shows the state it comes from and, if
+it replaced attributes of the same `Name`, the states it overrides (like
+`git blame`): `nginx workers` · `infra/nginx-prod` · *overrides
+infra/nginx*.
+
+## Several assignments on a host: they add up
+
+A host's assignments are applied by **priority** (lower first, like the
+`10-`, `20-` prefixes of a `conf.d` directory), then by name. Their final
+states are added in that order, and each attribute shows the assignment it
+comes from. An override is intended inside one stack, never between
+assignments, so:
+
+- an attribute **identical** to one of an earlier assignment (same content,
+  whatever its `Name`, so a typo'd name is still caught) is applied once,
+  marked *also in* the later assignments;
+- the same `Name` with another content, or the same target with another
+  content (service `httpd` *Started* in one assignment, *Stopped* in
+  another; two different `LineInFile` on the same line of the same file) is
+  a **conflict**: the host is *invalid* (amber on the map, the conflict
+  named on its panel) and **no task is built for it** until an assignment
+  or a state is fixed. To override on purpose, put both states in one
+  stack.
+
+"Baseline everywhere, nginx on the web hosts" is two assignments:
+`baseline` on `{}` and `web` on `{role="web"}`. A web host that should not
+get a baseline attribute is the case for one stack: `[baseline, web]` on
+the web hosts, and `baseline` on `{role!="web"}`.
+
+Two assignments with the **same priority and the same name** (from two
+sources) cannot be ordered: saving one through the web UI or the API is
+refused until the priority or the name of one of them is changed, a Git
+source reports it as an error on the file, and a host they would both
+select is *invalid*.
+
+The effective state has a revision (a hash of the assignments, their
+stacks and their states' revisions): it changes whenever one of them
+changes.
+
+## Suspected conflicts
+
+Inside one stack, regency points out what looks like a mistake, without
+refusing it (saving and running stay allowed; the ⚠ marks the attributes
+involved; between assignments the same cases are conflicts, see above):
+
+- two attributes with different `Name`s acting on the same thing
+  differently: service `httpd` *Started* in one, *Stopped* in another; a
+  package present and absent; two `LineInFile` on the same line of the same
+  file; two `Hostname`;
+- the same attribute twice, under two names;
+- an override changing an attribute's nature (a `Service` replaced by a
+  `LineInFile` of the same `Name`).
+
+To silence one, give both attributes the same `Name` (the later one then
+overrides the earlier one), or remove one.
 
 ## What the colours mean
 
@@ -48,18 +122,19 @@ an assignment, its expected state or the layering changes.
 | compliant / not compliant | last outcome against the host's **current** effective state |
 | outdated | the last outcome was against an older effective state: assess it again |
 | unassigned | no assignment selects the host: nothing is checked on it (grey, never green) |
-| invalid | its assignments are in conflict (see above) |
+| invalid | conflicting or ambiguous assignments, or a state of a stack is missing (see above) |
 
-The host panel and page show the layers (assignments, lowest priority
-first) and the effective state's attributes, each tagged with the assignment
-it comes from.
+The host panel and page show its assignments in order, each with its
+stack, and the effective state's attributes, each tagged with its state
+and assignment.
 
 ## Assess and Reach
 
-Assess and Reach always run each host against **its own effective state**:
-from an assignment's card on the map, from an inventory or label card, from
-a host, or from an order. There is no expected state to choose: running a
-single layer alone could undo an override.
+Assess and Reach always run each host against **its own effective
+state** (every assignment it gets): from an assignment's card on the map or
+its row in **Assignments**, from a label card, from a host, or from an
+order. There is no expected state to choose: running a single state or
+assignment alone could undo an override or miss part of the host.
 
 Orders reference an assignment, a mode and a schedule (see
 [Running jobs and recurring orders](jobs-orders.md)).
@@ -99,7 +174,8 @@ their results again.
 
 ## Proactive hosts
 
-Hosts running regops will pull their composed effective state from the
-endpoint instead of their own Git repository. This needs a new regops
-release (and a regent-sdk one); until then, a proactive host applies what
-its own repository says.
+A host running regops joins assignments by the labels its agent reports,
+but still applies the state of its own Git repository; regency warns when
+that state differs from its effective state (see [Proactive
+hosts](proactive-hosts.md#in-the-fleet-labels-assignments-freshness)).
+Pulling the final state from regency needs a new regops release.

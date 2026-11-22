@@ -14,7 +14,6 @@ use regencylib::couch::Couch;
 use regencylib::messages::{Command, CommandBody};
 use regencylib::model::*;
 use regencylib::proto as api;
-use regencylib::selector::HostSelector;
 use regencylib::testing::{infra, unique};
 use regencylib::topology::{self, EX_COMMANDS};
 use regent_sdk::ExpectedState;
@@ -80,7 +79,6 @@ async fn backend_authenticates_authorizes_and_streams() {
             source_id: source.clone(),
             host_id: host.clone(),
             builder: ManagedHostBuilder::new(&host, "10.0.0.1:22", None),
-            inventories: BTreeSet::new(),
             labels: BTreeMap::from([("env".to_string(), env.clone())]),
             pool: None,
         }),
@@ -89,12 +87,14 @@ async fn backend_authenticates_authorizes_and_streams() {
             name: "base".into(),
             state: ExpectedState::new(),
         }),
+        // D29: an assignment selects by labels, here the built-in host label
         CatalogBody::Assignment(AssignmentDef {
             source_id: source.clone(),
             name: "base".into(),
-            selector: HostSelector::hosts([host.clone()]),
-            expected_state: format!("{source}/base"),
+            selector: regencylib::labels::LabelSelector::parse(&format!("{{host=\"{host}\"}}"))
+                .unwrap(),
             priority: 0,
+            expected_states: vec![format!("{source}/base")],
         }),
     ];
     for body in items {
@@ -107,6 +107,65 @@ async fn backend_authenticates_authorizes_and_streams() {
             .await
             .unwrap();
     }
+    // D28: a proactive host, known only by its agent's report: its labels
+    // put it in two assignments (D29), ordered by priority before name
+    let pro = unique("pro");
+    let role = unique("role");
+    let role_selector =
+        regencylib::labels::LabelSelector::parse(&format!("{{role=\"{role}\"}}")).unwrap();
+    for (name, priority) in [("pro", 5), ("zearly", 1)] {
+        let body = CatalogBody::Assignment(AssignmentDef {
+            source_id: source.clone(),
+            name: name.into(),
+            selector: role_selector.clone(),
+            priority,
+            expected_states: vec![format!("{source}/base")],
+        });
+        let item = CatalogItem {
+            body,
+            revision: "1".into(),
+        };
+        couch
+            .put(DB_CATALOG, &Stored::new(item.doc_id(), item))
+            .await
+            .unwrap();
+    }
+    let mut pro_doc = HostDoc::empty(&pro, chrono::Utc::now());
+    pro_doc.state.compliance = "not_compliant".into();
+    pro_doc.agent = Some(regencylib::model::AgentReport {
+        agent: "regops".into(),
+        agent_version: "0.17.0".into(),
+        at: chrono::Utc::now(),
+        labels: BTreeMap::from([("role".to_string(), role.clone())]),
+        repo: format!("https://git.example/{pro}.git"),
+        branch: "main".into(),
+        path: "state.yaml".into(),
+        revision: "old".into(),
+        expected_state: Some(serde_json::json!({"Attributes": [{
+            "Name": "motd", "Privilege": "None",
+            "Detail": {"Debug": {"Msg": "hello"}}
+        }]})),
+    });
+    couch
+        .put(DB_STATE, &Stored::new(host_doc_id(&pro), pro_doc))
+        .await
+        .unwrap();
+    couch
+        .put(
+            DB_STATE,
+            &Stored::new(
+                regencylib::model::source_head_doc_id(&source),
+                regencylib::model::SourceHeadDoc {
+                    source_id: source.clone(),
+                    repo: format!("git@git.example:{pro}"),
+                    branch: "main".into(),
+                    revision: "new".into(),
+                    at: chrono::Utc::now(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
     let mut host_doc = HostDoc::empty(&host, chrono::Utc::now());
     host_doc.state.compliance = "not_compliant".into();
     let rev = couch
@@ -306,6 +365,37 @@ external = 1
         .unwrap()
         .into_inner();
     assert!(yaml.yaml().to_string().contains("!LineInFile"));
+    // D27: the final state of a stack being edited
+    let mut compose = api::ComposeStatesRequest::new();
+    compose
+        .expected_states_mut()
+        .push(format!("{source}/base").as_str());
+    let composed = client
+        .compose_states(authed(compose, &token))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        composed.error().to_string().is_empty(),
+        "{}",
+        composed.error()
+    );
+    assert!(composed.state_json().to_string().contains("Attributes"));
+    let mut unknown = api::ComposeStatesRequest::new();
+    unknown
+        .expected_states_mut()
+        .push(format!("{source}/nope").as_str());
+    let refused = client
+        .compose_states(authed(unknown, &token))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        refused
+            .error()
+            .to_string()
+            .contains("unknown expected state")
+    );
     assert_eq!(
         client
             .who_am_i(Request::new(api::WhoAmIRequest::new()))
@@ -314,6 +404,89 @@ external = 1
             .code(),
         tonic::Code::Unauthenticated
     );
+
+    // D28: the proactive host, in its assignment, behind its repository
+    let mut watch = api::WatchHostsRequest::new();
+    let mut selector = api::HostSelector::new();
+    selector
+        .assignments_mut()
+        .push(format!("{source}/pro").as_str());
+    watch.set_selector(selector);
+    let mut stream = client
+        .watch_hosts(authed(watch, &token))
+        .await
+        .unwrap()
+        .into_inner();
+    let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let summary = event.upsert();
+    assert_eq!(summary.host_id().to_string(), pro);
+    assert_eq!(summary.agent().to_string(), "regops");
+    assert_eq!(
+        summary
+            .assignments()
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>(),
+        [format!("{source}/zearly"), format!("{source}/pro")]
+    );
+    assert_eq!(summary.repo_status().to_string(), "behind");
+    assert_eq!(summary.repo_head().to_string(), "new");
+    assert!(
+        summary.state_drift().to_string().contains("motd"),
+        "{}",
+        summary.state_drift()
+    );
+    assert_eq!(
+        summary.labels().get("role").map(|v| v.to_string()),
+        Some(role.clone())
+    );
+    drop(stream);
+
+    // D29: same priority and name as an existing assignment: refused
+    let ambiguous = CatalogItem {
+        body: CatalogBody::Assignment(AssignmentDef {
+            source_id: unique("other"),
+            name: "pro".into(),
+            selector: role_selector.clone(),
+            priority: 5,
+            expected_states: vec![format!("{source}/base")],
+        }),
+        revision: "1".into(),
+    };
+    let mut upsert = api::UpsertCatalogItemRequest::new();
+    upsert.set_command_id(unique("cmd").as_str());
+    upsert.set_item_json(serde_json::to_string(&ambiguous).unwrap().as_str());
+    let refused = client
+        .upsert_catalog_item(authed(upsert, &token))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        refused.message().contains("ambiguous"),
+        "{}",
+        refused.message()
+    );
+    // and by a label selector
+    let mut watch = api::WatchHostsRequest::new();
+    let mut selector = api::HostSelector::new();
+    selector.set_selector(format!("{{role=\"{role}\", host=~\"pro.*\"}}").as_str());
+    watch.set_selector(selector);
+    let mut stream = client
+        .watch_hosts(authed(watch, &token))
+        .await
+        .unwrap()
+        .into_inner();
+    let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.upsert().host_id().to_string(), pro);
+    drop(stream);
 
     // live view: snapshot then update
     let mut watch = api::WatchHostsRequest::new();

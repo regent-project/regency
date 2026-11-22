@@ -28,11 +28,12 @@ Ctrl-C stops them all. It runs a fleet-sized setup:
   it declares `regency.status.dbwriter`);
 - a **representative dataset** once backend is ready
   (`backend/examples/dataset.rs`, also runnable alone: `cargo run -p backend
-  --example dataset -- --hosts N`): API source `dataset`, 3000 hosts in 12
-  inventories (some hosts in two), labels `env`, `region`, `role`, `team`,
-  expected states `baseline`, `web`, `db`, `edge` and their assignments
-  (D23: `baseline` at priority 0 on every inventory but `bastion`, whose 30
-  hosts stay unassigned; `web` (web + api), `db`, `edge` at 100 on top),
+  --example dataset -- --hosts N`): API source `dataset`, 3000 hosts of 12
+  kinds, labels `kind`, `env`, `region`, `role`, `team` (`platform`,
+  `storage` on some), expected states `baseline`, `web`, `db`, `edge` and
+  their assignments (D29, adding up: `baseline` at priority 0 on every host
+  but `bastion`, whose hosts stay unassigned; `web` (web + api), `db`
+  (`storage="db"`), `edge` at 10 on top),
   5 recurring orders on those assignments (one disabled), then a first
   Assess of every host against its effective state. Every host is this machine
   (Localhost) with its own files under `/tmp/regency-dev/hosts/<host>/` and

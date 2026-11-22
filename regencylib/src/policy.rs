@@ -1,7 +1,8 @@
 //! Cedar authorization (D12), embedded in backend and scheduler.
 //!
 //! - Principals: `User`, `ServiceAccount`, members of `Group`s.
-//! - Resources: `Source` ⊃ `Inventory` ⊃ `Host`, plus `ExpectedState`,
+//! - Resources: `Source` ⊃ `Assignment` ⊃ `Host` (a host is in the
+//!   assignments selecting it, D29), plus `ExpectedState`,
 //!   `Order`, `Settings` (singleton `Settings::"global"`, also the resource of
 //!   user management) and `Policy`.
 //! - Actions: `read`, and one per command (D10/D17): `assess` / `reach` (run
@@ -28,8 +29,8 @@ entity Group;
 entity User in [Group];
 entity ServiceAccount in [Group];
 entity Source;
-entity Inventory in [Source];
-entity Host in [Inventory, Source];
+entity Assignment in [Source];
+entity Host in [Assignment, Source];
 entity ExpectedState in [Source];
 entity Order;
 entity Settings;
@@ -37,7 +38,7 @@ entity Policy;
 
 action "read" appliesTo {
   principal: [User, ServiceAccount],
-  resource: [Host, Source, Inventory, ExpectedState, Order, Settings, Policy],
+  resource: [Host, Source, Assignment, ExpectedState, Order, Settings, Policy],
 };
 action "assess", "reach", "abort", "host.delete", "host.approve_cert", "host.enroll" appliesTo {
   principal: [User, ServiceAccount],
@@ -53,7 +54,7 @@ action "settings.set", "config.set", "user.upsert", "user.delete" appliesTo {
 };
 action "catalog.upsert", "catalog.delete" appliesTo {
   principal: [User, ServiceAccount],
-  resource: [Source, Inventory, Host, ExpectedState],
+  resource: [Source, Assignment, Host, ExpectedState],
 };
 action "source.refresh" appliesTo {
   principal: [User, ServiceAccount],
@@ -140,15 +141,16 @@ impl Principal {
 /// What an action applies to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Resource {
-    /// A host with its inventories (`source/name`) and sources.
+    /// A host with the assignments selecting it (`source/name`) and its
+    /// sources.
     Host {
         id: String,
-        inventories: Vec<String>,
+        assignments: Vec<String>,
         sources: Vec<String>,
     },
     Source(String),
     /// `source/name`.
-    Inventory(String),
+    Assignment(String),
     /// `source/name`.
     ExpectedState(String),
     Order(String),
@@ -236,14 +238,14 @@ impl Authorizer {
         let resource_uid = match resource {
             Resource::Host {
                 id,
-                inventories,
+                assignments,
                 sources,
             } => {
                 let mut parents = HashSet::new();
                 let mut all_sources: HashSet<String> = sources.iter().cloned().collect();
-                for inventory in inventories {
-                    let source = source_of(inventory).unwrap_or_default().to_string();
-                    let inv = uid("Inventory", inventory);
+                for assignment in assignments {
+                    let source = source_of(assignment).unwrap_or_default().to_string();
+                    let inv = uid("Assignment", assignment);
                     entities.push(Entity::new_no_attrs(
                         inv.clone(),
                         HashSet::from([uid("Source", &source)]),
@@ -265,9 +267,9 @@ impl Authorizer {
                 entities.push(Entity::new_no_attrs(s.clone(), HashSet::new()));
                 s
             }
-            Resource::Inventory(reference) | Resource::ExpectedState(reference) => {
-                let kind = if matches!(resource, Resource::Inventory(_)) {
-                    "Inventory"
+            Resource::Assignment(reference) | Resource::ExpectedState(reference) => {
+                let kind = if matches!(resource, Resource::Assignment(_)) {
+                    "Assignment"
                 } else {
                     "ExpectedState"
                 };
@@ -364,16 +366,25 @@ impl DecisionCache {
 }
 
 impl Resource {
-    /// The `Host` resource of `host_id` with its inventories and sources from
-    /// the catalog's host definitions (D11 hierarchy).
-    pub fn host(host_id: &str, hostdefs: &[crate::model::HostDef]) -> Self {
-        Self::host_of(host_id, hostdefs.iter().filter(|d| d.host_id == host_id))
+    /// The `Host` resource of `host_id` with the assignments selecting it
+    /// (computed from its labels, D29) and its sources (D11 hierarchy).
+    pub fn host(
+        host_id: &str,
+        hostdefs: &[crate::model::HostDef],
+        assignments: &[crate::model::AssignmentDef],
+    ) -> Self {
+        Self::host_of(
+            host_id,
+            hostdefs.iter().filter(|d| d.host_id == host_id),
+            assignments,
+        )
     }
 
     /// Every host's resource at once: [`Resource::host`] scans all the
     /// definitions, which is quadratic over a fleet.
     pub fn hosts(
         hostdefs: &[crate::model::HostDef],
+        assignments: &[crate::model::AssignmentDef],
     ) -> std::collections::HashMap<String, Resource> {
         let mut by_host: std::collections::HashMap<&str, Vec<&crate::model::HostDef>> =
             std::collections::HashMap::new();
@@ -382,7 +393,7 @@ impl Resource {
         }
         by_host
             .into_iter()
-            .map(|(id, defs)| (id.to_string(), Self::host_of(id, defs)))
+            .map(|(id, defs)| (id.to_string(), Self::host_of(id, defs, assignments)))
             .collect()
     }
 
@@ -390,18 +401,17 @@ impl Resource {
     pub fn host_of<'a>(
         host_id: &str,
         defs: impl IntoIterator<Item = &'a crate::model::HostDef>,
+        assignments: &[crate::model::AssignmentDef],
     ) -> Self {
-        let mut inventories = std::collections::BTreeSet::new();
-        let mut sources = std::collections::BTreeSet::new();
-        for def in defs {
-            sources.insert(def.source_id.clone());
-            for name in &def.inventories {
-                inventories.insert(format!("{}/{}", def.source_id, name));
-            }
-        }
+        let defs: Vec<&crate::model::HostDef> = defs.into_iter().collect();
+        let labels = crate::selector::host_labels(host_id, &defs);
+        let sources: std::collections::BTreeSet<String> =
+            defs.iter().map(|d| d.source_id.clone()).collect();
         Resource::Host {
             id: host_id.to_string(),
-            inventories: inventories.into_iter().collect(),
+            assignments: crate::selector::assignments_of(&labels, assignments)
+                .into_iter()
+                .collect(),
             sources: sources.into_iter().collect(),
         }
     }
@@ -419,10 +429,10 @@ pub fn job_action(job: regent_sdk::task::Job) -> &'static str {
 mod tests {
     use super::*;
 
-    fn host(id: &str, inventory: &str) -> Resource {
+    fn host(id: &str, assignment: &str) -> Resource {
         Resource::Host {
             id: id.into(),
-            inventories: vec![inventory.into()],
+            assignments: vec![assignment.into()],
             sources: vec![],
         }
     }
@@ -452,7 +462,7 @@ mod tests {
     fn stored_policies_follow_the_hierarchy() {
         let doc = PolicyDoc {
             policy_id: "web-team".into(),
-            text: r#"permit(principal == User::"alice", action == Action::"reach", resource in Inventory::"git/web");"#.into(),
+            text: r#"permit(principal == User::"alice", action == Action::"reach", resource in Assignment::"git/web");"#.into(),
             description: String::new(),
         };
         Authorizer::validate_policy(&doc.policy_id, &doc.text).unwrap();

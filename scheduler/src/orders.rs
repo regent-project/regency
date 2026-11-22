@@ -10,7 +10,7 @@ use regencylib::messages::recurring_key;
 use regencylib::model::Order;
 use regencylib::policy::{Principal, Resource, job_action};
 use regencylib::schedule::Slot;
-use regencylib::selector::resolve;
+use regencylib::selector::{HostSelector, resolve};
 use regencylib::shard::Watchdog;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -107,11 +107,13 @@ async fn fire(
         skips.skip("unknown_assignment");
         return Ok(());
     };
-    let (hostdefs, inventories) = state.hosts();
+    let (hostdefs, all_assignments) = state.hosts();
+    // D29: the hosts its selector matches (each gets its whole effective
+    // state, every assignment of the host included)
     let resolution = resolve(
-        &assignment.selector,
+        &HostSelector::assignment(assignment.reference()),
         &hostdefs,
-        &inventories,
+        &all_assignments,
         order.pool.as_deref(),
     );
     for host_id in &resolution.conflicting {
@@ -131,12 +133,12 @@ async fn fire(
     author.groups = order.author_groups.clone();
     let authorizer = state.authorizer();
     let action = job_action(order.job);
-    let resources = Resource::hosts(&hostdefs);
+    let resources = Resource::hosts(&hostdefs, &all_assignments);
     let (targets, denied): (Vec<_>, Vec<_>) = resolution.targets.into_iter().partition(|t| {
         let resource = resources
             .get(&t.host_id)
             .cloned()
-            .unwrap_or_else(|| Resource::host_of(&t.host_id, []));
+            .unwrap_or_else(|| Resource::host_of(&t.host_id, [], &[]));
         authorizer.is_authorized(&author, action, &resource)
     });
     if !denied.is_empty() {

@@ -7,9 +7,11 @@ use chrono::{DateTime, Utc};
 use regencylib::couch::{Couch, CouchError};
 use regencylib::messages::{DecodedOutcome, JobState, LifecycleEvent, TaskHeader};
 use regencylib::model::{
-    DB_STATE, HostDoc, JobDoc, OUTCOME_ATTACHMENT, OutcomeDoc, OutcomeRef, RUN_LOG_ATTACHMENT,
-    RunLogSummary, Stored, host_doc_id, job_doc_id, jobs_db, month_of, outcome_doc_id, outcomes_db,
+    AgentReport, DB_STATE, HostDoc, JobDoc, OUTCOME_ATTACHMENT, OutcomeDoc, OutcomeRef,
+    RUN_LOG_ATTACHMENT, RunLogSummary, Stored, host_doc_id, job_doc_id, jobs_db, month_of,
+    outcome_doc_id, outcomes_db,
 };
+use regent_sdk::proto::runtime::Parse;
 use tracing::{debug, info, warn};
 
 /// Transient = worth retrying (CouchDB unreachable, 5xx, lost race).
@@ -118,11 +120,27 @@ impl Writer {
             .await?;
         // a one-shot attribute is history only (D23): it proves the host
         // exists, never sets its state
-        let host = if doc.one_shot {
+        let mut host = if doc.one_shot {
             HostDoc::empty(&doc.host_id, doc.finished_at)
         } else {
             HostDoc::from_outcome_doc(&doc, reference)
         };
+        // D28: what a proactive host's agent says about itself
+        if !doc.one_shot && !decoded.reporter_bytes.is_empty() {
+            match regent_sdk::proto::ReporterInfo::parse(&decoded.reporter_bytes) {
+                Ok(reporter) => {
+                    if let Some((report, dropped)) =
+                        AgentReport::from_reporter(&reporter, doc.finished_at)
+                    {
+                        if !dropped.is_empty() {
+                            warn!(host_id = %doc.host_id, ?dropped, "agent labels with invalid keys dropped (D26)");
+                        }
+                        host.agent = Some(report);
+                    }
+                }
+                Err(e) => warn!(error = ?e, "unreadable reporter info, ignored"),
+            }
+        }
         self.couch
             .merge_upsert(DB_STATE, &host_doc_id(&doc.host_id), &host, HostDoc::merge)
             .await?;

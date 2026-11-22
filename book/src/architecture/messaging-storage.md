@@ -25,7 +25,7 @@
 
 | Database | Holds |
 |---|---|
-| `regency_catalog` | sources, inventories, host definitions, expected states |
+| `regency_catalog` | sources, host definitions, expected states, assignments |
 | `regency_orders` | recurring orders |
 | `regency_state` | hosts (existence and latest state), instance statuses, certificate pins |
 | `regency_jobs_YYYYMM` | jobs (lifecycle), one database per month |

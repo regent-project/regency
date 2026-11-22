@@ -3,7 +3,7 @@
 Every service reads its settings from four layers, lowest first:
 
 1. built-in **defaults**;
-2. the **central configuration** — edited in the web UI (**Configuration →
+2. the **central configuration** — edited in the web UI (**Administration →
    Services**), stored in CouchDB, shared by every instance of the service;
 3. the local **file** — `/etc/regency/<service>.toml`
    (`%ProgramData%\regency\<service>.toml` on Windows; `--config` to change);
@@ -25,7 +25,7 @@ identifies it, is never taken from it:
 
 ## Editing the central configuration
 
-**Configuration → Services → Central configuration**: pick a service (for
+**Administration → Services → Central configuration**: pick a service (for
 runners, optionally a pool), write TOML with the same sections as the file,
 **Save**:
 
@@ -45,7 +45,7 @@ external = 2
   all-in-one supervisor start it again with the new configuration. Replicas
   restart one after the other, not all at once.
 - If invalid, the instance keeps running with its current configuration and
-  shows the error in **Configuration → Services**.
+  shows the error in **Administration → Services**.
 - An empty document removes the central configuration.
 
 `[central] enabled = false` in a service's file makes it ignore the central

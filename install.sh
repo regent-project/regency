@@ -34,7 +34,9 @@
 #      credentials go into /etc/regency/all-in-one.env (root:regency, 0640),
 #      used only by `regencyctl init` at start.
 #   4. Starts regency-all-in-one and waits until the web UI answers on port
-#      8080 (port 8443: endpoint for regops agents).
+#      8080 (port 8443: endpoint for regops agents). Hosts can be added at
+#      once (web UI: Hosts > Add host): the runner generated its SSH
+#      key, the endpoint its certificate and CA.
 
 # Everything runs from main(), called on the last line: a truncated download
 # runs nothing.
@@ -584,7 +586,9 @@ summary() {
     else
         echo "  Password:     unchanged (initial one in $SECRETS_DIR/bootstrap-admin)"
     fi
-    echo "  regops agents: https://$host:8443 (built-in CA: /var/lib/regency/tls/ca.pem)"
+    echo "  Add hosts:    http://$host:8080/hosts  (button \"Add host\")"
+    echo "                (over SSH: the runner's key to authorize; regops agents:"
+    echo "                 enrollment token, CA and configuration, endpoint https://$host:8443)"
     echo
     echo "  Logs:         journalctl -u regency-all-in-one -f"
     echo "  Settings:     $ENV_FILE, /etc/regency/<service>.toml"

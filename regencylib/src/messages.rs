@@ -443,6 +443,11 @@ pub enum CommandBody {
     },
     #[serde(rename = "source.refresh")]
     SourceRefresh { source_id: String },
+    /// A Git source was synchronized at `revision` (D28: the head proactive
+    /// hosts using the same repository are compared with). Routed with the
+    /// other `catalog.*` commands to dbwriter.
+    #[serde(rename = "catalog.source_synced")]
+    CatalogSourceSynced(crate::model::SourceHeadDoc),
     #[serde(rename = "user.upsert")]
     UserUpsert(UserDoc),
     #[serde(rename = "user.delete")]
@@ -476,6 +481,7 @@ impl CommandBody {
             CommandBody::CatalogUpsert(_) => "catalog.upsert",
             CommandBody::CatalogDelete { .. } => "catalog.delete",
             CommandBody::SourceRefresh { .. } => "source.refresh",
+            CommandBody::CatalogSourceSynced(_) => "catalog.source_synced",
             CommandBody::UserUpsert(_) => "user.upsert",
             CommandBody::UserDelete { .. } => "user.delete",
             CommandBody::PolicyUpsert(_) => "policy.upsert",

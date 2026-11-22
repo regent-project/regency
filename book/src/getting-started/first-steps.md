@@ -1,45 +1,83 @@
 # First steps in the web UI
 
+Everything below can also come from Git (see
+[Sources](../operations/sources.md)); here it is done in the web UI. Items
+created in the UI belong to an API/frontend source (`ui`, created when
+needed).
+
 ## 1. Add a host
 
-**Configuration → Hosts → New host.** If there is no editable source yet,
-click **Create source "ui"** first: hosts created in the UI belong to it.
+On the **Hosts** page, **Add host** offers two ways, one tab each.
 
-| Field | Example |
-|---|---|
-| Host id | `web-01` (global id of the host) |
-| Endpoint | `10.0.0.5:22` |
-| Inventories | `web` |
-| Labels | `env=prod, team=web` |
-| Connection method | prefilled with an SSH template |
+### Over SSH, from the runners (nothing to install on the host)
 
-The connection method is regent-sdk JSON. Secrets are references only, for
-example an SSH key file that the runner can read:
+At its first start the runner generated its own SSH key. The **Over SSH**
+tab shows its
+public key with a ready command; run it on the host, as the account the
+runner will log in as:
 
-```json
-{
-  "Ssh2": {
-    "AuthMethod": { "Key": { "Username": "ops", "Key": { "SecRef": "/etc/regency/host-secrets/ops_ed25519", "Provider": "files" } } },
-    "HostKey": { "Fingerprints": ["SHA256:…"] }
-  }
-}
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys <<'EOF'
+ssh-ed25519 AAAA… regency-runner-default
+EOF
+chmod 600 ~/.ssh/authorized_keys
 ```
 
-Get the fingerprint with `ssh-keyscan host | ssh-keygen -lf -`. In the
-all-in-one image, mount host credentials into the container (for example
-`/var/lib/regency/host-secrets`) and reference them by path.
+Then fill in the form below it: host id (`web-01`), address (`10.0.0.5`,
+port 22 unless `host:port`), user, and optionally labels (`role=web`: they
+decide which assignments the host gets) and
+the host key fingerprints (required from security level 2:
+`ssh-keyscan 10.0.0.5 | ssh-keygen -lf -`). **Add the host** creates its
+definition (in source `ui`), with the runner's key as its credentials.
 
-## 2. Add an expected state
+**Administration → Host definitions** edits it later, or defines hosts with
+other credentials (regent-sdk JSON, secrets as references only).
 
-Expected states usually come from Git (see [Sources](../operations/sources.md)):
-create a repository with `expected_states/base.yaml`, add it in
-**Configuration → Sources**, and click **Sync now**.
+### With the regops agent
+
+Install [regops](https://github.com/regent-project/regops) on the host,
+then in the **With regops** tab give the host id (regops' `host_id`, by default its
+hostname) and click **Issue a token**. The dialog shows the commands writing
+the endpoint's CA certificate and the token on the host, and the lines to
+put in `/etc/regops/config.toml`; restart regops. The host appears after its
+first pass. Its expected state still comes from its own Git repository (see
+[Proactive hosts](../operations/proactive-hosts.md)).
+
+The endpoint address given to agents is the web UI's host with the
+endpoint's port (8443); set another one in **Settings → Endpoint URL** (for
+example behind a proxy or a DNS name).
+
+## 2. Add an expected state and assign it
+
+1. **States → New expected state**: a name
+   (`base`) and its attributes in regent-sdk YAML, checked as you type:
+
+   ```yaml
+   - Name: motd
+     Privilege: !None
+     Detail: !LineInFile
+       FilePath: /etc/motd
+       State: !Present
+         Create: true
+       Line: !Raw "Managed by regency"
+   ```
+
+2. **Assignments → New assignment**: a name (`base`), the hosts as a label
+   selector (`{role="web"}`, or `{}` for every host; the form shows the
+   hosts it selects as you type) and the expected state `ui/base`, picked
+   from the catalog (so it is created first). More states can be stacked on
+   it, each overriding the previous ones; the **Final expected state** next
+   to the form shows the result.
+
+A host gets every assignment whose selector matches its labels: label a
+host `role=web` and it gets the assignments selecting `role="web"`. A host
+no assignment selects is *unassigned*: nothing runs on it.
 
 ## 3. Assess
 
-Open the host (**Hosts** → `web-01`), choose the expected state, click
+On the assignment's row, or on the host's page (`/hosts/web-01`), click
 **Assess**. The job appears in **Jobs** (`PENDING` → `STARTED` →
-`FINISHED`), the host's dot on the **Map** takes its color, and the host
+`FINISHED`), the host appears on the **Live view** with its colour, and its
 page shows the remediations that would be needed and the outcome history.
 
 **Reach** applies them. Both are recorded; nothing is lost if a service
@@ -47,9 +85,9 @@ restarts meanwhile.
 
 ## 4. Look inside
 
-- **Configuration → Services**: every running instance, its version, health
+- **Administration → Services**: every running instance, its version, health
   and effective configuration (where each value comes from).
-- **Configuration → Security**: the security level of every service.
+- **Administration → Security**: the security level of every service.
 - RabbitMQ's management UI and CouchDB's Fauxton are not exposed by the
   quick start; add their ports to the compose file to explore the queues
   and documents.
