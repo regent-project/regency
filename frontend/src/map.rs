@@ -671,7 +671,11 @@ pub fn Map() -> impl IntoView {
     let session = expect_context::<Session>();
     // every host and the last hour's jobs: the app-wide feeds (crate::feeds)
     let Feeds {
-        hosts, ready, jobs, ..
+        hosts,
+        ready,
+        jobs,
+        flashes,
+        ..
     } = expect_context::<Feeds>();
     let error = RwSignal::new(None::<String>);
     let assignments = RwSignal::new(Vec::<AssignmentEntry>::new());
@@ -888,6 +892,7 @@ pub fn Map() -> impl IntoView {
             hovered.track();
             selected.track();
             rings.track();
+            flashes.track();
             theme.track();
             dirty.store(true, Ordering::Relaxed);
         }
@@ -934,17 +939,20 @@ pub fn Map() -> impl IntoView {
             let view = untrack(view);
             map.with_untracked(|layout| {
                 rings.with_untracked(|rings| {
-                    let frame = Frame {
-                        layout,
-                        rings,
-                        view,
-                        hovered: hovered.as_deref(),
-                        selected: selected.as_deref(),
-                        names,
-                    };
-                    if let Some(ctx) = context(&hosts_canvas) {
-                        canvas::draw_hosts(&ctx, w, h, dpr, &palette, &frame);
-                    }
+                    flashes.with_untracked(|flashes| {
+                        let frame = Frame {
+                            layout,
+                            rings,
+                            flashes,
+                            view,
+                            hovered: hovered.as_deref(),
+                            selected: selected.as_deref(),
+                            names,
+                        };
+                        if let Some(ctx) = context(&hosts_canvas) {
+                            canvas::draw_hosts(&ctx, w, h, dpr, &palette, &frame);
+                        }
+                    })
                 })
             });
         });

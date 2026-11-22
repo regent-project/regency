@@ -129,6 +129,9 @@ pub struct Frame<'a> {
     pub layout: &'a Layout,
     /// Hosts with a job in progress, drawn in the job colour.
     pub rings: &'a Rings,
+    /// Hosts whose job was only seen finished, drawn in the job colour for
+    /// a moment (`pages::Flashes`).
+    pub flashes: &'a crate::pages::Flashes,
     pub view: View,
     pub hovered: Option<&'a str>,
     /// The host shown in the right panel.
@@ -317,7 +320,9 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
     let tiny = DOT * vp.k < 3.0;
     ctx.set_stroke_style_str(&palette.canvas);
     ctx.set_line_width(1.5);
-    let busy = |p: &crate::map::Placed| f.rings.contains_key(&p.host_id);
+    let busy = |p: &crate::map::Placed| {
+        f.rings.contains_key(&p.host_id) || f.flashes.contains_key(&p.host_id)
+    };
     let fills = [
         Tone::Ok,
         Tone::Bad,

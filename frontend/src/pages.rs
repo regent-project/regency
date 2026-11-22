@@ -1,7 +1,7 @@
 //! Pages: login, live hosts, host detail (with its expected state explorer),
 //! live jobs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use futures::future::{AbortHandle, Abortable};
 use leptos::prelude::*;
@@ -930,13 +930,15 @@ pub fn HostPage() -> impl IntoView {
     }
 }
 
-/// Follow WatchJobs (last `since_hours`) into `jobs`.
+/// Follow WatchJobs (last `since_hours`) into `jobs`, and flash the hosts of
+/// jobs only seen finished ([`Flashes`]).
 pub fn watch_jobs(
     since_hours: u32,
     jobs: RwSignal<BTreeMap<String, api::JobSummary>>,
+    flashes: RwSignal<Flashes>,
     error: RwSignal<Option<String>>,
 ) {
-    watch_jobs_of(None, since_hours, jobs, error)
+    follow_jobs(None, since_hours, jobs, Some(flashes), error)
 }
 
 /// Follow WatchJobs with a filter (job id, origin, hosts) into `jobs`.
@@ -944,6 +946,55 @@ pub fn watch_jobs_of(
     filter: Option<api::watch_jobs_request::Filter>,
     since_hours: u32,
     jobs: RwSignal<BTreeMap<String, api::JobSummary>>,
+    error: RwSignal<Option<String>>,
+) {
+    follow_jobs(filter, since_hours, jobs, None, error)
+}
+
+/// Hosts drawn in the job colour for a moment although no job of theirs is
+/// in progress: host id -> until when (ms since the epoch).
+pub type Flashes = HashMap<String, f64>;
+
+/// How long a host whose job was only seen finished stays in the job colour.
+pub const FLASH_MS: f64 = 1_500.0;
+
+/// Jobs that appeared in a batch already finished: their host was never
+/// drawn as running (the job was quick, its PENDING / STARTED updates were
+/// merged by CouchDB's `_changes` or by the backend for a slow client, or
+/// fell in the same batch). Their hosts, to flash. Only jobs new after the
+/// snapshot count; regops passes never have a running state (D7), they do
+/// not flash.
+fn finished_unseen(
+    jobs: &mut BTreeMap<String, api::JobSummary>,
+    upserts: Vec<(api::JobSummary, bool)>,
+) -> Vec<String> {
+    let fresh: Vec<String> = upserts
+        .iter()
+        .filter(|(job, live)| *live && !jobs.contains_key(&job.job_id))
+        .map(|(job, _)| job.job_id.clone())
+        .collect();
+    for (job, _) in upserts {
+        jobs.insert(job.job_id.clone(), job);
+    }
+    let mut hosts: Vec<String> = fresh
+        .iter()
+        .filter_map(|id| jobs.get(id))
+        .filter(|job| !crate::live::is_running(&job.state) && job.origin != ORIGIN_REGOPS)
+        .map(|job| job.host_id.clone())
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+/// `origin` of regops passes (regencylib's `messages::ORIGIN_REGOPS`).
+const ORIGIN_REGOPS: &str = "regops";
+
+fn follow_jobs(
+    filter: Option<api::watch_jobs_request::Filter>,
+    since_hours: u32,
+    jobs: RwSignal<BTreeMap<String, api::JobSummary>>,
+    flashes: Option<RwSignal<Flashes>>,
     error: RwSignal<Option<String>>,
 ) {
     let session = expect_context::<Session>();
@@ -960,21 +1011,27 @@ pub fn watch_jobs_of(
                 return;
             }
         };
+        let mut snapshot_done = false;
         loop {
             let (batch, end) = next_batch(&mut stream).await;
-            let upserts: Vec<_> = batch
-                .into_iter()
-                .filter_map(|message| match message.event? {
-                    job_event::Event::Upsert(job) => Some(job),
-                    _ => None,
-                })
-                .collect();
+            // each upsert, and whether it came after the snapshot
+            let mut upserts = Vec::with_capacity(batch.len());
+            for message in batch {
+                match message.event {
+                    Some(job_event::Event::Upsert(job)) => upserts.push((job, snapshot_done)),
+                    Some(job_event::Event::SnapshotDone(_)) => snapshot_done = true,
+                    None => {}
+                }
+            }
             if !upserts.is_empty() {
-                let _ = jobs.try_update(|map| {
-                    for job in upserts {
-                        map.insert(job.job_id.clone(), job);
-                    }
-                });
+                let hosts = jobs
+                    .try_update(|map| finished_unseen(map, upserts))
+                    .unwrap_or_default();
+                if let Some(flashes) = flashes
+                    && !hosts.is_empty()
+                {
+                    flash(flashes, hosts);
+                }
             }
             match end {
                 None => {}
@@ -989,12 +1046,32 @@ pub fn watch_jobs_of(
     });
 }
 
+/// Draw `hosts` in the job colour for [`FLASH_MS`].
+fn flash(flashes: RwSignal<Flashes>, hosts: Vec<String>) {
+    let until = js_sys::Date::now() + FLASH_MS;
+    let _ = flashes.try_update(|f| {
+        for host in hosts {
+            f.insert(host, until);
+        }
+    });
+    set_timeout(
+        move || {
+            let now = js_sys::Date::now();
+            // only notify when something expired (each flash has its timer)
+            if flashes.with_untracked(|f| f.values().any(|t| *t <= now)) {
+                let _ = flashes.try_update(|f| f.retain(|_, t| *t > now));
+            }
+        },
+        std::time::Duration::from_millis(FLASH_MS as u64 + 20),
+    );
+}
+
 #[component]
 pub fn Jobs() -> impl IntoView {
     let session = expect_context::<Session>();
     let jobs = RwSignal::new(BTreeMap::<String, api::JobSummary>::new());
     let error = RwSignal::new(None::<String>);
-    watch_jobs(24, jobs, error);
+    watch_jobs_of(None, 24, jobs, error);
     let sorted = move || {
         let mut list: Vec<_> = jobs.with(|jobs| jobs.values().cloned().collect());
         list.sort_by_key(|job| std::cmp::Reverse(job.created_at));
@@ -1086,6 +1163,48 @@ pub fn Jobs() -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn job(id: &str, host: &str, state: &str, origin: &str) -> api::JobSummary {
+        api::JobSummary {
+            job_id: id.into(),
+            host_id: host.into(),
+            state: state.into(),
+            origin: origin.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hosts_of_jobs_only_seen_finished_flash() {
+        let mut jobs: BTreeMap<String, api::JobSummary> = [
+            ("seen".to_string(), job("seen", "h1", "STARTED", "c")),
+            ("old".to_string(), job("old", "h2", "FINISHED", "c")),
+        ]
+        .into();
+        let hosts = finished_unseen(
+            &mut jobs,
+            vec![
+                // in the snapshot: never flashes
+                (job("snap", "h0", "FINISHED", "c"), false),
+                // drawn running before: no flash
+                (job("seen", "h1", "FINISHED", "c"), true),
+                // already known finished (resent): no flash
+                (job("old", "h2", "FINISHED", "c"), true),
+                // PENDING and FINISHED in one batch: never drawn running
+                (job("quick", "h3", "PENDING", "c"), true),
+                (job("quick", "h3", "FINISHED", "c"), true),
+                // only seen finished
+                (job("merged", "h4", "FINISHED", "c"), true),
+                // still running: drawn running anyway
+                (job("new", "h5", "STARTED", "c"), true),
+                // regops passes never run visibly
+                (job("pass", "h6", "FINISHED", "regops"), true),
+            ],
+        );
+        assert_eq!(hosts, ["h3", "h4"]);
+        assert_eq!(jobs.len(), 7);
+        assert_eq!(jobs["seen"].state, "FINISHED");
+    }
 
     fn host() -> api::HostSummary {
         api::HostSummary {

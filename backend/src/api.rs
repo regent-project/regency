@@ -272,6 +272,118 @@ impl JobFilter {
     }
 }
 
+/// The jobs a `WatchJobs` stream starts with (and reads again after a lag):
+/// those created since `since` in the current and previous month, jobs in
+/// progress first. Not yet checked against the filter's hosts or Cedar.
+async fn job_snapshot(
+    view: &View,
+    filter: &JobFilter,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Vec<JobDoc> {
+    let mut all = Vec::new();
+    let now = chrono::Utc::now();
+    for month in [month_offset(now, 0), month_offset(now, -1)] {
+        let db = jobs_db(&month);
+        let docs: Vec<JobDoc> = match filter {
+            JobFilter::Job(id) => view
+                .couch
+                .get::<JobDoc>(&db, &job_doc_id(id))
+                .await
+                .ok()
+                .flatten()
+                .map(|s| vec![s.doc])
+                .unwrap_or_default(),
+            JobFilter::Origin(origin) => view
+                .couch
+                .view::<Value, Value>(
+                    &db,
+                    "regency",
+                    "by_origin",
+                    &[
+                        ("startkey", json!([origin, since])),
+                        ("endkey", json!([origin, {}])),
+                        ("include_docs", json!(true)),
+                        ("limit", json!(5000)),
+                    ],
+                )
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|row| row.doc.and_then(|d| serde_json::from_value(d).ok()))
+                .collect(),
+            JobFilter::Hosts(_) => {
+                // jobs in progress first (by_state view): the
+                // capped find below may miss them on a busy
+                // fleet, and the live view (D24) needs them
+                let mut docs: Vec<JobDoc> = Vec::new();
+                for state in ["PENDING", "STARTED", "ABORT_REQUIRED"] {
+                    docs.extend(
+                        view.couch
+                            .view::<Value, Value>(
+                                &db,
+                                "regency",
+                                "by_state",
+                                &[
+                                    ("startkey", json!([state, since])),
+                                    ("endkey", json!([state, {}])),
+                                    ("include_docs", json!(true)),
+                                    ("limit", json!(5000)),
+                                ],
+                            )
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|row| row.doc.and_then(|d| serde_json::from_value(d).ok())),
+                    );
+                }
+                docs.extend(
+                    view.couch
+                        .find::<JobDoc>(
+                            &db,
+                            json!({"type": "job", "created_at": {"$gte": since}}),
+                            5000,
+                            None,
+                            None,
+                        )
+                        .await
+                        .map(|(docs, _)| docs.into_iter().map(|s| s.doc).collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                );
+                docs
+            }
+        };
+        all.extend(docs.into_iter().filter(|doc| doc.created_at >= since));
+    }
+    all
+}
+
+/// Job updates waiting to be sent to one client: the latest update of each
+/// job, in the order jobs first changed (an update replaces the waiting one
+/// in its place).
+#[derive(Default)]
+struct JobQueue {
+    order: std::collections::VecDeque<String>,
+    docs: HashMap<String, JobDoc>,
+}
+
+impl JobQueue {
+    fn push(&mut self, doc: JobDoc) {
+        if !self.docs.contains_key(&doc.job_id) {
+            self.order.push_back(doc.job_id.clone());
+        }
+        self.docs.insert(doc.job_id.clone(), doc);
+    }
+
+    fn pop(&mut self) -> Option<JobDoc> {
+        let id = self.order.pop_front()?;
+        self.docs.remove(&id)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+}
+
 #[tonic::async_trait]
 impl Regency for Api {
     type WatchHostsStream = EventStream<api::HostEvent>;
@@ -459,94 +571,19 @@ impl Regency for Api {
                 let mut changes = view.job_changes.subscribe();
                 let mut authorizer = view.authorizer();
                 let mut cache = DecisionCache::default();
-                // snapshot from the current and previous month
-                let now = chrono::Utc::now();
-                for month in [month_offset(now, 0), month_offset(now, -1)] {
-                    let db = jobs_db(&month);
-                    let docs: Vec<JobDoc> = match &filter {
-                        JobFilter::Job(id) => view
-                            .couch
-                            .get::<JobDoc>(&db, &job_doc_id(id))
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|s| vec![s.doc])
-                            .unwrap_or_default(),
-                        JobFilter::Origin(origin) => view
-                            .couch
-                            .view::<Value, Value>(
-                                &db,
-                                "regency",
-                                "by_origin",
-                                &[
-                                    ("startkey", json!([origin, since])),
-                                    ("endkey", json!([origin, {}])),
-                                    ("include_docs", json!(true)),
-                                    ("limit", json!(5000)),
-                                ],
-                            )
-                            .await
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(|row| row.doc.and_then(|d| serde_json::from_value(d).ok()))
-                            .collect(),
-                        JobFilter::Hosts(_) => {
-                            // jobs in progress first (by_state view): the
-                            // capped find below may miss them on a busy
-                            // fleet, and the live view (D24) needs them
-                            let mut docs: Vec<JobDoc> = Vec::new();
-                            for state in ["PENDING", "STARTED", "ABORT_REQUIRED"] {
-                                docs.extend(
-                                    view.couch
-                                        .view::<Value, Value>(
-                                            &db,
-                                            "regency",
-                                            "by_state",
-                                            &[
-                                                ("startkey", json!([state, since])),
-                                                ("endkey", json!([state, {}])),
-                                                ("include_docs", json!(true)),
-                                                ("limit", json!(5000)),
-                                            ],
-                                        )
-                                        .await
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .filter_map(|row| {
-                                            row.doc.and_then(|d| serde_json::from_value(d).ok())
-                                        }),
-                                );
-                            }
-                            docs.extend(
-                                view.couch
-                                    .find::<JobDoc>(
-                                        &db,
-                                        json!({"type": "job", "created_at": {"$gte": since}}),
-                                        5000,
-                                        None,
-                                        None,
-                                    )
-                                    .await
-                                    .map(|(docs, _)| {
-                                        docs.into_iter().map(|s| s.doc).collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default(),
-                            );
-                            docs
-                        }
-                    };
-                    for doc in docs {
-                        if doc.created_at < since
-                            || !filter.matches(&doc)
-                            || !api.readable(&caller, &mut cache, &authorizer, &doc.host_id)
-                        {
-                            continue;
-                        }
-                        let mut event = api::JobEvent::new();
-                        event.set_upsert(job_summary(&doc));
-                        if tx.send(Ok(event)).await.is_err() {
-                            return;
-                        }
+                let upsert = |doc: &JobDoc| {
+                    let mut event = api::JobEvent::new();
+                    event.set_upsert(job_summary(doc));
+                    event
+                };
+                for doc in job_snapshot(&view, &filter, since).await {
+                    if !filter.matches(&doc)
+                        || !api.readable(&caller, &mut cache, &authorizer, &doc.host_id)
+                    {
+                        continue;
+                    }
+                    if tx.send(Ok(upsert(&doc))).await.is_err() {
+                        return;
                     }
                 }
                 let mut done = api::JobEvent::new();
@@ -554,35 +591,49 @@ impl Regency for Api {
                 if tx.send(Ok(done)).await.is_err() {
                     return;
                 }
+                // Changes are drained from the broadcast at once into
+                // `queue` (latest update per job), and sent as fast as the
+                // client reads: a slow client gets fewer intermediate
+                // states, never lost jobs. Should this task still lag (e.g.
+                // a burst while it reads a snapshot), the recent jobs are
+                // read again, so none is left in an outdated state.
+                let mut queue = JobQueue::default();
                 let mut refresh = tokio::time::interval(Duration::from_secs(30));
                 refresh.tick().await;
                 loop {
-                    let change = tokio::select! {
+                    tokio::select! {
+                        biased;
                         _ = tx.closed() => return,
+                        change = changes.recv() => match change {
+                            Ok(doc) => {
+                                if filter.matches(&doc)
+                                    && api.readable(&caller, &mut cache, &authorizer, &doc.host_id)
+                                {
+                                    queue.push(doc);
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                                warn!(missed, "job updates lagged, reading the recent jobs again");
+                                for doc in job_snapshot(&view, &filter, since).await {
+                                    if filter.matches(&doc)
+                                        && api.readable(&caller, &mut cache, &authorizer, &doc.host_id)
+                                    {
+                                        queue.push(doc);
+                                    }
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Closed) => return,
+                        },
                         _ = refresh.tick() => {
                             authorizer = view.authorizer();
                             cache = DecisionCache::default();
-                            continue;
                         }
-                        change = changes.recv() => change,
-                    };
-                    let doc = match change {
-                        Ok(doc) => doc,
-                        Err(broadcast::error::RecvError::Lagged(missed)) => {
-                            warn!(missed, "slow live-view client, some job updates skipped");
-                            continue;
+                        permit = tx.reserve(), if !queue.is_empty() => {
+                            let Ok(permit) = permit else { return };
+                            if let Some(doc) = queue.pop() {
+                                permit.send(Ok(upsert(&doc)));
+                            }
                         }
-                        Err(broadcast::error::RecvError::Closed) => return,
-                    };
-                    if !filter.matches(&doc)
-                        || !api.readable(&caller, &mut cache, &authorizer, &doc.host_id)
-                    {
-                        continue;
-                    }
-                    let mut event = api::JobEvent::new();
-                    event.set_upsert(job_summary(&doc));
-                    if tx.send(Ok(event)).await.is_err() {
-                        return;
                     }
                 }
             }
@@ -1998,3 +2049,29 @@ trait Pipe: Sized {
 }
 
 impl<T> Pipe for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(id: &str, state: &str) -> JobDoc {
+        serde_json::from_value(json!({
+            "type": "job", "job_id": id, "host_id": "h", "job": "Reach",
+            "origin": "o", "created_at": "2026-11-22T00:00:00Z",
+            "state": state, "states": {},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn job_queue_keeps_the_latest_update_in_first_place() {
+        let mut queue = JobQueue::default();
+        queue.push(job("a", "PENDING"));
+        queue.push(job("b", "PENDING"));
+        queue.push(job("a", "FINISHED"));
+        let a = queue.pop().unwrap();
+        assert_eq!((a.job_id.as_str(), a.state), ("a", JobState::Finished));
+        assert_eq!(queue.pop().unwrap().job_id, "b");
+        assert!(queue.is_empty() && queue.pop().is_none());
+    }
+}

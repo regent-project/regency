@@ -5,13 +5,13 @@
 //! their own streams. A feed that ends (backend restart, network) is
 //! restarted after `RETRY_MS`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use leptos::prelude::*;
 
 use crate::client::api;
-use crate::pages::{host_state, watch_hosts, watch_jobs};
+use crate::pages::{Flashes, host_state, watch_hosts, watch_jobs};
 
 /// Jobs kept: those of the last hour (the chart's longest range), plus any
 /// still in progress.
@@ -24,6 +24,9 @@ pub struct Feeds {
     /// The hosts' snapshot has arrived.
     pub ready: RwSignal<bool>,
     pub jobs: RwSignal<BTreeMap<String, api::JobSummary>>,
+    /// Hosts whose job was only seen finished, drawn in the job colour for
+    /// a moment (`pages::Flashes`).
+    pub flashes: RwSignal<Flashes>,
     /// Why a feed ended; cleared when it restarts.
     pub error: RwSignal<Option<String>>,
 }
@@ -34,6 +37,7 @@ impl Feeds {
             hosts: RwSignal::new(BTreeMap::new()),
             ready: RwSignal::new(false),
             jobs: RwSignal::new(BTreeMap::new()),
+            flashes: RwSignal::new(HashMap::new()),
             error: RwSignal::new(None),
         }
     }
@@ -92,13 +96,14 @@ pub fn FeedsRunner() -> impl IntoView {
             feeds.hosts.set(BTreeMap::new());
             feeds.ready.set(false);
             feeds.jobs.set(BTreeMap::new());
+            feeds.flashes.set(HashMap::new());
             watch_hosts(
                 api::HostSelector::default(),
                 feeds.hosts,
                 feeds.ready,
                 feeds.error,
             );
-            watch_jobs(JOBS_HOURS, feeds.jobs, feeds.error);
+            watch_jobs(JOBS_HOURS, feeds.jobs, feeds.flashes, feeds.error);
         });
     }
 }

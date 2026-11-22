@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -1610,7 +1610,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "dbwriter"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "endpoint"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2292,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "console_error_panic_hook",
  "futures",
@@ -6398,7 +6398,7 @@ dependencies = [
 
 [[package]]
 name = "regency-aio"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6418,7 +6418,7 @@ dependencies = [
 
 [[package]]
 name = "regencyctl"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6437,7 +6437,7 @@ dependencies = [
 
 [[package]]
 name = "regencylib"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "argon2 0.5.3",
  "axum",
@@ -6674,7 +6674,7 @@ dependencies = [
 
 [[package]]
 name = "runner"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6981,7 +6981,7 @@ dependencies = [
 
 [[package]]
 name = "scheduler"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7563,7 +7563,7 @@ dependencies = [
 
 [[package]]
 name = "sourcesync"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "chrono",

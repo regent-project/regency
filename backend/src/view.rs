@@ -96,7 +96,7 @@ impl View {
             authorizer: RwLock::new(Authorizer::new(&[], Some(bootstrap_admin.clone()))),
             bootstrap_admin,
             host_changes: broadcast::channel(4096).0,
-            job_changes: broadcast::channel(4096).0,
+            job_changes: broadcast::channel(16384).0,
         })
     }
 
