@@ -549,10 +549,84 @@ fn suspected_conflicts<'a>(
     warnings
 }
 
+/// Whether an applied attribute (or part of one) is the wanted one, the
+/// wanted one's Tera templates read as patterns: the agent applies its state
+/// rendered (regops renders it on the host, with its own variables), while
+/// the assignment's holds the templates. `{{ expr }}` matches any text, the
+/// same text wherever the same expression appears in the attribute
+/// (`bound`); a `{% … %}` block matches anything.
+fn same_attribute(wanted: &Value, applied: &Value, bound: &mut HashMap<String, String>) -> bool {
+    match (wanted, applied) {
+        (Value::Object(w), Value::Object(a)) => {
+            w.len() == a.len()
+                && w.iter()
+                    .all(|(k, wv)| a.get(k).is_some_and(|av| same_attribute(wv, av, bound)))
+        }
+        (Value::Array(w), Value::Array(a)) => {
+            w.len() == a.len()
+                && w.iter()
+                    .zip(a)
+                    .all(|(wv, av)| same_attribute(wv, av, bound))
+        }
+        (Value::String(w), Value::String(a)) if w.contains("{{") || w.contains("{%") => {
+            template_matches(w, a, bound)
+        }
+        _ => wanted == applied,
+    }
+}
+
+/// `template` (Tera) read as a pattern matches `text`; see [`same_attribute`].
+fn template_matches(template: &str, text: &str, bound: &mut HashMap<String, String>) -> bool {
+    // literal text and placeholders: Some(expression) for {{ }}, None for {% %}
+    let mut pattern = String::from("(?s)^");
+    let mut holes: Vec<Option<String>> = Vec::new();
+    let mut rest = template;
+    loop {
+        let next = [("{{", "}}"), ("{%", "%}")]
+            .into_iter()
+            .filter_map(|(open, close)| rest.find(open).map(|at| (at, open, close)))
+            .min_by_key(|(at, _, _)| *at);
+        let Some((at, open, close)) = next else {
+            pattern.push_str(&regex::escape(rest));
+            break;
+        };
+        let Some(end) = rest[at + 2..].find(close) else {
+            pattern.push_str(&regex::escape(rest));
+            break;
+        };
+        pattern.push_str(&regex::escape(&rest[..at]));
+        pattern.push_str("(.*?)");
+        let inner = rest[at + 2..at + 2 + end].trim_matches(['-', ' ']).trim();
+        holes.push((open == "{{").then(|| inner.split_whitespace().collect::<Vec<_>>().join(" ")));
+        rest = &rest[at + 2 + end + 2..];
+    }
+    pattern.push('$');
+    let Ok(re) = regex::Regex::new(&pattern) else {
+        return template == text;
+    };
+    let Some(found) = re.captures(text) else {
+        return false;
+    };
+    for (i, hole) in holes.iter().enumerate() {
+        let (Some(expression), Some(value)) = (hole, found.get(i + 1)) else {
+            continue;
+        };
+        match bound.get(expression) {
+            Some(known) if known != value.as_str() => return false,
+            Some(_) => {}
+            None => {
+                bound.insert(expression.clone(), value.as_str().to_string());
+            }
+        }
+    }
+    true
+}
+
 /// How a proactive host's applied state (D28, the agent's `ExpectedState`
 /// as serde JSON) differs from its assignment's final state: `None` when
 /// they are the same. Attributes are paired by `Name`, unnamed ones by
-/// content.
+/// content; templates of the final state match their rendered values
+/// ([`same_attribute`]).
 pub fn drift(final_state: &ExpectedState, applied: &Value) -> Option<String> {
     let wanted: Vec<Value> = final_state
         .attributes
@@ -585,13 +659,13 @@ pub fn drift(final_state: &ExpectedState, applied: &Value) -> Option<String> {
             !used[i]
                 && match name(w) {
                     Some(n) => name(g).as_deref() == Some(n.as_str()),
-                    None => name(g).is_none() && g == w,
+                    None => name(g).is_none() && same_attribute(w, g, &mut HashMap::new()),
                 }
         });
         match found {
             Some(i) => {
                 used[i] = true;
-                if got[i] != *w {
+                if !same_attribute(w, &got[i], &mut HashMap::new()) {
                     different.push(label(w));
                 }
             }
@@ -941,5 +1015,28 @@ mod tests {
         );
         assert!(report.contains("1 different (motd)"), "{report}");
         assert!(report.contains("1 not in the assignment (ntp)"), "{report}");
+    }
+
+    #[test]
+    fn rendered_templates_are_no_drift() {
+        let wanted = |file: &str, line: &str| {
+            state(&format!(
+                "Attributes:\n  - Name: motd\n    Privilege: !None\n    Detail: !LineInFile\n      FilePath: \"{file}\"\n      State: !Present\n        Create: true\n      Line: !Raw \"{line}\"\n"
+            ))
+        };
+        let template = wanted(
+            "/srv/{{ host }}/motd",
+            "hello {{host}} {% if x %}x{% endif %}",
+        );
+        let applied = |file: &str, line: &str| serde_json::to_value(wanted(file, line)).unwrap();
+        assert_eq!(
+            drift(&template, &applied("/srv/web-01/motd", "hello web-01 x")),
+            None
+        );
+        // the same variable with two values, a changed literal part
+        assert!(drift(&template, &applied("/srv/web-01/motd", "hello web-02 x")).is_some());
+        assert!(drift(&template, &applied("/etc/web-01/motd", "hello web-01 x")).is_some());
+        assert!(template_matches("a {{ b", "a {{ b", &mut HashMap::new()));
+        assert!(!template_matches("a {{ b", "a c", &mut HashMap::new()));
     }
 }

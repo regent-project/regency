@@ -30,15 +30,19 @@ Ctrl-C stops them all. It runs a fleet-sized setup:
   (`backend/examples/dataset.rs`, also runnable alone: `cargo run -p backend
   --example dataset -- --hosts N`): API source `dataset`, 3000 hosts of 12
   kinds, labels `kind`, `env`, `region`, `role`, `team` (`platform`,
-  `storage` on some), expected states `baseline`, `web`, `db`, `edge` and
-  their assignments (D29, adding up: `baseline` at priority 0 on every host
-  but `bastion`, whose hosts stay unassigned; `web` (web + api), `db`
-  (`storage="db"`), `edge` at 10 on top),
+  `storage` on some), expected states `baseline`, `web`, `db`, `edge`,
+  `ssh-managed` and their assignments (D29, adding up: `baseline` at priority
+  0 on every host but `bastion`, whose hosts stay unassigned; `ssh-managed`
+  at 5 on the passive hosts only, `{kind!="bastion", source!="regops"}`, so
+  never on regops agents; `web` (web + api), `db` (`storage="db"`), `edge`
+  at 10 on top),
   5 recurring orders on those assignments (one disabled), then a first
   Assess of every host against its effective state. Every host is this machine
   (Localhost) with its own files under `/tmp/regency-dev/hosts/<host>/` and
   its own host lock (`/tmp/regency-dev/locks/`); each load rewrites the files
-  with a fixed mix (about 73 % compliant, 24 % drifting); the 90 `legacy`
+  with a fixed mix (about 73 % compliant, 24 % drifting; on about 4 %,
+  `etc/nginx` is read-only, so a Reach cannot fix "hide nginx version" on
+  the web hosts among them); the 90 `legacy`
   hosts are unreachable SSH hosts (error outcomes); `edge` hosts are served
   by the `edge` runners only. The catalog is only rewritten when it changed.
 
@@ -123,8 +127,8 @@ Like `dev/run_homelab`, but with the managed hosts on a machine of their own:
 
 | Machine | Default | Runs |
 |---|---|---|
-| inference | `192.168.1.40` (Endpoint of the inventory, `--inference`) | regency all-in-one, RabbitMQ, CouchDB |
-| managed | `192.168.1.50` (`--managed`, `REGENCY_MANAGED`) | the dataset's hosts: SSH target of inference's runner, regops agents |
+| inference | `10.23.6.40` (Endpoint of the inventory, `--inference`) | regency all-in-one, RabbitMQ, CouchDB |
+| managed | `10.23.6.50` (`--managed`, `REGENCY_MANAGED`) | the dataset's hosts: SSH target of inference's runner, regops agents |
 | this machine | | build, deploy (reg), web browser on `http://<inference>:8080` |
 
 `dev/run_managed` builds and deploys to inference exactly like
@@ -139,9 +143,11 @@ Like `dev/run_homelab`, but with the managed hosts on a machine of their own:
   (hosts' files, locks, agents' configurations, enrollment tokens, their Git
   repository) is under `/tmp/regency-dev/` on "managed". The admin password
   goes over SSH's stdin;
-- starts the regops agents on "managed" through one SSH session (logs there,
-  `/tmp/regency-dev/logs/agents/<host>.log`); Ctrl-C, or the session
-  ending, stops them.
+- starts the regops agents on "managed", detached (logs there,
+  `/tmp/regency-dev/logs/agents/<host>.log`): they keep running after the
+  script exits, without this machine, which only builds, deploys and
+  browses. `--no-agents` stops them (and so does the next run, which
+  restarts them).
 
 Once:
 

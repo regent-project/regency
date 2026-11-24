@@ -1,13 +1,16 @@
 //! regency production frontend (D14): Leptos, client-side rendering, talking
 //! gRPC-Web to backend.
 
+mod admin;
 mod builder;
 mod canvas;
 mod catalog;
 mod client;
 mod config;
+mod cronjobs;
 mod expected;
 mod feeds;
+mod hostdefs;
 mod icons;
 mod jobchart;
 mod labelpicker;
@@ -23,7 +26,7 @@ mod pages;
 mod runs;
 
 use leptos::prelude::*;
-use leptos_router::components::{A, Route, Router, Routes};
+use leptos_router::components::{A, Redirect, Route, Router, Routes};
 use leptos_router::hooks::{use_location, use_query_map};
 use leptos_router::path;
 
@@ -219,10 +222,12 @@ fn App() -> impl IntoView {
                         <NavItem href="/assignments" icon="layers" label="Assignments" />
                         <div class="nav-section">"Activity"</div>
                         <NavItem href="/jobs" icon="clock" label="Jobs" />
+                        <NavItem href="/cronjobs" icon="calendar" label="CronJob" />
                         <div class="nav-section">"Administration"</div>
-                        <NavItem href="/config/hosts" icon="edit" label="Host definitions" />
                         <NavItem href="/config/sources" icon="branch" label="Sources" />
                         <NavItem href="/config/services" icon="box" label="Services" />
+                        <NavItem href="/config/users" icon="users" label="Users" />
+                        <NavItem href="/config/policies" icon="key" label="Policies" />
                         <NavItem href="/config/security" icon="shield" label="Security" />
                         <NavItem href="/config/settings" icon="sliders" label="Settings" />
                     </nav>
@@ -259,14 +264,18 @@ fn App() -> impl IntoView {
                         <Route path=path!("/states") view=catalog::ExpectedStatesConfig />
                         <Route path=path!("/assignments") view=catalog::AssignmentsConfig />
                         <Route path=path!("/jobs") view=pages::Jobs />
-                        <Route path=path!("/config") view=config::HostsConfig />
-                        <Route path=path!("/config/hosts") view=config::HostsConfig />
+                        <Route path=path!("/cronjobs") view=cronjobs::CronJobs />
+                        // host definitions are on the Hosts pages now
+                        <Route path=path!("/config") view=|| view! { <Redirect path="/hosts" /> } />
+                        <Route path=path!("/config/hosts") view=|| view! { <Redirect path="/hosts" /> } />
                         // former addresses (bookmarks)
                         <Route path=path!("/config/inventories") view=catalog::AssignmentsConfig />
                         <Route path=path!("/config/expected-states") view=catalog::ExpectedStatesConfig />
                         <Route path=path!("/config/assignments") view=catalog::AssignmentsConfig />
                         <Route path=path!("/config/sources") view=config::SourcesConfig />
                         <Route path=path!("/config/services") view=config::ServicesConfig />
+                        <Route path=path!("/config/users") view=admin::UsersConfig />
+                        <Route path=path!("/config/policies") view=admin::PoliciesConfig />
                         <Route path=path!("/config/security") view=config::SecurityConfig />
                         <Route path=path!("/config/settings") view=config::SettingsConfig />
                     </Routes>

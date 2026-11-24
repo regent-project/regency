@@ -1492,8 +1492,12 @@ impl Regency for Api {
             let message = request.get_ref();
             let key = message.key().to_string();
             require(&key, "key")?;
-            let value: Value = serde_json::from_str(&message.value_json().to_string())
+            let mut value: Value = serde_json::from_str(&message.value_json().to_string())
                 .map_err(|e| Status::invalid_argument(format!("value_json: {e}")))?;
+            // D13 deny lists: checked and written as the endpoint compares them
+            if let Some(normalized) = regencylib::model::normalize_revocation(&key, &value) {
+                value = normalized.map_err(Status::invalid_argument)?;
+            }
             if key == "retention_months" && value.as_i64().is_none_or(|m| m < 1) {
                 return Err(Status::invalid_argument(
                     "retention_months must be an integer >= 1",
@@ -1925,6 +1929,35 @@ impl Regency for Api {
         .instrument(rpc_span("CreateApiToken"))
         .await
         .pipe(|r| self.done("CreateApiToken", started, r))
+    }
+
+    async fn revoke_api_token(
+        &self,
+        request: Request<api::RevokeApiTokenRequest>,
+    ) -> Result<Response<api::Accepted>, Status> {
+        let started = Instant::now();
+        async {
+            let caller = self.caller(&request).await?;
+            self.allow(&caller, "user.upsert", &Resource::Settings)?;
+            let message = request.get_ref();
+            let account = message.account().to_string();
+            let token_id = message.token_id().to_string();
+            require(&token_id, "token_id")?;
+            let mut user = self
+                .view
+                .user(&account)
+                .ok_or_else(|| Status::not_found("no such account"))?;
+            let before = user.tokens.len();
+            user.tokens.retain(|t| t.token_id != token_id);
+            if user.tokens.len() == before {
+                return Err(Status::not_found("no such token"));
+            }
+            self.upsert_user(&caller, &message.command_id().to_string(), user)
+                .await
+        }
+        .instrument(rpc_span("RevokeApiToken"))
+        .await
+        .pipe(|r| self.done("RevokeApiToken", started, r))
     }
 
     async fn upsert_policy(

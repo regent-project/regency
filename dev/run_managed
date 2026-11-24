@@ -2,9 +2,9 @@
 # Run your local regency build on a three-machine test bench (development
 # only):
 #
-#   - "inference" (default 192.168.1.40): regency, installed as the
+#   - "inference" (default 10.23.6.40): regency, installed as the
 #     all-in-one package (every service, RabbitMQ, CouchDB);
-#   - "managed" (default 192.168.1.50): every simulated managed host of the
+#   - "managed" (default 10.23.6.50): every simulated managed host of the
 #     dataset. Two thirds are passive hosts, reached by inference's runner
 #     over SSH; one third are proactive hosts, each with its own regops agent
 #     running on "managed" and reporting to inference's endpoint;
@@ -27,8 +27,10 @@
 #      (backend/examples/dataset.rs) into inference's regency: passive hosts
 #      at <managed>:22 (host key fingerprints checked by the runner), one
 #      runner pool;
-#   5. run the regops agents on "managed" (logs there, in
-#      /tmp/regency-dev/logs/agents/) until Ctrl-C, which stops them. Until
+#   5. start the regops agents on "managed", detached (logs there, in
+#      /tmp/regency-dev/logs/agents/): they keep running once this script
+#      has exited, without this machine, until `--no-agents` (or the next
+#      run, which restarts them) stops them. Until
 #      regops can take its expected state from regency (D23), they show as
 #      unassigned hosts.
 #
@@ -38,7 +40,7 @@
 #                     [REGENCY_INFERENCE_INVENTORY]
 #                     (default: ../homelab/homelab_inventory.yaml next to regency/)
 #   --inference ADDR  inference's address (default: its Endpoint in the inventory)
-#   --managed ADDR    the managed machine's address (default 192.168.1.50)
+#   --managed ADDR    the managed machine's address (default 10.23.6.50)
 #                     [REGENCY_MANAGED]
 #   --managed-user U  account on "managed" that the managed hosts use: this
 #                     machine logs in as U with your SSH key, so does
@@ -64,7 +66,7 @@
 #   --no-build        deploy the last built package (target/debian/)
 #   --no-deploy       do not build nor deploy (keep what inference runs)
 #   --no-dataset      do not load the dataset
-#   --no-agents       do not start the regops agents (stops those running)
+#   --no-agents       stop the regops agents running on "managed", start none
 #   --wipe            start from scratch: on inference, purge regency,
 #                     RabbitMQ and CouchDB with all their data, configuration
 #                     and secrets (Erlang and the apt repositories stay), then
@@ -88,7 +90,7 @@ usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 inventory="${REGENCY_INFERENCE_INVENTORY:-$root/../homelab/homelab_inventory.yaml}"
 privilege="${REGENCY_INFERENCE_PRIVILEGE:-WithSudoRs}"
-managed="${REGENCY_MANAGED:-192.168.1.50}"
+managed="${REGENCY_MANAGED:-10.23.6.50}"
 managed_user="${REGENCY_MANAGED_USER:-managed}"
 inference=""
 hosts=""
@@ -169,7 +171,6 @@ remote=/tmp/regency-dev
 
 work=$(mktemp -d)
 server=""
-agents_running=0
 
 # m CMD...: run a command on "managed" (one shared SSH connection); the
 # arguments are single-quoted for the remote shell (POSIX, any login shell)
@@ -521,10 +522,6 @@ PY
 
 cleanup() {
   [[ -n $server ]] && kill "$server" 2>/dev/null || true
-  if [[ $agents_running == 1 ]]; then
-    say "stopping the regops agents on $managed"
-    stop_agents
-  fi
   ssh -o ControlPath="$work/ssh-%C" -O exit "$managed_user@$managed" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
@@ -852,41 +849,27 @@ m_sh '
       commit -q -m "dev dataset: the agents'"'"' expected states"
   fi' "$remote" || die "the agents' Git repository on $managed could not be prepared"
 
-# Runs on "managed": starts one regops per configuration, records their pids,
-# and stops them all when its stdin closes (this script exits or dies: the
-# SSH session ends) or when they have all stopped.
+# Runs on "managed": starts one regops per configuration, detached from the
+# SSH session (own session, no terminal), and records their pids. They run
+# without this machine: this machine only deploys and browses.
 launcher='
   root=$1
   pidfile=$root/agents.pids
   mkdir -p "$root/logs/agents"
   configs=("$root"/agents/*/config.toml)
   [ -f "${configs[0]}" ] || { echo "no agent configuration under $root/agents: run without --no-dataset once" >&2; exit 1; }
-  pids=()
   : > "$pidfile"
   for config in "${configs[@]}"; do
     id=$(basename "$(dirname "$config")")
-    "$root/bin/regops" --config-path "$config" run >> "$root/logs/agents/$id.log" 2>&1 < /dev/null &
-    pids+=($!)
+    setsid "$root/bin/regops" --config-path "$config" run >> "$root/logs/agents/$id.log" 2>&1 < /dev/null &
     echo $! >> "$pidfile"
     sleep 0.2   # spreads enrollments and passes
   done
-  echo "${#pids[@]} regops agents running"
-  # (the session is its own process group: this also ends `cat` below)
-  ( alive() { for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && return 0; done; return 1; }
-    while alive; do sleep 5; done
-    echo "every regops agent has stopped (see $root/logs/agents/)"; rm -f "$pidfile"; kill -TERM 0 ) 2>/dev/null &
-  watcher=$!
-  cat > /dev/null   # until the SSH session ends
-  kill "$watcher" 2>/dev/null
-  kill -TERM "${pids[@]}" 2>/dev/null
-  wait "${pids[@]}" 2>/dev/null
-  rm -f "$pidfile"
+  sleep 2
+  alive=0
+  while read -r p; do kill -0 "$p" 2>/dev/null && alive=$((alive + 1)); done < "$pidfile"
+  echo "$alive regops agents running on $(hostname) (pids in $pidfile)"
 '
-say "starting the regops agents on $managed (logs there: $remote/logs/agents/), Ctrl-C to stop them"
-agents_running=1
-# stdin held open by `sleep`: Ctrl-C ends the session, which stops the agents
-exec {keep}< <(exec sleep infinity)
-keeper=$!
-m_sh "$launcher" "$remote" <&"$keep" || true
-kill "$keeper" 2>/dev/null || true
-agents_running=0
+say "starting the regops agents on $managed (logs there: $remote/logs/agents/)"
+m_sh "$launcher" "$remote" || die "the regops agents could not be started"
+say "the agents run on $managed without this machine; stop them: dev/run_managed --no-deploy --no-dataset --no-agents"

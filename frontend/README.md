@@ -34,14 +34,14 @@ Pages:
   coloured by the host's compliance with its effective expected state
   (D23, `pages::host_state`): outdated (checked against an older one) like
   unknown, invalid (assignments in conflict) amber, unassigned dark grey.
-  The graph puts a host in its most specific
-  assignment (the last applied, D29), the areas display in each of them;
+  Both displays show the same groups (`members`): a host in every
+  assignment selecting it (D29), drawn in each;
   a host with a job
   in progress (pending, running or abort requested) is drawn in the job
   colour instead, without animation.
   Cards have Assess/Reach buttons (a plain confirmation: each host runs its
   own effective state; the run then opens in the right panel, followed
-  live through `WatchJobs` on its command id, `src/runs.rs`); an assignment's dialog also offers "Run an
+  live through `WatchJobs` on its command id, `src/runs.rs`; kept in localStorage until its jobs end, `KeptRun`, so a reload or another page does not lose it); an assignment's dialog also offers "Run an
   attribute…", the one-shot dialog (`src/oneshot.rs`: YAML attribute, Assess
   or Reach once on the assignment's hosts, live per-host results and
   outcomes, the last 20 runs remembered by the browser; history only, never
@@ -73,31 +73,45 @@ Pages:
   (`expected::HostStateExplorer`: its assignment and stack of expected
   states, base first, then the attributes tagged with their state and the
   states they override, and the suspected conflicts, from `GetEffectiveState`) in
-  the right panel, with Assess/Reach and a Details button to the host page; clicking empty space
+  the right panel's "Last known state", each attribute coloured with its
+  outcome in the host's last job and showing that job's lines for it when
+  unfolded (`live::LastRun`, from the job's `GetRunLog`, matched by index and
+  name), with Assess/Reach and a Details button to the host page; clicking empty space
   deselects it. The panel shrinks to a thin rail (its › button; click the
   rail to bring it back) and is resized by dragging its edge; the browser
   remembers both (local storage).
   A second display ("Display: areas", also remembered): each group is a
   rectangle holding its hosts in a grid, with its card (same
   counts, Assess/Reach, fold on click) in the top right corner; a host in
-  several assignments is drawn in each of them (no links). In both
+  several assignments is drawn in each of them (no links). A group with
+  proactive and passive hosts splits them, proactive left, passive right
+  (`is_active`; graph: `half_ring_offsets` either side of the card, areas:
+  `split_cells` and `Area::split`, the dashed line). In both
   displays hosts are in name order (they never move when a state changes),
-  and host names zoom with the hosts (size in map units) once readable.
+  and host names zoom with the hosts (size in map units), in full, once
+  readable. Organize (toolbar): cards and hosts are picked (click, Ctrl +
+  click, selection rectangle on empty space: `map::Picks`, `Layout::in_box`)
+  and dragged together where the user wants (`map::Arrangement`: a moved card's position, a moved host's
+  offset from its card, per display, in local storage); Auto-arrange
+  forgets them. Folding / unfolding glides for 200 ms (`map::Motion`, the
+  only canvas animation: frames are drawn only while it lasts).
   Rendering (`src/map.rs`, `src/canvas.rs`), for thousands of hosts: group
   cards are SVG; hosts and links are drawn on a canvas below them (redrawn
   only on change, only what is in view; no animation, so running jobs
   cost nothing between changes). Live streams are applied in
   batches (`pages::next_batch`, 150 ms). Measured with 3000 hosts: what costs
   is pixels, not canvas calls: keep lines ≥ 1 px and tiny dots as squares.
-- **Hosts** (`/hosts`): live table (filter by id, state, `label=value`,
+- **Hosts** (`/hosts`): one page for hosts, observed or defined: live
+  table of the host docs plus the defined hosts that never ran
+  (`src/hostdefs.rs`: state *never run*, labels and assignments computed
+  from the catalog; *Address* and *Defined by* columns) (filter by id, state, `label=value`,
   assignment); `/hosts?state=<state>` shows only the hosts in that
   state (exactly, removable chip), the target of the masthead's fleet counts; host detail (state, assignments, remediations, certificate
-  approval, effective expected state with Assess/Reach now, outcome history,
-  deletion of the host's data).
+  approval, its definitions: view, edit, add, delete (`hostdefs::HostDefinitions`;
+  Git-sourced ones read-only), effective expected state with Assess/Reach
+  now, outcome history, deletion of the host's data).
 - **Jobs** (`/jobs`): live jobs of the last 24 h (abort).
 - **Configuration** (`/config/...`):
-  - *Host definitions*: create, edit and delete host definitions of
-    API/frontend sources (Git-sourced ones are read-only);
   - *Expected states*, *Assignments* (`src/catalog.rs`): the same for the
     other catalog items (D11, D23, D29); expected states as YAML checked
     live through `ConvertAttributes`; an assignment's hosts are a label

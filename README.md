@@ -7,7 +7,7 @@
   [![CI](https://github.com/regent-project/regency/actions/workflows/ci.yml/badge.svg)](https://github.com/regent-project/regency/actions/workflows/ci.yml)
   [![Discord](https://img.shields.io/badge/Discord-Join%20our%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/2gxAW7uzsx)
 
-  <img src="book/src/images/demo.gif" alt="regency, dark theme: 4,950 hosts grouped by assignment; a Reach of the baseline assignment fixes the drifting hosts (red) and is followed live in the run panel (sped up); then one fixed host: its last job log and its expected state, attribute by attribute. Hosts still red afterwards are legacy hosts, unreachable on purpose" width="900" />
+  <img src="book/src/images/demo.gif" alt="regency, dark theme, areas display: 3,680 hosts on a test bench (one machine running regency, another the managed hosts, a third of them regops agents), grouped by assignment; a Reach of the baseline assignment, started from its card, fixes the drifting hosts (red) and is followed live in the run panel until finished (sped up); then a regops agent host, which runners do not reach (it applies its own state), picked on the map: its last known state, each attribute coloured with its outcome in the last pass, and the one not compliant unfolded with the commands that found it. Hosts still red afterwards are regops agents and legacy hosts, unreachable on purpose" width="900" />
 </div>
 
 regency is the fleet-scale control plane of

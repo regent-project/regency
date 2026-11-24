@@ -1,8 +1,9 @@
 //! The "Add a host" dialog of the Hosts page (D25): everything needed to
-//! manage a host right after installation, both ways (one tab each):
-//! - hosts reached by runners over SSH: the runners' public keys (advertised
-//!   in their instance status) to authorize on the host, and a short form
-//!   creating the host definition with the pool's key;
+//! manage a host right after installation (one tab each):
+//! - hosts reached by runners over SSH or SSHOQ: the runners' public keys
+//!   (advertised in their instance status) to authorize on the host, and a
+//!   short form creating the host definition with the pool's key (SSHOQ
+//!   authenticates with the same key, as SSH3 does);
 //! - hosts running regops: an enrollment token for a host id, the endpoint's
 //!   CA certificate and a ready `[Regency]` section (endpoint URL: the
 //!   `endpoint_url` setting, else this page's host and the endpoint's port).
@@ -180,7 +181,7 @@ pub fn regops_config(url: &str, server_name: Option<&str>, host_id: &str) -> Str
     text
 }
 
-/// The SSH host form.
+/// The SSH / SSHOQ host form.
 #[derive(Clone, Debug, Default)]
 pub struct SshHostForm {
     pub host_id: String,
@@ -188,7 +189,17 @@ pub struct SshHostForm {
     pub user: String,
     pub pool: String,
     pub labels: String,
+    /// SSH only: host key fingerprints.
     pub fingerprints: String,
+    /// SSHOQ instead of SSH.
+    pub sshoq: bool,
+    /// SSHOQ only: URL path of the server (empty = regent-sdk's default).
+    pub path: String,
+    /// SSHOQ only: server certificate check, `system` (system roots),
+    /// `known_hosts` (+ the pinned certificates of `known_hosts`) or
+    /// `insecure` (refused by runners from security level 2).
+    pub tls: String,
+    pub known_hosts: String,
 }
 
 impl SshHostForm {
@@ -204,30 +215,55 @@ impl SshHostForm {
             return Err("address: the host's name or IP address".into());
         }
         // a port is added unless given (IPv6 addresses go in brackets)
+        let port = if self.sshoq { 443 } else { 22 };
         let endpoint = if address.parse::<std::net::Ipv6Addr>().is_ok() {
-            format!("[{address}]:22")
+            format!("[{address}]:{port}")
         } else if address.starts_with('[') || address.contains(':') {
             address.to_string()
         } else {
-            format!("{address}:22")
+            format!("{address}:{port}")
         };
         let user = self.user.trim();
         if user.is_empty() {
             return Err("user: the account the runner logs in as".into());
         }
-        let mut ssh = json!({
+        let mut auth = json!({
             "AuthMethod": { "Key": {
                 "Username": user,
                 "Key": { "SecRef": key_path, "Provider": "files" },
             } },
         });
-        let fingerprints = split_list(&self.fingerprints);
-        if let Some(bad) = fingerprints.iter().find(|f| !f.starts_with("SHA256:")) {
-            return Err(format!("host key `{bad}`: write SHA256:… (ssh-keygen -lf)"));
-        }
-        if !fingerprints.is_empty() {
-            ssh["HostKey"] = json!({ "Fingerprints": fingerprints });
-        }
+        let method = if self.sshoq {
+            let path = self.path.trim();
+            if !path.is_empty() {
+                if !path.starts_with('/') {
+                    return Err("URL path: starts with / (e.g. /sshoq-server)".into());
+                }
+                auth["Path"] = json!(path);
+            }
+            match self.tls.as_str() {
+                "" | "system" => {}
+                "insecure" => auth["TlsConfig"] = json!("Insecure"),
+                "known_hosts" => {
+                    let file = self.known_hosts.trim();
+                    if file.is_empty() {
+                        return Err("known_hosts file: its path on the runners".into());
+                    }
+                    auth["TlsConfig"] = json!({ "KnownHostsFile": file });
+                }
+                other => return Err(format!("unknown certificate check `{other}`")),
+            }
+            json!({ "Sshoq": auth })
+        } else {
+            let fingerprints = split_list(&self.fingerprints);
+            if let Some(bad) = fingerprints.iter().find(|f| !f.starts_with("SHA256:")) {
+                return Err(format!("host key `{bad}`: write SHA256:… (ssh-keygen -lf)"));
+            }
+            if !fingerprints.is_empty() {
+                auth["HostKey"] = json!({ "Fingerprints": fingerprints });
+            }
+            json!({ "Ssh2": auth })
+        };
         let labels = parse_pairs(&self.labels)?;
         let own: BTreeMap<String, String> = labels
             .iter()
@@ -241,7 +277,7 @@ impl SshHostForm {
             "builder": {
                 "Id": host_id,
                 "Endpoint": endpoint,
-                "HostConnectionMethod": { "Ssh2": ssh },
+                "HostConnectionMethod": method,
             },
             "labels": labels,
         });
@@ -269,7 +305,7 @@ fn copy(text: &str) {
 }
 
 /// A block of text to paste somewhere, with a Copy button.
-fn snippet(text: String) -> impl IntoView {
+pub(crate) fn snippet(text: String) -> impl IntoView {
     let copied = RwSignal::new(false);
     let to_copy = text.clone();
     view! {
@@ -288,6 +324,7 @@ fn snippet(text: String) -> impl IntoView {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Way {
     Ssh,
+    Sshoq,
     Regops,
 }
 
@@ -382,7 +419,8 @@ pub fn AddHostDialog(on_close: Callback<()>) -> impl IntoView {
         }
     };
     let add_ssh = move || {
-        let form = ssh.get_untracked();
+        let mut form = ssh.get_untracked();
+        form.sshoq = way.get_untracked() == Way::Sshoq;
         let key_path = pools.with_untracked(|p| {
             p.get(&form.pool)
                 .and_then(|keys| keys.first())
@@ -486,42 +524,43 @@ pub fn AddHostDialog(on_close: Callback<()>) -> impl IntoView {
             <h2>"Add a host"</h2>
             <div class="modes" role="tablist">
                 <button type="button" role="tab" class:active=move || way.get() == Way::Ssh
-                    title="regency's runners reach the host over SSH: nothing to install on it"
                     on:click=move |_| way.set(Way::Ssh)>"Over SSH"</button>
+                <button type="button" role="tab" class:active=move || way.get() == Way::Sshoq
+                    on:click=move |_| way.set(Way::Sshoq)>"Over SSHOQ"</button>
                 <button type="button" role="tab" class:active=move || way.get() == Way::Regops
-                    title="The host runs the regops agent, which applies its expected state itself and reports to regency"
-                    on:click=move |_| way.set(Way::Regops)>"With regops"</button>
+                    on:click=move |_| way.set(Way::Regops)>"With Regops"</button>
             </div>
         </div>
-        <p class="muted small">"Over SSH, regency's runners reach the host (nothing to install on it); with regops, the host runs the agent, which applies its expected state itself and reports to regency. A host is checked once an assignment gives it an expected state (Assignments)."</p>
         <Show when=move || error.get().is_some()><p class="error">{move || error.get()}</p></Show>
         {message_view(message)}
 
-        <Show when=move || way.get() == Way::Ssh>
-            <p>"1. Authorize the runners' key on the host, for the account they log in as:"</p>
+        <Show when=move || way.get() != Way::Regops>
+            <h3>"Runners' key"</h3>
             {move || {
                 let pools = pools.get();
                 if pools.values().all(Vec::is_empty) {
-                    return view! { <p class="muted">"No runner has published an SSH key yet. Right after a first start, wait half a minute (this dialog follows the runners). Otherwise: runner setting [runner] ssh_key (the all-in-one sets it); runners started before this version publish it after their next restart."</p> }.into_any();
+                    return view! { <p class="muted">"No runner key yet."</p> }.into_any();
                 }
                 pools.into_iter().filter(|(_, keys)| !keys.is_empty()).map(|(pool, keys)| {
                     let lines = keys.iter().map(|k| k.public_key.clone()).collect::<Vec<_>>().join("\n");
                     let command = format!(
                         "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys <<'EOF'\n{lines}\nEOF\nchmod 600 ~/.ssh/authorized_keys"
                     );
-                    let several = keys.len() > 1;
                     view! {
-                        <h3>{format!("Runner pool {pool}")}</h3>
-                        {several.then(|| view! { <p class="muted small">"Several runners serve this pool: authorize every key."</p> })}
+                        <p class="muted small">{format!("Pool {pool}")}</p>
                         {snippet(command)}
                     }
                 }).collect_view().into_any()
             }}
-            <p>"2. Define the host:"</p>
+            <h3>"Host"</h3>
             <div class="form">
-                {ssh_input("Host id", |f| f.host_id.clone(), |f, v| f.host_id = v, "web-01 (unique in regency)")}
-                {ssh_input("Address", |f| f.address.clone(), |f, v| f.address = v, "10.0.0.5 or web-01.example.com (port 22 unless host:port)")}
-                {ssh_input("User", |f| f.user.clone(), |f, v| f.user = v, "the account whose authorized_keys has the key")}
+                {ssh_input("Host id", |f| f.host_id.clone(), |f, v| f.host_id = v, "web-01")}
+                <label>"Address"
+                    <input prop:value=move || ssh.get().address
+                        placeholder=move || if way.get() == Way::Sshoq { "web-01.example.com (:443)" } else { "10.0.0.5 (:22)" }
+                        on:input=move |ev| { let v = event_target_value(&ev); ssh.update(|f| f.address = v); } />
+                </label>
+                {ssh_input("User", |f| f.user.clone(), |f, v| f.user = v, "ops")}
                 <label>"Runner pool"
                     <select on:change=move |ev| { let v = event_target_value(&ev); ssh.update(|f| f.pool = v); }>
                         <For each=pool_names key=|p| p.clone() let:pool>
@@ -532,36 +571,45 @@ pub fn AddHostDialog(on_close: Callback<()>) -> impl IntoView {
                         </For>
                     </select>
                 </label>
-                {ssh_input("Labels (they decide its assignments)", |f| f.labels.clone(), |f, v| f.labels = v, "env=prod, role=web")}
-                {ssh_input("Host key fingerprints (required from security level 2)", |f| f.fingerprints.clone(), |f, v| f.fingerprints = v, "SHA256:… (ssh-keyscan HOST | ssh-keygen -lf -)")}
+                {ssh_input("Labels", |f| f.labels.clone(), |f, v| f.labels = v, "env=prod, role=web")}
+                <Show when=move || way.get() == Way::Ssh>
+                    {ssh_input("Host key fingerprints", |f| f.fingerprints.clone(), |f, v| f.fingerprints = v, "SHA256:…")}
+                </Show>
+                <Show when=move || way.get() == Way::Sshoq>
+                    {ssh_input("URL path", |f| f.path.clone(), |f, v| f.path = v, "/sshoq-server")}
+                    <label>"Server certificate"
+                        <select on:change=move |ev| { let v = event_target_value(&ev); ssh.update(|f| f.tls = v); }>
+                            <option value="system" selected=move || ssh.with(|f| f.tls.is_empty() || f.tls == "system")>"System CAs"</option>
+                            <option value="known_hosts" selected=move || ssh.with(|f| f.tls == "known_hosts")>"known_hosts file"</option>
+                            <option value="insecure" selected=move || ssh.with(|f| f.tls == "insecure")>"Not verified"</option>
+                        </select>
+                    </label>
+                    <Show when=move || ssh.with(|f| f.tls == "known_hosts")>
+                        {ssh_input("known_hosts file", |f| f.known_hosts.clone(), |f, v| f.known_hosts = v, "/etc/regency/sshoq_known_hosts")}
+                    </Show>
+                </Show>
                 <div class="toolbar">
                     <button class="primary" disabled=move || pools.with(|p| p.values().all(Vec::is_empty))
                         on:click=move |_| add_ssh()>"Add the host"</button>
                 </div>
             </div>
             {move || created.get().map(|host| view! {
-                <p class="notice">"Host " <a href=format!("/hosts/{host}")>{host.clone()}</a>
-                    " defined. Give it an expected state with an assignment ("
-                    <a href="/assignments">"Assignments"</a>"), then Assess it from its page. It appears in this table after its first job."</p>
+                <p class="notice">"Added: " <a href=format!("/hosts/{host}")>{host.clone()}</a></p>
             })}
         </Show>
 
         <Show when=move || way.get() == Way::Regops>
             {move || match endpoint.get() {
-                None => view! { <p class="muted">"No endpoint has reported yet: right after a first start, wait half a minute (this dialog follows the services). regops agents report to the endpoint."</p> }.into_any(),
-                Some(_) => view! {
-                    <p>"Endpoint for agents: " <code>{move || url.get()}</code>
-                        {move || setting_url.with(String::is_empty).then(|| view! { " " <span class="muted small">"(this page's address; set another in Settings → Endpoint URL)"</span> })}
-                        ". The host must reach it."</p>
-                }.into_any(),
+                None => view! { <p class="muted">"No endpoint yet."</p> }.into_any(),
+                Some(_) => view! { <p>"Endpoint: " <code>{move || url.get()}</code></p> }.into_any(),
             }}
-            <p>"1. Install regops on the host (packages: github.com/regent-project/regops/releases)."</p>
-            <p>"2. Issue an enrollment token for the host (single host, short-lived; regops exchanges it for its certificate at its first connection):"</p>
+            <p>"Install: " <a href="https://github.com/regent-project/regops/releases" target="_blank">"regops releases"</a></p>
+            <h3>"Enrollment token"</h3>
             <div class="form">
-                <label>"Host id (regops' host_id, by default the machine's hostname)"
+                <label>"Host id"
                     <input placeholder="web-01" prop:value=move || agent_id.get() on:input=move |ev| agent_id.set(event_target_value(&ev)) />
                 </label>
-                <label>"Valid for (hours, at most 168)"
+                <label>"Validity (hours)"
                     <input type="number" min="1" max="168" prop:value=move || ttl_hours.get() on:input=move |ev| ttl_hours.set(event_target_value(&ev)) />
                 </label>
                 <div class="toolbar">
@@ -575,11 +623,12 @@ pub fn AddHostDialog(on_close: Callback<()>) -> impl IntoView {
                 };
                 let config = regops_config(&url.get(), server_name.get().as_deref(), &host_id);
                 view! {
-                    <p>{format!("3. On {host_id}, write the CA and the token (valid until {}):", format_ms(expires))}</p>
+                    <h3>{format!("On {host_id}")}</h3>
+                    <p class="muted small">{format!("Token valid until {}", format_ms(expires))}</p>
                     {snippet(commands)}
-                    <p>"4. In /etc/regops/config.toml (its expected state still comes from its own Git repository, [Git]):"</p>
+                    <h3>"/etc/regops/config.toml"</h3>
                     {snippet(config)}
-                    <p>"5. " <code>"sudo systemctl restart regops"</code> ": the host appears after its first pass, with its outcomes and live logs."</p>
+                    {snippet("sudo systemctl restart regops".to_string())}
                 }
             })}
         </Show>
@@ -686,6 +735,7 @@ mod tests {
             pool: "dmz".into(),
             labels: "env=prod".into(),
             fingerprints: "SHA256:abc".into(),
+            ..Default::default()
         };
         let item = form
             .to_item("ui", "/var/lib/regency/secrets/runner-ssh-key")
@@ -733,6 +783,68 @@ mod tests {
         assert!(
             SshHostForm {
                 user: String::new(),
+                ..form
+            }
+            .to_item("ui", "/k")
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sshoq_host_definition() {
+        let form = SshHostForm {
+            host_id: "web-01".into(),
+            address: "web-01.example.com".into(),
+            user: "ops".into(),
+            pool: "default".into(),
+            fingerprints: "ignored".into(),
+            sshoq: true,
+            ..Default::default()
+        };
+        let item = form.to_item("ui", "/k").unwrap();
+        assert_eq!(item["builder"]["Endpoint"], "web-01.example.com:443");
+        let method = &item["builder"]["HostConnectionMethod"];
+        assert!(method.get("Ssh2").is_none());
+        assert_eq!(
+            method["Sshoq"],
+            json!({ "AuthMethod": { "Key": { "Username": "ops",
+                "Key": { "SecRef": "/k", "Provider": "files" } } } })
+        );
+        let pinned = SshHostForm {
+            path: "/ssh3".into(),
+            tls: "known_hosts".into(),
+            known_hosts: "/etc/regency/kh".into(),
+            ..form.clone()
+        }
+        .to_item("ui", "/k")
+        .unwrap();
+        let sshoq = &pinned["builder"]["HostConnectionMethod"]["Sshoq"];
+        assert_eq!(sshoq["Path"], "/ssh3");
+        assert_eq!(
+            sshoq["TlsConfig"],
+            json!({ "KnownHostsFile": "/etc/regency/kh" })
+        );
+        let insecure = SshHostForm {
+            tls: "insecure".into(),
+            ..form.clone()
+        }
+        .to_item("ui", "/k")
+        .unwrap();
+        assert_eq!(
+            insecure["builder"]["HostConnectionMethod"]["Sshoq"]["TlsConfig"],
+            "Insecure"
+        );
+        assert!(
+            SshHostForm {
+                tls: "known_hosts".into(),
+                ..form.clone()
+            }
+            .to_item("ui", "/k")
+            .is_err()
+        );
+        assert!(
+            SshHostForm {
+                path: "ssh3".into(),
                 ..form
             }
             .to_item("ui", "/k")

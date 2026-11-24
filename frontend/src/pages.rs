@@ -26,7 +26,8 @@ pub fn spawn_scoped(task: impl std::future::Future<Output = ()> + 'static) {
 /// What a host's colour means (D23): its compliance against its effective
 /// expected state, or why there is none to trust: `unassigned` (no
 /// assignment), `invalid` (assignments that cannot be composed),
-/// `outdated` (checked against an older effective state).
+/// `outdated` (checked against an older effective state). Defined hosts
+/// without outcome have compliance `never_run` (`hostdefs::never_run_hosts`).
 pub fn host_state(host: &api::HostSummary) -> &str {
     // D28: a proactive host checks its own state: its colour is its last
     // pass's, assigned or not
@@ -333,14 +334,49 @@ pub fn watch_hosts(
 
 #[component]
 pub fn Hosts() -> impl IntoView {
-    // every host: the app-wide feed (crate::feeds)
+    // every host: the app-wide feed (crate::feeds) ...
     let crate::feeds::Feeds {
-        hosts,
+        hosts: live_hosts,
         ready,
         error,
         ..
     } = expect_context::<crate::feeds::Feeds>();
     let session = expect_context::<Session>();
+    // ... plus the defined ones that never ran (no host doc yet): one page
+    // for hosts, observed or defined (host definitions: `crate::hostdefs`)
+    let hostdefs = RwSignal::new(Vec::<crate::config::Entry>::new());
+    let assignment_docs = RwSignal::new(Vec::<crate::config::Entry>::new());
+    let reload_catalog = move || {
+        crate::config::load_catalog_with(session, "hostdef", hostdefs, RwSignal::new(None));
+        crate::config::load_catalog_with(
+            session,
+            "assignment",
+            assignment_docs,
+            RwSignal::new(None),
+        );
+    };
+    reload_catalog();
+    // the catalog has no live feed: refreshed while the page is open
+    let refresh = set_interval_with_handle(reload_catalog, std::time::Duration::from_secs(30)).ok();
+    on_cleanup(move || {
+        if let Some(handle) = refresh {
+            handle.clear();
+        }
+    });
+    let hosts = Memo::new(move |_| {
+        live_hosts.with(|live| {
+            let mut all = live.clone();
+            let extra = hostdefs.with(|defs| {
+                assignment_docs.with(|a| crate::hostdefs::never_run_hosts(defs, a, live))
+            });
+            for host in extra {
+                all.insert(host.host_id.clone(), host);
+            }
+            all
+        })
+    });
+    let definitions =
+        Memo::new(move |_| hostdefs.with(|d| crate::hostdefs::definitions_by_host(d)));
     // D25: the "Add a host" dialog
     let adding = RwSignal::new(false);
 
@@ -370,8 +406,6 @@ pub fn Hosts() -> impl IntoView {
         })
     });
     // the sources defining each host, for the built-in `source` label
-    let hostdefs = RwSignal::new(Vec::<crate::config::Entry>::new());
-    crate::config::load_catalog_with(session, "hostdef", hostdefs, RwSignal::new(None));
     let sources = Memo::new(move |_| {
         hostdefs.with(|defs| {
             let mut sources: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -550,6 +584,10 @@ pub fn Hosts() -> impl IntoView {
             } else {
                 format!("{} hosts, live", hosts.with(|h| h.len()))
             }}</span>
+            <span class="muted">{move || {
+                let never = hosts.with(|h| h.values().filter(|h| h.compliance == "never_run").count());
+                if never == 0 { String::new() } else { format!("({never} defined, never run)") }
+            }}</span>
             <Show when=filtering>
                 <button class="small" on:click=clear.clone()>"Clear filters"</button>
             </Show>
@@ -558,9 +596,20 @@ pub fn Hosts() -> impl IntoView {
             <p class="error">{move || error.get()}</p>
         </Show>
         <table>
-            <thead><tr><th>"Host"</th><th>"State"</th><th>"Last outcome"</th><th>"Last seen"</th><th>"Labels"</th><th>"Assignments"</th></tr></thead>
+            <thead><tr><th>"Host"</th><th>"State"</th><th>"Address"</th><th>"Defined by"</th><th>"Last outcome"</th><th>"Last seen"</th><th>"Labels"</th><th>"Assignments"</th></tr></thead>
             <tbody>
-                <For each=visible key=|h| (h.host_id.clone(), host_state(h).to_string(), h.state_at, h.last_seen, h.labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>(), h.assignments.clone()) let:host>
+                <For each=move || {
+                    let defs = definitions.get();
+                    visible().into_iter().map(|h| {
+                        let def = defs.get(&h.host_id).cloned().unwrap_or_default();
+                        (h, def)
+                    }).collect::<Vec<_>>()
+                } key=|(h, def)| (h.host_id.clone(), host_state(h).to_string(), h.state_at, h.last_seen, h.labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>(), h.assignments.clone(), h.conflicting, def.clone()) let:row>
+                    {
+                    let (host, (def_sources, addresses)) = row;
+                    let agent = (!host.agent.is_empty()).then(|| host.agent.clone());
+                    let undefined = def_sources.is_empty() && agent.is_none();
+                    view! {
                     <tr>
                         <td><a href=format!("/hosts/{}", host.host_id)>{host.host_id.clone()}</a>
                             {host.conflicting.then(|| view! { " " <span class="badge error">"conflicting definitions"</span> })}
@@ -568,11 +617,18 @@ pub fn Hosts() -> impl IntoView {
                         </td>
                         <td>{badge(host_state(&host).to_string())}
                             {(!host.error.is_empty()).then(|| view! { <div class="muted">{host.error.clone()}</div> })}</td>
+                        <td>{addresses.join(", ")}</td>
+                        <td>{def_sources.join(", ")}
+                            {agent.map(|a| view! { " " <span class="badge" title="Reports by itself (proactive host)">{a}</span> })}
+                            {undefined.then(|| view! { <span class="muted" title="Outcomes only: no definition tells runners how to reach it">"—"</span> })}
+                        </td>
                         <td><span class="ts">{format_ms(host.state_at)}</span></td>
                         <td><span class="ts">{format_ms(host.last_seen)}</span></td>
                         <td>{host.labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")}</td>
                         <td>{host.assignments.join(", ")}</td>
                     </tr>
+                    }
+                    }
                 </For>
             </tbody>
         </table>
@@ -824,7 +880,7 @@ pub fn HostPage() -> impl IntoView {
     view! {
         <h1>{host_id.clone()}</h1>
         <Show when=move || ready.get() && summary.with(Option::is_none)>
-            <p class="muted">"No outcome yet for this host: it appears on the map and in the tables after its first job."</p>
+            <p class="muted">"No outcome yet for this host: it appears on the map after its first job."</p>
         </Show>
         <Show when=move || error.get().is_some()>
             <p class="error">{move || error.get()}</p>
@@ -854,6 +910,7 @@ pub fn HostPage() -> impl IntoView {
                 <pre>{serde_json::from_str::<serde_json::Value>(&host.items_json).and_then(|v| serde_json::to_string_pretty(&v)).unwrap_or_default()}</pre>
             }
         })}
+        <crate::hostdefs::HostDefinitions host_id=host_id.clone() />
         <h2>"Live"</h2>
         <crate::live::HostLive running=running />
         <h2>"Effective expected state"</h2>

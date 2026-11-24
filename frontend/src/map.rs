@@ -11,7 +11,10 @@
 //! in progress (PENDING, STARTED or ABORT_REQUIRED) is drawn in the job
 //! colour, without animation (redrawing rings every frame cost too much at
 //! scale). Zoom with the wheel,
-//! pan by dragging, click a card to fold/unfold its hosts.
+//! pan by dragging, click a card to fold/unfold its hosts (positions glide
+//! for 200 ms, [`Motion`]). Organize: dragging a card or a host moves it,
+//! kept by the browser per display ([`Arrangement`]); Auto-arrange goes
+//! back to the automatic layout.
 //!
 //! Shown as "Live view". The legend is a layer on top of the map; one panel,
 //! on the right: groups and the selected host (the fleet counts and the
@@ -36,10 +39,10 @@ use crate::expected::{
     AssignmentEntry, GroupTarget, HostStateExplorer, describe_selector, job_label, load_assignments,
 };
 use crate::feeds::Feeds;
-use crate::live::{HostLive, HostTip, RunLogView, running_jobs};
+use crate::live::{HostLive, HostTip, running_jobs};
 use crate::oneshot::OneShotDialog;
 use crate::pages::{assignments_line, badge, host_state};
-use crate::runs::{ActiveRun, RunPanel, RunStatus};
+use crate::runs::{ActiveRun, KeptRun, RunPanel, RunStatus, watch_run_over};
 use crate::{Session, Theme};
 
 pub const DOT: f64 = 7.0;
@@ -55,6 +58,9 @@ const GAP: f64 = 70.0;
 /// between two areas.
 const CELL: f64 = 24.0;
 const AREA_PAD: f64 = 16.0;
+/// Graph display, a group with proactive and passive hosts: each half is
+/// pushed this far from the card's vertical axis (a gap twice as wide).
+const SPLIT: f64 = 36.0;
 const AREA_GAP: f64 = 40.0;
 
 fn is_ok(state: &str) -> bool {
@@ -63,6 +69,17 @@ fn is_ok(state: &str) -> bool {
 
 fn is_bad(state: &str) -> bool {
     matches!(state, "not_compliant" | "reach_failed" | "error")
+}
+
+/// A host state as the map names it: a Reach's result reads as the
+/// compliance it left (`reach_success` → `compliant`, `reach_failed` →
+/// `not_compliant`); the host's details keep the Reach result.
+pub fn map_state(state: &str) -> &str {
+    match state {
+        "reach_success" => "compliant",
+        "reach_failed" => "not_compliant",
+        other => other,
+    }
 }
 
 /// How the map shows its groups.
@@ -210,6 +227,8 @@ pub struct Placed {
     /// Center of its group (the end of its link).
     pub gx: f64,
     pub gy: f64,
+    /// Index of its group in the layout.
+    pub group: usize,
 }
 
 #[derive(Clone, PartialEq)]
@@ -237,6 +256,9 @@ pub struct Area {
     pub w: f64,
     pub h: f64,
     pub folded: bool,
+    /// A group with proactive and passive hosts: x of the line between its
+    /// two columns, from `x`.
+    pub split: Option<f64>,
 }
 
 #[derive(Clone, PartialEq, Default)]
@@ -318,6 +340,7 @@ impl Layout {
             y,
             gx,
             gy,
+            group,
         });
     }
 
@@ -357,6 +380,70 @@ fn card_radius() -> f64 {
     (CARD_W * CARD_W + CARD_H * CARD_H).sqrt() / 2.0 + 10.0
 }
 
+/// A proactive host (an agent reports for it, D28), else passive (reached
+/// by runners).
+fn is_active(host: &api::HostSummary) -> bool {
+    !host.agent.is_empty()
+}
+
+/// Positions of `n` hosts on concentric half rings right of the card
+/// (mirrored when `left`), pushed `SPLIT` away from its vertical axis, and
+/// the radius of the outer ring.
+fn half_ring_offsets(n: usize, left: bool) -> (Vec<(f64, f64)>, f64) {
+    let mut out = Vec::with_capacity(n);
+    let mut radius = FIRST_RING;
+    let mut outer = FIRST_RING;
+    let mut ring = 0usize;
+    while out.len() < n {
+        let capacity = ((std::f64::consts::PI * radius) / RING_SPACING).floor() as usize;
+        let take = capacity.min(n - out.len());
+        // rings alternate their start angle so dots do not line up radially
+        let shift = if ring.is_multiple_of(2) { 0.35 } else { 0.65 };
+        for k in 0..take {
+            let a = -std::f64::consts::FRAC_PI_2
+                + (k as f64 + shift) / take as f64 * std::f64::consts::PI;
+            let x = SPLIT + radius * a.cos();
+            out.push((if left { -x } else { x }, radius * a.sin()));
+        }
+        outer = radius;
+        radius += RING_SPACING;
+        ring += 1;
+    }
+    (out, outer)
+}
+
+/// Graph display: the offset of every host of an unfolded group from its
+/// card (in `hosts`' order) and the group's radius. Proactive hosts on the
+/// left, passive ones on the right, when it has both (like ∞); else full
+/// rings.
+fn graph_offsets(hosts: &[&api::HostSummary]) -> (Vec<(f64, f64)>, f64) {
+    let active = hosts.iter().filter(|h| is_active(h)).count();
+    if active == 0 || active == hosts.len() {
+        let (offsets, outer) = ring_offsets(hosts.len());
+        let radius = if offsets.is_empty() {
+            card_radius()
+        } else {
+            outer + DOT + 24.0
+        };
+        return (offsets, radius);
+    }
+    let (left, l_outer) = half_ring_offsets(active, true);
+    let (right, r_outer) = half_ring_offsets(hosts.len() - active, false);
+    let (mut left, mut right) = (left.into_iter(), right.into_iter());
+    let offsets = hosts
+        .iter()
+        .map(|h| {
+            if is_active(h) {
+                left.next()
+            } else {
+                right.next()
+            }
+            .expect("one offset per host")
+        })
+        .collect();
+    (offsets, l_outer.max(r_outer) + SPLIT + DOT + 24.0)
+}
+
 /// A group before placement: its hosts, worst first.
 struct Members<'a> {
     name: String,
@@ -373,13 +460,12 @@ impl Members<'_> {
     }
 }
 
-/// The groups of `hosts`. A host in several assignments belongs to its last
-/// one only (the most specific, D29), unless `every_group`. `assignments`:
-/// selector of each assignment (D23), for its Assess / Reach.
+/// The groups of `hosts`, the same in both displays: one per assignment, a
+/// host in every assignment selecting it (D29), drawn in each.
+/// `assignments`: selector of each assignment (D23), for its Assess / Reach.
 fn members<'a>(
     hosts: &'a BTreeMap<String, api::HostSummary>,
     collapsed: &BTreeSet<String>,
-    every_group: bool,
     assignments: &BTreeMap<String, api::HostSelector>,
 ) -> Vec<Members<'a>> {
     let mut members: BTreeMap<String, (Option<GroupTarget>, Vec<&api::HostSummary>)> =
@@ -388,12 +474,8 @@ fn members<'a>(
         let groups: Vec<(String, Option<GroupTarget>)> = if host.assignments.is_empty() {
             vec![("(unassigned)".to_string(), None)]
         } else {
-            // graph: one group per host, its most specific assignment (the
-            // last applied); areas: every assignment
             host.assignments
                 .iter()
-                .rev()
-                .take(if every_group { usize::MAX } else { 1 })
                 .map(|reference| {
                     let target = assignments.get(reference).map(|selector| {
                         GroupTarget::Assignment(reference.clone(), selector.clone())
@@ -466,20 +548,346 @@ fn layout(
     collapsed: &BTreeSet<String>,
     assignments: &BTreeMap<String, api::HostSelector>,
 ) -> Layout {
-    let groups = |every| members(hosts, collapsed, every, assignments);
+    let groups = members(hosts, collapsed, assignments);
     let mut layout = match display {
-        // name order in both displays: a host changing state stays where it
-        // is
-        Display::Graph => graph_layout(groups(false)),
-        Display::Areas => areas_layout(groups(true)),
+        // same groups and name order in both displays (a host changing
+        // state stays where it is); only the shape differs
+        Display::Graph => graph_layout(groups),
+        Display::Areas => areas_layout(groups),
     };
     if layout.groups.is_empty() {
         layout.bounds = (-200.0, -200.0, 200.0, 200.0);
     }
-    // graph, hosts in several assignments: no links to the other ones
-    // (every host would link to the generic ones, e.g. a baseline on every
-    // host); areas draw them in each
     layout
+}
+
+/// What the user moved on the map (Organize), per display, kept by the
+/// browser: a moved group's card center, and a moved host's offset from
+/// its group's card center (so it follows its group). Everything else stays
+/// in the automatic layout; "Auto-arrange" forgets it all.
+#[derive(Clone, Default, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+struct Arrangement {
+    #[serde(default)]
+    groups: BTreeMap<String, (f64, f64)>,
+    /// group name -> host id -> offset
+    #[serde(default)]
+    hosts: BTreeMap<String, BTreeMap<String, (f64, f64)>>,
+}
+
+impl Arrangement {
+    fn key(display: Display) -> String {
+        format!("regency.map.arrangement.{}", display.name())
+    }
+
+    fn saved(display: Display) -> Self {
+        crate::client::storage()
+            .and_then(|s| s.get_item(&Self::key(display)).ok().flatten())
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, display: Display) {
+        let Some(storage) = crate::client::storage() else {
+            return;
+        };
+        let key = Self::key(display);
+        if self.is_empty() {
+            let _ = storage.remove_item(&key);
+        } else if let Ok(json) = serde_json::to_string(self) {
+            let _ = storage.set_item(&key, &json);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.groups.is_empty() && self.hosts.is_empty()
+    }
+}
+
+/// Move the groups and hosts of `layout` where the user put them; areas
+/// grow to hold their moved hosts.
+fn arrange(layout: &mut Layout, arrangement: &Arrangement) {
+    // nothing on the map yet (loading): its default bounds stay
+    if arrangement.is_empty() || layout.groups.is_empty() {
+        return;
+    }
+    let mut shifts = vec![(0.0, 0.0); layout.groups.len()];
+    for (group, shift) in layout.groups.iter_mut().zip(&mut shifts) {
+        if let Some(&(x, y)) = arrangement.groups.get(&group.name) {
+            *shift = (x - group.x, y - group.y);
+            group.x = x;
+            group.y = y;
+            if let Some(area) = group.area.as_mut() {
+                area.x += shift.0;
+                area.y += shift.1;
+            }
+        }
+    }
+    for p in &mut layout.hosts {
+        let group = &mut layout.groups[p.group];
+        let (dx, dy) = shifts[p.group];
+        match arrangement
+            .hosts
+            .get(&group.name)
+            .and_then(|hosts| hosts.get(&p.host_id))
+        {
+            Some(&(ox, oy)) => (p.x, p.y) = (group.x + ox, group.y + oy),
+            None => (p.x, p.y) = (p.x + dx, p.y + dy),
+        }
+        (p.gx, p.gy) = (group.x, group.y);
+        if let Some(area) = group.area.as_mut() {
+            let m = CELL / 2.0;
+            let (x1, y1) = (
+                (area.x + area.w).max(p.x + m),
+                (area.y + area.h).max(p.y + m),
+            );
+            let line = area.split.map(|s| area.x + s);
+            area.x = area.x.min(p.x - m);
+            area.y = area.y.min(p.y - m);
+            area.split = line.map(|l| l - area.x);
+            area.w = x1 - area.x;
+            area.h = y1 - area.y;
+        }
+    }
+    layout.areas = layout.groups.iter().filter_map(|g| g.area).collect();
+    layout.bounds = Layout::empty().bounds;
+    for i in 0..layout.groups.len() {
+        let g = &layout.groups[i];
+        let (x0, y0, x1, y1) = match g.area {
+            Some(a) => (a.x, a.y, a.x + a.w, a.y + a.h),
+            None => (
+                g.x - g.radius,
+                g.y - g.radius,
+                g.x + g.radius,
+                g.y + g.radius,
+            ),
+        };
+        layout.grow(x0, y0, x1, y1);
+    }
+    for i in 0..layout.hosts.len() {
+        let (x, y) = (layout.hosts[i].x, layout.hosts[i].y);
+        layout.grow(x - DOT, y - DOT, x + DOT, y + DOT);
+    }
+}
+
+/// Something picked on the map (Organize): a group (by name) or a host in
+/// one of its groups. Picked things are dragged together.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Grab {
+    Group(String),
+    Host { group: String, host: String },
+}
+
+type Picks = BTreeSet<Grab>;
+
+impl Layout {
+    fn group_named(&self, name: &str) -> Option<(usize, &Group)> {
+        self.groups.iter().enumerate().find(|(_, g)| g.name == name)
+    }
+
+    /// Index in `hosts` of host `host` drawn in group `group`.
+    fn placed_in(&self, group: &str, host: &str) -> Option<usize> {
+        let (index, _) = self.group_named(group)?;
+        self.of_host
+            .get(host)?
+            .iter()
+            .find(|(g, _)| *g == index)
+            .and_then(|(_, i)| *i)
+    }
+
+    /// What `picks` moves: indices of the groups, and of the hosts moved on
+    /// their own (a host of a picked group moves with it).
+    fn picked(&self, picks: &Picks) -> (Vec<usize>, Vec<usize>) {
+        let groups: Vec<usize> = picks
+            .iter()
+            .filter_map(|p| match p {
+                Grab::Group(name) => self.group_named(name).map(|(i, _)| i),
+                Grab::Host { .. } => None,
+            })
+            .collect();
+        let hosts = picks
+            .iter()
+            .filter_map(|p| match p {
+                Grab::Host { group, host } => self.placed_in(group, host),
+                Grab::Group(_) => None,
+            })
+            .filter(|i| !groups.contains(&self.hosts[*i].group))
+            .collect();
+        (groups, hosts)
+    }
+
+    /// This layout with `picks` moved by (`dx`, `dy`): a frame of a drag.
+    fn shifted(&self, picks: &Picks, dx: f64, dy: f64) -> Layout {
+        let mut out = self.clone();
+        let (groups, hosts) = self.picked(picks);
+        for &index in &groups {
+            let group = &mut out.groups[index];
+            group.x += dx;
+            group.y += dy;
+            if let Some(area) = group.area.as_mut() {
+                area.x += dx;
+                area.y += dy;
+            }
+        }
+        for p in &mut out.hosts {
+            if groups.contains(&p.group) {
+                p.x += dx;
+                p.y += dy;
+                (p.gx, p.gy) = (out.groups[p.group].x, out.groups[p.group].y);
+            }
+        }
+        for i in hosts {
+            out.hosts[i].x += dx;
+            out.hosts[i].y += dy;
+        }
+        out.areas = out.groups.iter().filter_map(|g| g.area).collect();
+        out
+    }
+
+    /// `picks` moved by (`dx`, `dy`) for good: written into `arrangement`.
+    fn moved(&self, picks: &Picks, dx: f64, dy: f64, arrangement: &mut Arrangement) {
+        let (groups, hosts) = self.picked(picks);
+        for index in groups {
+            let g = &self.groups[index];
+            arrangement
+                .groups
+                .insert(g.name.clone(), (g.x + dx, g.y + dy));
+        }
+        for i in hosts {
+            let p = &self.hosts[i];
+            let g = &self.groups[p.group];
+            arrangement
+                .hosts
+                .entry(g.name.clone())
+                .or_default()
+                .insert(p.host_id.clone(), (p.x + dx - g.x, p.y + dy - g.y));
+        }
+    }
+
+    /// What a selection rectangle holds (map units): the groups whose card
+    /// center is inside, and the hosts inside but not in those groups.
+    fn in_box(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Picks {
+        let (x0, x1) = (x0.min(x1), x0.max(x1));
+        let (y0, y1) = (y0.min(y1), y0.max(y1));
+        let inside = |x: f64, y: f64| x >= x0 && x <= x1 && y >= y0 && y <= y1;
+        let groups: Vec<usize> = (0..self.groups.len())
+            .filter(|i| inside(self.groups[*i].x, self.groups[*i].y))
+            .collect();
+        let mut picks: Picks = groups
+            .iter()
+            .map(|i| Grab::Group(self.groups[*i].name.clone()))
+            .collect();
+        picks.extend(
+            self.hosts
+                .iter()
+                .filter(|p| !groups.contains(&p.group) && inside(p.x, p.y))
+                .map(|p| Grab::Host {
+                    group: self.groups[p.group].name.clone(),
+                    host: p.host_id.clone(),
+                }),
+        );
+        picks
+    }
+}
+
+/// Fold / unfold animation: the layout before the change, from which the
+/// next layouts glide for a moment (hosts unfolding leave their card,
+/// folding ones go back under it). Positions only, eased out.
+struct Motion {
+    groups: HashMap<String, (f64, f64, Option<Area>)>,
+    /// group name -> host id -> position
+    hosts: HashMap<String, HashMap<String, (f64, f64)>>,
+    before: Vec<Placed>,
+    names: Vec<String>,
+    /// Hosts no longer drawn, their group's index in the new layout (set by
+    /// the first frame).
+    leaving: Option<Vec<Placed>>,
+    /// Time of the first frame.
+    start: Option<f64>,
+}
+
+const MOTION_MS: f64 = 200.0;
+
+impl Motion {
+    fn of(layout: &Layout) -> Self {
+        let mut hosts: HashMap<String, HashMap<String, (f64, f64)>> = HashMap::new();
+        for p in &layout.hosts {
+            hosts
+                .entry(layout.groups[p.group].name.clone())
+                .or_default()
+                .insert(p.host_id.clone(), (p.x, p.y));
+        }
+        Motion {
+            groups: layout
+                .groups
+                .iter()
+                .map(|g| (g.name.clone(), (g.x, g.y, g.area)))
+                .collect(),
+            hosts,
+            before: layout.hosts.clone(),
+            names: layout.groups.iter().map(|g| g.name.clone()).collect(),
+            leaving: None,
+            start: None,
+        }
+    }
+
+    /// `to` at `t` (0 to 1) of the way from the layout before.
+    fn frame(&mut self, to: &Layout, t: f64) -> Layout {
+        let e = 1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3);
+        let lerp = |a: f64, b: f64| a + (b - a) * e;
+        let leaving = self.leaving.get_or_insert_with(|| {
+            self.before
+                .iter()
+                .filter(|p| to.placed_in(&self.names[p.group], &p.host_id).is_none())
+                .filter_map(|p| {
+                    let (index, _) = to.group_named(&self.names[p.group])?;
+                    Some(Placed {
+                        group: index,
+                        ..p.clone()
+                    })
+                })
+                .collect()
+        });
+        let mut out = to.clone();
+        for g in &mut out.groups {
+            if let Some((x, y, area)) = self.groups.get(&g.name) {
+                g.x = lerp(*x, g.x);
+                g.y = lerp(*y, g.y);
+                if let (Some(a), Some(b)) = (area, g.area.as_mut()) {
+                    b.x = lerp(a.x, b.x);
+                    b.y = lerp(a.y, b.y);
+                    b.w = lerp(a.w, b.w);
+                    b.h = lerp(a.h, b.h);
+                }
+            }
+        }
+        for p in &mut out.hosts {
+            let g = &out.groups[p.group];
+            let (fx, fy) = self
+                .hosts
+                .get(&g.name)
+                .and_then(|hosts| hosts.get(&p.host_id))
+                .copied()
+                // unfolding: from its card
+                .or_else(|| self.groups.get(&g.name).map(|(x, y, _)| (*x, *y)))
+                .unwrap_or((p.x, p.y));
+            p.x = lerp(fx, p.x);
+            p.y = lerp(fy, p.y);
+            (p.gx, p.gy) = (g.x, g.y);
+        }
+        // folding: back under their card
+        for p in leaving.iter() {
+            let Some(g) = out.groups.get(p.group) else {
+                continue;
+            };
+            let mut p = p.clone();
+            p.x = lerp(p.x, g.x);
+            p.y = lerp(p.y, g.y);
+            (p.gx, p.gy) = (g.x, g.y);
+            out.hosts.push(p);
+        }
+        out.areas = out.groups.iter().filter_map(|g| g.area).collect();
+        out
+    }
 }
 
 /// Graph display: a card per group, its hosts on rings around it.
@@ -487,17 +895,11 @@ fn graph_layout(groups: Vec<Members>) -> Layout {
     let rings: Vec<(Vec<(f64, f64)>, f64)> = groups
         .iter()
         .map(|g| {
-            let (offsets, outer) = if g.collapsed {
-                (Vec::new(), 0.0)
+            if g.collapsed {
+                (Vec::new(), card_radius())
             } else {
-                ring_offsets(g.hosts.len())
-            };
-            let radius = if offsets.is_empty() {
-                card_radius()
-            } else {
-                outer + DOT + 24.0
-            };
-            (offsets, radius)
+                graph_offsets(&g.hosts)
+            }
         })
         .collect();
     let sizes: Vec<(f64, f64)> = rings.iter().map(|(_, r)| (2.0 * r, 2.0 * r)).collect();
@@ -576,23 +978,95 @@ fn area_cells(n: usize) -> Cells {
     (cells, w, h)
 }
 
+/// Areas display: the cells of an unfolded group's hosts (in `hosts`'
+/// order), the area's size and the x of the line between its columns:
+/// proactive hosts in a left column, passive ones in a right column under
+/// the card, when it has both; else [`area_cells`].
+fn split_cells(hosts: &[&api::HostSummary]) -> (Cells, Option<f64>) {
+    let active = hosts.iter().filter(|h| is_active(h)).count();
+    let passive = hosts.len() - active;
+    if active == 0 || passive == 0 {
+        return (area_cells(hosts.len()), None);
+    }
+    let card_cols = ((CARD_W + AREA_PAD) / CELL).ceil() as usize;
+    let card_rows = ((CARD_H + AREA_PAD) / CELL).ceil() as usize;
+    // about square overall; each column as wide as its hosts need to end
+    // at about the same height
+    let cells_needed = active + passive + card_cols * card_rows;
+    let rows = (cells_needed as f64)
+        .sqrt()
+        .ceil()
+        .max((card_rows + 1) as f64) as usize;
+    let left_cols = active.div_ceil(rows).max(1);
+    let right_cols = (passive + card_cols * card_rows)
+        .div_ceil(rows)
+        .max(card_cols + 2);
+    // one empty column between them, holding the line
+    let right_x = AREA_PAD + (left_cols + 1) as f64 * CELL;
+    let mut left = (0..active).map(|i| {
+        (
+            AREA_PAD + ((i % left_cols) as f64 + 0.5) * CELL,
+            AREA_PAD + ((i / left_cols) as f64 + 0.5) * CELL,
+        )
+    });
+    let mut right = Vec::with_capacity(passive);
+    let mut row = 0;
+    while right.len() < passive {
+        for col in 0..right_cols {
+            if right.len() == passive {
+                break;
+            }
+            if row < card_rows && col >= right_cols - card_cols {
+                continue;
+            }
+            right.push((
+                right_x + (col as f64 + 0.5) * CELL,
+                AREA_PAD + (row as f64 + 0.5) * CELL,
+            ));
+        }
+        row += 1;
+    }
+    let rows = active.div_ceil(left_cols).max(row).max(card_rows);
+    let mut right = right.into_iter();
+    let cells = hosts
+        .iter()
+        .map(|h| {
+            if is_active(h) {
+                left.next()
+            } else {
+                right.next()
+            }
+            .expect("one cell per host")
+        })
+        .collect();
+    let w = 2.0 * AREA_PAD + (left_cols + 1 + right_cols) as f64 * CELL;
+    let h = 2.0 * AREA_PAD + rows as f64 * CELL;
+    (
+        (cells, w, h),
+        Some(AREA_PAD + (left_cols as f64 + 0.5) * CELL),
+    )
+}
+
 fn areas_layout(groups: Vec<Members>) -> Layout {
-    let cells: Vec<Cells> = groups
+    let cells: Vec<(Cells, Option<f64>)> = groups
         .iter()
         .map(|g| {
             if g.collapsed {
                 // the card alone
-                (Vec::new(), CARD_W + 2.0 * AREA_PAD, CARD_H + 2.0 * AREA_PAD)
+                (
+                    (Vec::new(), CARD_W + 2.0 * AREA_PAD, CARD_H + 2.0 * AREA_PAD),
+                    None,
+                )
             } else {
-                area_cells(g.hosts.len())
+                split_cells(&g.hosts)
             }
         })
         .collect();
-    let sizes: Vec<(f64, f64)> = cells.iter().map(|(_, w, h)| (*w, *h)).collect();
+    let sizes: Vec<(f64, f64)> = cells.iter().map(|((_, w, h), _)| (*w, *h)).collect();
     let corners = shelves(&sizes, AREA_GAP, false);
 
     let mut layout = Layout::empty();
-    for ((group, (offsets, w, h)), (x, y)) in groups.into_iter().zip(cells).zip(corners) {
+    for ((group, ((offsets, w, h), split)), (x, y)) in groups.into_iter().zip(cells).zip(corners) {
         layout.grow(x, y, x + w, y + h);
         let index = layout.groups.len();
         let (total, ok, bad) = group.counts();
@@ -610,6 +1084,7 @@ fn areas_layout(groups: Vec<Members>) -> Layout {
             w,
             h,
             folded: group.collapsed,
+            split,
         };
         layout.areas.push(area);
         layout.groups.push(Group {
@@ -638,11 +1113,6 @@ fn arc(cx: f64, cy: f64, r: f64, start: f64, len: f64, color: &'static str) -> i
             stroke-dashoffset=-(start * c)
             transform=format!("rotate(-90 {cx} {cy})") />
     }
-}
-
-/// Key part for a position, so `<For>` re-renders moved cards.
-fn position_key(x: f64, y: f64) -> (i64, i64) {
-    ((x * 10.0) as i64, (y * 10.0) as i64)
 }
 
 pub fn truncate(text: &str, max: usize) -> String {
@@ -694,22 +1164,47 @@ pub fn Map() -> impl IntoView {
     // assignments"), hosts without one in "(unassigned)"
     let collapsed = RwSignal::new(BTreeSet::<String>::new());
     let rings = Memo::new(move |_| jobs.with(rings));
+    // where the user moved groups and hosts (Organize), per display
+    let arrangement = RwSignal::new(Arrangement::saved(display.get_untracked()));
     let map = Memo::new(move |_| {
         hosts.with(|hosts| {
             collapsed.with(|collapsed| {
-                selectors.with(|selectors| layout(hosts, display.get(), collapsed, selectors))
+                selectors.with(|selectors| {
+                    let mut map = layout(hosts, display.get(), collapsed, selectors);
+                    arrangement.with(|a| arrange(&mut map, a));
+                    map
+                })
             })
         })
     });
+    // Organize: cards and hosts are picked (click, Ctrl + click, a
+    // selection rectangle) and dragged together
+    let organize = RwSignal::new(false);
+    let picks = RwSignal::new(Picks::new());
+    // the picks being dragged, by how much (map units)
+    let grab = RwSignal::new(None::<(f64, f64)>);
+    // a selection rectangle being drawn (map units: start, end), and
+    // whether it adds to the picks (Ctrl)
+    let marquee = RwSignal::new(None::<(f64, f64, f64, f64)>);
+    let marquee_adds = StoredValue::new(false);
+    // pointer position at the start of that drag, and map units per pixel
+    let grab_start = StoredValue::new((0.0f64, 0.0f64, 1.0f64));
+    // fold / unfold: positions glide from the layout before
+    let motion = StoredValue::new(None::<Motion>);
 
     // view box: zoom (wheel, around the pointer) and pan (drag)
     let scale = RwSignal::new(1.0f64);
     let center = RwSignal::new(None::<(f64, f64)>); // None = fit the whole map
+    // the map's size the view is fitted to: None = the whole map, as it is
+    // now; kept while moving or folding things, so the view stays put
+    let fitted = RwSignal::new(None::<(f64, f64)>);
     let drag = RwSignal::new(None::<(f64, f64)>);
     let moved = RwSignal::new(false);
     let half = move || {
-        let (x0, y0, x1, y1) = map.with(|m| m.bounds);
-        ((x1 - x0) / 2.0 + 40.0, (y1 - y0) / 2.0 + 40.0)
+        fitted.get().unwrap_or_else(|| {
+            let (x0, y0, x1, y1) = map.with(|m| m.bounds);
+            ((x1 - x0) / 2.0 + 40.0, (y1 - y0) / 2.0 + 40.0)
+        })
     };
     let view_center = move || {
         center.get().unwrap_or_else(|| {
@@ -746,8 +1241,19 @@ pub fn Map() -> impl IntoView {
         ))
     };
     let units_per_pixel = move |w: f64, h: f64| untrack(view).units_per_pixel(w, h);
-    // the host under the pointer of a mouse event, if any
-    let host_under = move |ev: &web_sys::MouseEvent| {
+    // the view as it is, kept from now on (whatever the map's size becomes)
+    let hold_view = move || {
+        if fitted.get_untracked().is_none() {
+            fitted.set(Some(untrack(half)));
+        }
+        center.set(Some(untrack(view_center)));
+    };
+    // the layout changes next (fold, unfold, auto-arrange): glide to it
+    let glide = move || {
+        motion.set_value(Some(map.with_untracked(Motion::of)));
+    };
+    // the host under the pointer of a mouse event, if any, and its group
+    let grabbed_host = move |ev: &web_sys::MouseEvent| {
         let (w, h, left, top) = metrics(ev.current_target())?;
         let view = untrack(view);
         let (x, y) = view.map_point(
@@ -758,7 +1264,21 @@ pub fn Map() -> impl IntoView {
         );
         // the dot and a little around it, but at least 5 pixels when zoomed out
         let radius = (DOT + 3.0).max(5.0 * view.units_per_pixel(w, h));
-        map.with_untracked(|m| m.host_at(x, y, radius).map(|p| p.host_id.clone()))
+        map.with_untracked(|m| {
+            m.host_at(x, y, radius)
+                .map(|p| (p.host_id.clone(), m.groups[p.group].name.clone()))
+        })
+    };
+    let host_under = move |ev: &web_sys::MouseEvent| grabbed_host(ev).map(|(id, _)| id);
+    // the map point under the pointer
+    let map_point = move |ev: &web_sys::MouseEvent| {
+        let (w, h, left, top) = metrics(ev.current_target())?;
+        Some(untrack(view).map_point(
+            ev.client_x() as f64 - left,
+            ev.client_y() as f64 - top,
+            w,
+            h,
+        ))
     };
 
     // hovered host (its id: the side panel follows its live summary)
@@ -829,26 +1349,12 @@ pub fn Map() -> impl IntoView {
     let selected = RwSignal::new(use_query_map().read_untracked().get("host"));
     let selected_host =
         Memo::new(move |_| selected.with(|id| id.as_deref().and_then(host_with_job)));
-    // D24: the selected host's running jobs (live) and its last job's log
+    // D24: the selected host's running jobs (live)
     let selected_running = Signal::derive(move || {
         selected.with(|id| {
             id.as_deref()
                 .map(|id| jobs.with(|jobs| running_jobs(jobs, id)))
                 .unwrap_or_default()
-        })
-    });
-    let selected_last_log = Memo::new(move |_| {
-        selected_host.with(|host| {
-            host.as_ref()
-                .map(|(host, _)| host)
-                .filter(|host| !host.last_job.is_empty())
-                .map(|host| {
-                    (
-                        host.last_job.clone(),
-                        host.last_job_month.clone(),
-                        host.state_at,
-                    )
-                })
         })
     });
     let navigate = use_navigate();
@@ -879,6 +1385,8 @@ pub fn Map() -> impl IntoView {
     let Theme(theme) = expect_context::<Theme>();
     let alive = Arc::new(AtomicBool::new(true));
     let dirty = Arc::new(AtomicBool::new(true));
+    // the group cards' positions, as drawn (they glide and are dragged too)
+    let cards = RwSignal::new(HashMap::<String, (f64, f64)>::new());
     on_cleanup({
         let alive = alive.clone();
         move || alive.store(false, Ordering::Relaxed)
@@ -894,6 +1402,8 @@ pub fn Map() -> impl IntoView {
             rings.track();
             flashes.track();
             theme.track();
+            grab.track();
+            picks.track();
             dirty.store(true, Ordering::Relaxed);
         }
     });
@@ -908,7 +1418,7 @@ pub fn Map() -> impl IntoView {
                 .flatten()
                 .and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok())
         };
-        canvas::animate(alive, move |_| {
+        canvas::animate(alive, move |now| {
             let Some(hosts_canvas) = canvas_ref.get_untracked() else {
                 return;
             };
@@ -937,7 +1447,51 @@ pub fn Map() -> impl IntoView {
             let selected = selected.get_untracked();
             let names = scale.get_untracked() >= 2.5;
             let view = untrack(view);
-            map.with_untracked(|layout| {
+            // a drag or a fold in progress: this frame's positions
+            let grabbed = grab.get_untracked();
+            let moving = map.with_untracked(|base| match grabbed {
+                Some((dx, dy)) => Some(picks.with_untracked(|p| base.shifted(p, dx, dy))),
+                None => motion
+                    .try_update_value(|m| {
+                        let step = m.as_mut()?;
+                        let start = *step.start.get_or_insert(now);
+                        let t = (now - start) / MOTION_MS;
+                        if t >= 1.0 {
+                            *m = None;
+                            return None;
+                        }
+                        Some(step.frame(base, t))
+                    })
+                    .flatten(),
+            });
+            if moving.is_some() && grabbed.is_none() {
+                // the next frame of the glide
+                dirty.store(true, Ordering::Relaxed);
+            }
+            // the cards (SVG) follow the canvas
+            let positions = |layout: &Layout| -> HashMap<String, (f64, f64)> {
+                layout
+                    .groups
+                    .iter()
+                    .map(|g| (g.name.clone(), (g.x, g.y)))
+                    .collect()
+            };
+            let now_cards = match &moving {
+                Some(layout) => positions(layout),
+                None => map.with_untracked(positions),
+            };
+            if cards.with_untracked(|c| *c != now_cards) {
+                cards.set(now_cards);
+            }
+            let draw = |layout: &Layout| {
+                // hosts picked on their own (Organize)
+                let picked = picks.with_untracked(|p| {
+                    if p.is_empty() {
+                        Vec::new()
+                    } else {
+                        layout.picked(p).1
+                    }
+                });
                 rings.with_untracked(|rings| {
                     flashes.with_untracked(|flashes| {
                         let frame = Frame {
@@ -947,6 +1501,7 @@ pub fn Map() -> impl IntoView {
                             view,
                             hovered: hovered.as_deref(),
                             selected: selected.as_deref(),
+                            picked: &picked,
                             names,
                         };
                         if let Some(ctx) = context(&hosts_canvas) {
@@ -954,7 +1509,11 @@ pub fn Map() -> impl IntoView {
                         }
                     })
                 })
-            });
+            };
+            match &moving {
+                Some(layout) => draw(layout),
+                None => map.with_untracked(draw),
+            }
         });
     }
 
@@ -979,6 +1538,26 @@ pub fn Map() -> impl IntoView {
     // the page's owner: a run's status outlives the confirmation dialog
     // (where `confirm` runs, disposed once closed)
     let page_owner = StoredValue::new(Owner::current().expect("the Live view has an owner"));
+    // runs not over yet, kept by the browser: their panel comes back after a
+    // reload or another page, until every job of theirs has ended
+    let kept = RwSignal::new(KeptRun::load(js_sys::Date::now() as i64));
+    let forget = move |id: &str| {
+        // from storage itself too: the page may be gone (a refusal arriving
+        // after the user left)
+        let mut runs = KeptRun::load(js_sys::Date::now() as i64);
+        runs.retain(|r| r.command_id != id);
+        KeptRun::save(&runs);
+        let _ = kept.try_update(|k| k.retain(|r| r.command_id != id));
+    };
+    let reopen = move |run: &KeptRun| {
+        let status =
+            page_owner.with_value(|owner| owner.with(|| RwSignal::new(RunStatus::Accepted)));
+        active_run.set(Some(run.active(status)));
+    };
+    // the latest run not over: shown again when the page opens
+    if let Some(last) = kept.with_untracked(|k| k.last().cloned()) {
+        reopen(&last);
+    }
     let confirm = move || {
         let Some(run) = pending.get_untracked() else {
             return;
@@ -989,14 +1568,17 @@ pub fn Map() -> impl IntoView {
             page_owner.with_value(|owner| owner.with(|| RwSignal::new(RunStatus::Sending)));
         // the panel opens at once, before backend answers
         selected.set(None);
-        active_run.set(Some(ActiveRun {
+        let active = ActiveRun {
             command_id: id.clone(),
             job: run.job,
             target: run.target.describe(),
             expected: run.hosts,
             started_at: js_sys::Date::now() as i64,
             status,
-        }));
+        };
+        kept.update(|k| k.push(KeptRun::of(&active)));
+        KeptRun::save(&kept.get_untracked());
+        active_run.set(Some(active));
         spawn_local(async move {
             let request = api::RunNowRequest {
                 command_id: id,
@@ -1005,10 +1587,12 @@ pub fn Map() -> impl IntoView {
                 pool: String::new(),
                 one_shot_yaml: String::new(),
             };
+            let kept_id = request.command_id.clone();
             let result = match client().run_now(authed(request, &session.token())).await {
                 Ok(_) => RunStatus::Accepted,
                 Err(status) => {
                     session.check(&status);
+                    forget(&kept_id);
                     RunStatus::Refused(status.message().to_string())
                 }
             };
@@ -1100,11 +1684,56 @@ pub fn Map() -> impl IntoView {
         })
     };
     let svg_class = move || {
+        let mut class = String::from("map");
         if hovered.get().is_some() {
-            "map over-host"
-        } else {
-            "map"
+            class.push_str(" over-host");
         }
+        if organize.get() {
+            class.push_str(" organizing");
+        }
+        if grab.with(Option::is_some) {
+            class.push_str(" grabbing");
+        }
+        class
+    };
+    // a drag (Organize) ends: the picks stay where they were dropped; a
+    // selection rectangle picks what it holds
+    let drop_grab = move || {
+        if let Some((x0, y0, x1, y1)) = marquee.get_untracked() {
+            marquee.set(None);
+            if moved.get_untracked() {
+                let inside = map.with_untracked(|m| m.in_box(x0, y0, x1, y1));
+                if marquee_adds.get_value() {
+                    picks.update(|p| p.extend(inside));
+                } else {
+                    picks.set(inside);
+                }
+            } else if !marquee_adds.get_value() {
+                // a click on empty space
+                picks.set(Picks::new());
+            }
+            return;
+        }
+        let Some((dx, dy)) = grab.get_untracked() else {
+            return;
+        };
+        grab.set(None);
+        if !moved.get_untracked() {
+            return;
+        }
+        let mut arranged = arrangement.get_untracked();
+        picks.with_untracked(|p| map.with_untracked(|m| m.moved(p, dx, dy, &mut arranged)));
+        arranged.save(display.get_untracked());
+        arrangement.set(arranged);
+    };
+    let toggle_group = move |name: String| {
+        hold_view();
+        glide();
+        collapsed.update(|set| {
+            if !set.remove(&name) {
+                set.insert(name);
+            }
+        });
     };
 
     view! {
@@ -1124,7 +1753,9 @@ pub fn Map() -> impl IntoView {
                         </div>
                     })
                 }}
-                <div class="toolbar">
+                // while the right panel floats over the map, the toolbar stops
+                // at its left edge (the runs' buttons stay visible)
+                <div class="toolbar" class:beside-panel=move || panel_open.get()>
                     <span class="muted">"Display"</span>
                     <select title="Graph: hosts around their group; areas: hosts inside their group"
                         on:change=move |ev| {
@@ -1132,6 +1763,8 @@ pub fn Map() -> impl IntoView {
                             value.save();
                             scale.set(1.0);
                             center.set(None);
+                            fitted.set(None);
+                            arrangement.set(Arrangement::saved(value));
                             display.set(value);
                         }>
                         <option value="graph" selected=move || display.get() == Display::Graph>"graph"</option>
@@ -1139,15 +1772,72 @@ pub fn Map() -> impl IntoView {
                     </select>
                     // one button: fold every group, or unfold them all once all are folded
                     <button title="Fold or unfold every group"
-                        on:click=move |_| if all_folded() {
-                            collapsed.set(BTreeSet::new());
-                        } else {
-                            collapsed.set(map.with_untracked(|m| m.groups.iter().map(|g| g.name.clone()).collect()));
+                        on:click=move |_| {
+                            hold_view();
+                            glide();
+                            if all_folded() {
+                                collapsed.set(BTreeSet::new());
+                            } else {
+                                collapsed.set(map.with_untracked(|m| m.groups.iter().map(|g| g.name.clone()).collect()));
+                            }
                         }>
                         {move || if all_folded() { "Unfold" } else { "Fold" }}
                     </button>
+                    <button class:active=move || organize.get()
+                        title="Move group cards and hosts: drag them; pick several with Ctrl + click or a selection rectangle (drag on empty space); pan with the middle button"
+                        on:click=move |_| {
+                            organize.update(|o| *o = !*o);
+                            picks.set(Picks::new());
+                        }>
+                        "Organize"
+                    </button>
+                    <button title="Put every group and host back where the map places them"
+                        disabled=move || arrangement.with(Arrangement::is_empty)
+                        on:click=move |_| {
+                            glide();
+                            let empty = Arrangement::default();
+                            empty.save(display.get_untracked());
+                            arrangement.set(empty);
+                            // the whole map in view
+                            scale.set(1.0);
+                            center.set(None);
+                            fitted.set(None);
+                        }>
+                        "Auto-arrange"
+                    </button>
                     <span class="muted">{move || if ready.get() { format!("{} hosts, live", hosts.with(|h| h.len())) } else { "loading…".into() }}</span>
                     <span class="muted">{move || message.get()}</span>
+                    // runs not over: their panel, whatever happened since
+                    <span class="run-chips">
+                    <For each=move || kept.get() key=|run| run.command_id.clone() let:run>
+                        {
+                        let shown = {
+                            let id = run.command_id.clone();
+                            move || !showing_host.get()
+                                && active_run.with(|a| a.as_ref().is_some_and(|a| a.command_id == id))
+                        };
+                        // the run is forgotten (button gone) once its jobs ended, panel
+                        // open or not (a refused command is forgotten by `confirm`)
+                        watch_run_over(run.command_id.clone(), {
+                            let id = run.command_id.clone();
+                            Callback::new(move |()| forget(&id))
+                        });
+                        let label = format!("Job in progress : {} {}", job_label(run.job), run.target);
+                        view! {
+                            <button class="run-chip" class:active=shown title="A run in progress: show it"
+                                on:click=move |_| {
+                                    selected.set(None);
+                                    let id = run.command_id.clone();
+                                    if !active_run.with_untracked(|a| a.as_ref().is_some_and(|a| a.command_id == id)) {
+                                        reopen(&run);
+                                    }
+                                }>
+                                <i class="live-dot"></i>{label}
+                            </button>
+                        }
+                        }
+                    </For>
+                    </span>
                 </div>
                 <Show when=move || error.get().is_some()>
                     <p class="error">{move || error.get()}</p>
@@ -1170,21 +1860,104 @@ pub fn Map() -> impl IntoView {
                         scale.set(new);
                         center.set(Some((wx - px * k_new, wy - py * k_new)));
                     }
-                    on:pointerdown=move |ev| {
+                    on:pointerdown=move |ev: web_sys::PointerEvent| {
                         hovered.set(None);
                         moved.set(false);
-                        drag.set(Some((ev.client_x() as f64, ev.client_y() as f64)));
+                        let (x, y) = (ev.client_x() as f64, ev.client_y() as f64);
+                        // Organize, main button: pick and move cards and
+                        // hosts, or draw a selection rectangle
+                        if organize.get_untracked() && ev.button() == 0 {
+                            let Some((w, h, _, _)) = metrics(ev.current_target()) else { return };
+                            let ctrl = ev.ctrl_key() || ev.meta_key();
+                            let card = ev
+                                .target()
+                                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                                .and_then(|e| e.closest("g.group").ok().flatten())
+                                .and_then(|e| e.get_attribute("data-group"));
+                            let what = match card {
+                                Some(name) => Some(Grab::Group(name)),
+                                None => grabbed_host(&ev).map(|(host, group)| Grab::Host { group, host }),
+                            };
+                            match what {
+                                Some(what) if ctrl => {
+                                    // add or remove it; not a click (no fold,
+                                    // no selection of the host)
+                                    moved.set(true);
+                                    picks.update(|p| if !p.remove(&what) { p.insert(what); });
+                                }
+                                Some(what) => {
+                                    if !picks.with_untracked(|p| p.contains(&what)) {
+                                        picks.set([what].into());
+                                    }
+                                    hold_view();
+                                    grab_start.set_value((x, y, units_per_pixel(w, h)));
+                                    grab.set(Some((0.0, 0.0)));
+                                }
+                                None => {
+                                    let Some((mx, my)) = map_point(&ev) else { return };
+                                    hold_view();
+                                    marquee_adds.set_value(ctrl);
+                                    grab_start.set_value((x, y, units_per_pixel(w, h)));
+                                    marquee.set(Some((mx, my, mx, my)));
+                                }
+                            }
+                            return;
+                        }
+                        // middle button (or not organizing): pan
+                        if ev.button() == 0 || ev.button() == 1 {
+                            if ev.button() == 1 {
+                                ev.prevent_default();
+                            }
+                            drag.set(Some((x, y)));
+                        }
                     }
-                    on:pointerup=move |_| drag.set(None)
-                    on:pointerleave=move |_| { drag.set(None); hovered.set(None); }
+                    // the middle button pans, without the browser's autoscroll
+                    on:mousedown=move |ev: web_sys::MouseEvent| if ev.button() == 1 { ev.prevent_default(); }
+                    on:pointerup=move |_| { drag.set(None); drop_grab(); }
+                    on:pointercancel=move |_| { drag.set(None); grab.set(None); marquee.set(None); }
+                    on:pointerleave=move |_| { drag.set(None); drop_grab(); hovered.set(None); }
                     on:click=move |ev| {
                         if moved.get_untracked() {
+                            return;
+                        }
+                        // a card handles its own clicks (hosts may lie under
+                        // it: groups moved over others, or gliding)
+                        let on_card = ev
+                            .target()
+                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                            .and_then(|e| e.closest("g.group").ok().flatten())
+                            .is_some();
+                        if on_card {
                             return;
                         }
                         // a host: show it in the right panel; empty space: deselect
                         selected.set(host_under(&ev));
                     }
                     on:pointermove=move |ev| {
+                        if grab.with_untracked(Option::is_some) || marquee.with_untracked(Option::is_some) {
+                            let (x0, y0, k) = grab_start.get_value();
+                            let (nx, ny) = (ev.client_x() as f64, ev.client_y() as f64);
+                            if !moved.get_untracked() {
+                                if (nx - x0).abs() + (ny - y0).abs() < 4.0 {
+                                    return;
+                                }
+                                // a drag, not a click (a captured pointer's
+                                // click would miss the card's buttons)
+                                if let Some(el) = ev.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
+                                    let _ = el.set_pointer_capture(ev.pointer_id());
+                                }
+                            }
+                            moved.set(true);
+                            let (dx, dy) = ((nx - x0) * k, (ny - y0) * k);
+                            if grab.with_untracked(Option::is_some) {
+                                grab.set(Some((dx, dy)));
+                            } else {
+                                marquee.update(|m| if let Some((mx, my, ex, ey)) = m {
+                                    (*ex, *ey) = (*mx + dx, *my + dy);
+                                });
+                            }
+                            return;
+                        }
                         let Some((x, y)) = drag.get_untracked() else {
                             pointer.set((ev.client_x() as f64, ev.client_y() as f64));
                             let id = host_under(&ev);
@@ -1211,17 +1984,22 @@ pub fn Map() -> impl IntoView {
                             m.groups.iter().cloned().zip(running).collect::<Vec<_>>()
                         })
                         // the target too: the buttons appear once the assignments are loaded
-                        key=|(g, running)| (g.name.clone(), position_key(g.x, g.y), g.total, g.ok, g.bad, *running, g.collapsed, g.target.is_some())
+                        key=|(g, running)| (g.name.clone(), g.total, g.ok, g.bad, *running, g.collapsed, g.target.is_some())
                         let:card>
-                        {group_card(card.0, card.1, collapsed, moved, ask)}
+                        {group_card(card.0, card.1, CardSignals { cards, picks, organize, moved }, toggle_group, ask)}
                     </For>
+                    // selection rectangle (Organize)
+                    {move || marquee.get().map(|(x0, y0, x1, y1)| view! {
+                        <rect class="marquee" x=x0.min(x1) y=y0.min(y1)
+                            width=(x1 - x0).abs() height=(y1 - y0).abs() />
+                    })}
                 </svg>
                 // legend: a layer on top of the hosts, bottom left
                         <details class="map-legend">
                             <summary>"Legend"</summary>
                             <ul class="legend">
-                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--ok)" /></svg> " compliant / reach success"</li>
-                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--bad)" /></svg> " not compliant / failed / error"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--ok)" /></svg> " compliant"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--bad)" /></svg> " not compliant / error"</li>
                                 <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--warn)" /></svg> " aborted / assignments in conflict"</li>
                                 <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--unknown)" /></svg> " not checked yet, or against an older expected state"</li>
                                 <li><svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="var(--unassigned)" /></svg> " unassigned: no expected state"</li>
@@ -1230,6 +2008,7 @@ pub fn Map() -> impl IntoView {
                                 <li><svg width="16" height="16"><circle cx="8" cy="8" r="7" fill="none" stroke="var(--accent)" stroke-width="2" /></svg> " selected host"</li>
                                 <li><svg width="16" height="16"><path d="M8 1 L15 8 L8 15 L1 8 Z" fill="var(--unknown)" /></svg> " proactive host (regops): its own Git state, coloured by its last pass"</li>
                                 <li><svg width="16" height="16"><path d="M8 1 L15 8 L8 15 L1 8 Z" fill="none" stroke="var(--warn)" stroke-width="2" /></svg> " proactive host behind its repository's latest commit"</li>
+                                <li><svg width="16" height="16"><path d="M8 1 V15" stroke="var(--muted)" stroke-width="2" stroke-dasharray="2 2" /></svg> " a group with both: proactive hosts on the left, passive ones on the right"</li>
                             </ul>
                         </details>
                 </div>
@@ -1265,13 +2044,8 @@ pub fn Map() -> impl IntoView {
                     }}
                     <h2>"Live"</h2>
                     <HostLive running=selected_running />
-                    <h2>"Last job log"</h2>
-                    {move || match selected_last_log.get() {
-                        Some((job_id, month, at)) => view! { <RunLogView job_id=job_id month=month finished_at=at /> }.into_any(),
-                        None => view! { <p class="muted">"No finished job within retention."</p> }.into_any(),
-                    }}
-                    <h2>"Expected state"</h2>
-                    <HostStateExplorer host=Signal::derive(move || selected_host.with(|h| h.as_ref().map(|(host, _)| host.clone()))) />
+                    <h2>"Last known state"</h2>
+                    <HostStateExplorer with_last_run=true host=Signal::derive(move || selected_host.with(|h| h.as_ref().map(|(host, _)| host.clone()))) />
                     }.into_any()
                 } else {
                     active_run.get().map(|run| view! {
@@ -1350,28 +2124,51 @@ fn host_summary(host: api::HostSummary, job: Option<String>, with_name: bool) ->
     }
 }
 
+/// The map's state a group card reads.
+#[derive(Clone, Copy)]
+struct CardSignals {
+    /// Where each card is drawn.
+    cards: RwSignal<HashMap<String, (f64, f64)>>,
+    picks: RwSignal<Picks>,
+    organize: RwSignal<bool>,
+    /// The pointer moved since it went down (a drag, not a click).
+    moved: RwSignal<bool>,
+}
+
 /// A group (assignment, label or state) node: name, counts, compliance donut,
 /// Assess / Reach buttons.
 fn group_card(
     group: Group,
     running: usize,
-    collapsed: RwSignal<BTreeSet<String>>,
-    moved: RwSignal<bool>,
+    signals: CardSignals,
+    toggle_group: impl Fn(String) + Copy + 'static,
     ask: impl Fn(GroupTarget, api::JobKind, usize) + Copy + 'static,
 ) -> impl IntoView {
+    let CardSignals {
+        cards,
+        picks,
+        organize,
+        moved,
+    } = signals;
     let (w, h) = (CARD_W, CARD_H);
     let (left, top) = (-w / 2.0, -h / 2.0);
     let name = group.name.clone();
-    let toggle = move |_| {
-        if moved.get_untracked() {
-            return;
-        }
+    let toggle = {
         let name = name.clone();
-        collapsed.update(|set| {
-            if !set.remove(&name) {
-                set.insert(name);
+        move |_| {
+            // Organize: a click picks the card (pointerdown), no fold
+            if !moved.get_untracked() && !organize.get_untracked() {
+                toggle_group(name.clone());
             }
-        });
+        }
+    };
+    let picked_as = Grab::Group(group.name.clone());
+    let (name_for_title, collapsed_now) = (group.name.clone(), group.collapsed);
+    // where it is drawn (it glides and is dragged), else where it belongs
+    let (gx, gy) = (group.x, group.y);
+    let transform = move || {
+        let (x, y) = cards.with(|c| c.get(&name).copied()).unwrap_or((gx, gy));
+        format!("translate({x} {y})")
     };
     let total = group.total.max(1) as f64;
     let (ok, bad) = (group.ok as f64 / total, group.bad as f64 / total);
@@ -1417,7 +2214,8 @@ fn group_card(
         "count-none"
     };
     view! {
-        <g class="group" transform=format!("translate({} {})", group.x, group.y) on:click=toggle>
+        <g class="group" class:picked=move || picks.with(|p| p.contains(&picked_as))
+            data-group=group.name.clone() transform=transform on:click=toggle>
             <rect class="card" x=left y=top width=w height=h rx="10" />
             <rect class="band" x=left + 8.0 y=top width=w - 16.0 height="4" />
             <text class="title" x=left + 12.0 y=top + 24.0>{truncate(&group.name, if running > 0 { 18 } else { 28 })}</text>
@@ -1431,7 +2229,11 @@ fn group_card(
             <text class=bad_class x=left + 64.0 y=dy + 12.0>{format!("{} not compliant", group.bad)}</text>
             {running_text}
             {buttons}
-            <title>{format!("{} — click to {}", group.name, if group.collapsed { "unfold" } else { "fold" })}</title>
+            <title>{move || if organize.get() {
+                format!("{} — drag to move (Ctrl + click: add to the picked ones)", name_for_title)
+            } else {
+                format!("{} — click to {}", name_for_title, if collapsed_now { "unfold" } else { "fold" })
+            }}</title>
         </g>
     }
 }
@@ -1439,6 +2241,14 @@ fn group_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_names_compliance_only() {
+        assert_eq!(map_state("reach_success"), "compliant");
+        assert_eq!(map_state("reach_failed"), "not_compliant");
+        assert_eq!(map_state("error"), "error");
+        assert_eq!(tone(map_state("reach_failed")), tone("reach_failed"));
+    }
 
     #[test]
     fn rings_never_overlap_and_clear_the_card() {
@@ -1517,15 +2327,23 @@ mod tests {
     }
 
     #[test]
-    fn graph_groups_by_most_specific_assignment() {
-        let hosts = fleet();
-        let map = layout(&hosts, Display::Graph, &BTreeSet::new(), &selectors());
-        let total = |name: &str| map.groups.iter().find(|g| g.name == name).unwrap().total;
-        // each host under its last (most specific) assignment only: the
-        // shared web+db host under git/db, nothing left under git/base
-        assert_eq!(total("git/web"), 40);
-        assert_eq!(total("git/db"), 41);
-        assert!(map.groups.iter().all(|g| g.name != "git/base"));
+    fn both_displays_show_the_same_groups() {
+        let hosts = mixed_fleet();
+        let groups = |display| {
+            let map = layout(&hosts, display, &BTreeSet::new(), &selectors());
+            let mut groups: Vec<(String, usize)> = map
+                .groups
+                .iter()
+                .map(|g| (g.name.clone(), g.total))
+                .collect();
+            groups.sort();
+            (groups, map.hosts.len(), map.placements("shared").count())
+        };
+        let graph = groups(Display::Graph);
+        assert_eq!(graph, groups(Display::Areas));
+        // every host in each assignment selecting it, e.g. git/base holds all
+        assert!(graph.0.contains(&("git/base".to_string(), 121)));
+        assert_eq!(graph.2, 3);
     }
 
     #[test]
@@ -1565,6 +2383,74 @@ mod tests {
         hosts.insert(multi.host_id.clone(), multi);
         hosts.insert("lonely".into(), host("lonely", &[], "unknown"));
         hosts
+    }
+
+    /// `fleet()` with every even host proactive (some of each kind).
+    fn mixed_fleet() -> BTreeMap<String, api::HostSummary> {
+        let mut hosts = fleet();
+        for i in (0..120).step_by(2) {
+            hosts.get_mut(&format!("h{i}")).unwrap().agent = "regops".into();
+        }
+        hosts
+    }
+
+    #[test]
+    fn proactive_left_passive_right() {
+        let hosts = mixed_fleet();
+        // graph: every host of a mixed group on its side of the gap
+        let map = layout(&hosts, Display::Graph, &BTreeSet::new(), &selectors());
+        let mut sides = (0, 0);
+        for p in &map.hosts {
+            let g = &map.groups[p.group];
+            let active = !hosts[&p.host_id].agent.is_empty();
+            let mixed = map
+                .hosts
+                .iter()
+                .filter(|q| q.group == p.group)
+                .any(|q| hosts[&q.host_id].agent.is_empty() == active);
+            if !mixed {
+                continue;
+            }
+            if active {
+                assert!(p.x <= g.x - SPLIT, "{}", p.host_id);
+                sides.0 += 1;
+            } else {
+                assert!(p.x >= g.x + SPLIT, "{}", p.host_id);
+                sides.1 += 1;
+            }
+            // within the group's radius
+            let d = ((p.x - g.x).powi(2) + (p.y - g.y).powi(2)).sqrt();
+            assert!(d + DOT <= g.radius, "{}", p.host_id);
+        }
+        assert!(sides.0 > 0 && sides.1 > 0);
+        for (i, a) in map.groups.iter().enumerate() {
+            for b in &map.groups[i + 1..] {
+                let d = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+                assert!(d >= a.radius + b.radius, "{} / {}", a.name, b.name);
+            }
+        }
+        // areas: two columns either side of the line, off the card
+        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
+        let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
+        let area = web.area.unwrap();
+        let line = area.x + area.split.expect("a mixed group is split");
+        let mut seen = 0;
+        for p in map.hosts.iter().filter(|p| (p.gx, p.gy) == (web.x, web.y)) {
+            if hosts[&p.host_id].agent.is_empty() {
+                assert!(p.x - DOT >= line, "{}", p.host_id);
+            } else {
+                assert!(p.x + DOT <= line, "{}", p.host_id);
+            }
+            assert!(p.x + DOT <= area.x + area.w && p.y + DOT <= area.y + area.h);
+            let on_card = (p.x - web.x).abs() < CARD_W / 2.0 + DOT
+                && (p.y - web.y).abs() < CARD_H / 2.0 + DOT;
+            assert!(!on_card, "{}", p.host_id);
+            seen += 1;
+        }
+        assert_eq!(seen, web.total);
+        // a group of passive hosts only: not split
+        let map = layout(&fleet(), Display::Areas, &BTreeSet::new(), &selectors());
+        assert!(map.areas.iter().all(|a| a.split.is_none()));
     }
 
     #[test]
@@ -1661,6 +2547,181 @@ mod tests {
     }
 
     #[test]
+    fn moved_groups_and_hosts_stay_where_put() {
+        let hosts = fleet();
+        for display in [Display::Graph, Display::Areas] {
+            let auto = layout(&hosts, display, &BTreeSet::new(), &selectors());
+            let (web_index, web) = auto.group_named("git/web").unwrap();
+            let h3 = auto.placed_in("git/web", "h3").unwrap();
+            let mut arranged = Arrangement::default();
+            arranged
+                .groups
+                .insert("git/web".into(), (web.x + 1000.0, web.y - 500.0));
+            arranged
+                .hosts
+                .entry("git/web".into())
+                .or_default()
+                .insert("h3".into(), (-400.0, 30.0));
+            let mut map = auto.clone();
+            arrange(&mut map, &arranged);
+            let (_, moved) = map.group_named("git/web").unwrap();
+            assert_eq!((moved.x, moved.y), (web.x + 1000.0, web.y - 500.0));
+            // its other hosts follow it, the moved one sits at its offset
+            for (i, (a, b)) in auto.hosts.iter().zip(&map.hosts).enumerate() {
+                if i == h3 {
+                    assert_eq!((b.x, b.y), (moved.x - 400.0, moved.y + 30.0));
+                } else if a.group == web_index {
+                    let (dx, dy) = (b.x - a.x, b.y - a.y);
+                    assert!(
+                        (dx - 1000.0).abs() < 1e-6 && (dy + 500.0).abs() < 1e-6,
+                        "{}",
+                        a.host_id
+                    );
+                    assert_eq!((b.gx, b.gy), (moved.x, moved.y));
+                } else {
+                    assert_eq!((a.x, a.y), (b.x, b.y));
+                }
+            }
+            // areas hold their moved hosts; bounds hold everything
+            if let Some(area) = moved.area {
+                let p = &map.hosts[h3];
+                assert!(p.x >= area.x && p.x <= area.x + area.w);
+                assert_eq!(map.areas[web_index], area);
+            }
+            let (x0, y0, x1, y1) = map.bounds;
+            assert!(
+                map.hosts
+                    .iter()
+                    .all(|p| p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1)
+            );
+            // a drag shows the same as its result
+            let picks: Picks = [Grab::Group("git/web".into())].into();
+            let dragged = auto.shifted(&picks, 1000.0, -500.0);
+            let (_, g) = dragged.group_named("git/web").unwrap();
+            assert_eq!((g.x, g.y), (moved.x, moved.y));
+            // nothing moved: the automatic layout
+            let mut same = auto.clone();
+            arrange(&mut same, &Arrangement::default());
+            assert!(same == auto);
+        }
+    }
+
+    #[test]
+    fn picks_move_together() {
+        let hosts = fleet();
+        let auto = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
+        let host = |group: &str, host: &str| Grab::Host {
+            group: group.into(),
+            host: host.into(),
+        };
+        // a group, one of its hosts (moves with it, once) and a host of
+        // another group
+        let picks: Picks = [
+            Grab::Group("git/web".into()),
+            host("git/web", "h3"),
+            host("git/db", "h1"),
+        ]
+        .into();
+        let mut arranged = Arrangement::default();
+        auto.moved(&picks, 50.0, 20.0, &mut arranged);
+        let (_, web) = auto.group_named("git/web").unwrap();
+        assert_eq!(arranged.groups["git/web"], (web.x + 50.0, web.y + 20.0));
+        assert_eq!(arranged.hosts.len(), 1);
+        let mut map = auto.clone();
+        arrange(&mut map, &arranged);
+        let dragged = auto.shifted(&picks, 50.0, 20.0);
+        for (i, a) in auto.hosts.iter().enumerate() {
+            let (b, c) = (&map.hosts[i], &dragged.hosts[i]);
+            // the drag shows what is saved
+            assert!(
+                (b.x - c.x).abs() < 1e-6 && (b.y - c.y).abs() < 1e-6,
+                "{}",
+                a.host_id
+            );
+            let moves = auto.groups[a.group].name == "git/web"
+                || (auto.groups[a.group].name == "git/db" && a.host_id == "h1");
+            let d = (b.x - a.x, b.y - a.y);
+            if moves {
+                assert!(
+                    (d.0 - 50.0).abs() < 1e-6 && (d.1 - 20.0).abs() < 1e-6,
+                    "{}",
+                    a.host_id
+                );
+            } else {
+                assert_eq!(d, (0.0, 0.0), "{}", a.host_id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_selection_rectangle_picks_what_it_holds() {
+        let hosts = fleet();
+        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
+        // around a whole area: its group, not its hosts one by one
+        let (_, web) = map.group_named("git/web").unwrap();
+        let a = web.area.unwrap();
+        let picks = map.in_box(a.x + a.w + 1.0, a.y + a.h + 1.0, a.x - 1.0, a.y - 1.0);
+        assert!(picks.contains(&Grab::Group("git/web".into())));
+        assert!(
+            !picks
+                .iter()
+                .any(|p| matches!(p, Grab::Host { group, .. } if group == "git/web"))
+        );
+        // around one host: that host
+        let i = map.placed_in("git/db", "h1").unwrap();
+        let p = &map.hosts[i];
+        let picks = map.in_box(p.x - 2.0, p.y - 2.0, p.x + 2.0, p.y + 2.0);
+        assert_eq!(
+            picks,
+            [Grab::Host {
+                group: "git/db".into(),
+                host: "h1".into()
+            }]
+            .into()
+        );
+        // empty space: nothing
+        assert!(map.in_box(-1e6, -1e6, -1e6 + 5.0, -1e6 + 5.0).is_empty());
+    }
+
+    #[test]
+    fn folding_glides_from_the_layout_before() {
+        let hosts = fleet();
+        let open = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
+        let folded: BTreeSet<String> = ["git/web".to_string()].into();
+        let closed = layout(&hosts, Display::Areas, &folded, &selectors());
+        let mut motion = Motion::of(&open);
+        // start: where things were, the folding hosts included
+        let first = motion.frame(&closed, 0.0);
+        assert_eq!(first.hosts.len(), open.hosts.len());
+        for p in &first.hosts {
+            let g = &first.groups[p.group].name;
+            let i = open.placed_in(g, &p.host_id).unwrap();
+            assert_eq!(
+                (p.x, p.y),
+                (open.hosts[i].x, open.hosts[i].y),
+                "{g} {}",
+                p.host_id
+            );
+        }
+        // end: the new layout, the folded hosts under their card
+        let last = motion.frame(&closed, 1.0);
+        let (web_index, web) = closed.group_named("git/web").unwrap();
+        for p in &last.hosts[closed.hosts.len()..] {
+            assert_eq!((p.group, p.x, p.y), (web_index, web.x, web.y));
+        }
+        assert!(last.hosts[..closed.hosts.len()] == closed.hosts[..]);
+        // unfolding: hosts leave their card
+        let mut motion = Motion::of(&closed);
+        let first = motion.frame(&open, 0.0);
+        let (_, folded_web) = closed.group_named("git/web").unwrap();
+        let h3 = open.placed_in("git/web", "h3").unwrap();
+        assert_eq!(
+            (first.hosts[h3].x, first.hosts[h3].y),
+            (folded_web.x, folded_web.y)
+        );
+    }
+
+    #[test]
     fn graph_groups_without_overlap() {
         let hosts = fleet();
         let job = |id: &str, host: &str, state: &str, created_at| {
@@ -1684,8 +2745,9 @@ mod tests {
         let rings = rings(&jobs);
         assert_eq!(rings, [("h1".to_string(), Ring::Started)].into());
         let map = layout(&hosts, Display::Graph, &BTreeSet::new(), &selectors());
-        assert_eq!(map.groups.len(), 4);
-        assert_eq!(map.hosts.len(), 122);
+        // every assignment of a host, as in the areas display
+        assert_eq!(map.groups.len(), 5);
+        assert_eq!(map.hosts.len(), 244);
         let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
         assert!(matches!(&web.target, Some(GroupTarget::Assignment(r, _)) if r == "git/web"));
         assert!(
@@ -1693,7 +2755,8 @@ mod tests {
                 .iter()
                 .any(|g| g.name == "(unassigned)" && g.target.is_none())
         );
-        assert_eq!(map.running(&rings).iter().sum::<usize>(), 1);
+        // h1 runs a job: counted in each of its groups (git/base, git/db)
+        assert_eq!(map.running(&rings).iter().sum::<usize>(), 2);
         // worst hosts on the inner ring
         let first_web = map
             .hosts
@@ -1718,11 +2781,14 @@ mod tests {
         let folded: BTreeSet<String> = ["git/web".to_string(), "git/db".to_string()].into();
         let map = layout(&hosts, Display::Graph, &folded, &selectors());
         let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
-        assert!(web.collapsed && web.total == 40);
+        assert!(web.collapsed && web.total == 41);
         assert!(map.hosts.iter().all(|p| (p.gx, p.gy) != (web.x, web.y)));
-        // folded hosts still count in their group (h1 is a db), but are not placed
+        // folded hosts still count in their group (h1 is a db), but are not
+        // placed there (only in git/base, not folded)
         let db_index = map.groups.iter().position(|g| g.name == "git/db").unwrap();
         assert_eq!(map.running(&rings)[db_index], 1);
-        assert!(map.placements("h1").next().is_none());
+        let db = &map.groups[db_index];
+        assert!(map.placements("h1").all(|p| (p.gx, p.gy) != (db.x, db.y)));
+        assert_eq!(map.placements("h1").count(), 1);
     }
 }

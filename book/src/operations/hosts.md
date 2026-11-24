@@ -14,9 +14,17 @@ A host definition gives regency everything it needs to reach a host:
 | host vars | variables for templates |
 
 Definitions come from [sources](sources.md): Git repositories (read-only in
-regency), the API, or the web UI (**Hosts → Add host** for an SSH host
-with the runners' key, **Administration → Host definitions**: create,
-edit, delete).
+regency), the API, or the web UI: **Hosts → Add host** (tabs *Over SSH*,
+*Over SSHOQ*, *With Regops*) for a host reached with the runners' key (SSHOQ
+authenticates with the same key) or running the regops agent; a host's page (**Hosts →** the host) shows its
+definitions and edits, adds or deletes them (any connection method).
+
+The **Hosts** page lists every host, whether regency has seen it (it has
+outcomes) or only defined it: a defined host that never ran shows as
+*Never run* until its first job, and the *Defined by* column shows its
+sources (`regops` for a host whose agent reports by itself, `—` for a host
+known only from its outcomes). Deleting a definition never deletes the
+host's history.
 
 ## The runners' SSH key
 
@@ -89,20 +97,39 @@ picked up by the next firing.
 - **Map** (home page): one card per assignment (hosts without one in
   *(unassigned)*), with its hosts as dots colored by their state against their
   effective expected state ([Assignments](assignments.md)): grey when
-  unassigned. Two displays: **graph** (hosts on rings around the card, the
-  least compliant nearest; a host with several assignments around its last
-  one, the most specific) and **areas** (each group a rectangle holding its
-  hosts; a host with several assignments drawn in each).
+  unassigned. Two displays of the same groups, a host with several
+  assignments drawn in each of them: **graph** (hosts on rings around the
+  card) and **areas** (each group a rectangle holding its hosts). In a group with
+  both kinds, proactive hosts (regops) are on the left and passive ones
+  (reached by runners) on the right: two half-ring lobes either side of the
+  card, like ∞, in the graph; two columns with a dashed line between them
+  in the areas.
   Each card has **Assess** and **Reach** buttons (each host runs its own
   effective state; an assignment's dialog can also run a hand-written
   attribute once). Once confirmed, the run opens in the right panel and
   is followed live: whether the command was accepted, LIVE then FINISHED,
   a progress bar, counts and its hosts (those needing attention first;
-  click one to see it). A click on a card folds or unfolds its hosts. A host with
+  click one to see it). The browser keeps a run until all its jobs have
+  ended: after a reload, or back from another page, its panel opens again,
+  and a **Job in progress** button per run, at the right end of the
+  toolbar, brings its panel back after closing it or looking at a host. A click on a card folds or unfolds its hosts
+  (they glide back under it, or out of it). **Organize** (toolbar): drag a
+  card to move its group with its hosts, or a host to move it alone (it
+  then follows its group). Pick several things with **Ctrl + click** or a
+  **selection rectangle** (drag on empty space; with Ctrl it adds to the
+  picked ones), then drag any of them to move them all; a click on empty
+  space unpicks everything. In this mode a click on a card picks it
+  instead of folding it, and the middle button pans. The browser
+  remembers the arrangement, per display; **Auto-arrange** puts everything
+  back in the automatic layout. A host with
   a job in progress (pending, running or abort requested) turns light blue
   until it finishes. Zoom with the wheel, pan by dragging;
   hovering a host shows a tip next to the cursor; clicking it opens the
-  right panel (its assignments and effective state), **Details** opens
+  right panel: its summary, what runs on it live, and its **Last known
+  state**, the attributes of its effective state each coloured with its
+  outcome in the host's last job (green compliant or fixed, red not
+  compliant or failed, amber aborted, grey not checked); unfold one for
+  its definition and what the last job did with it. **Details** opens
   its page. The right panel floats over the map; drag its left edge to
   resize it. Proactive hosts
   are diamonds ([Proactive hosts](proactive-hosts.md)).

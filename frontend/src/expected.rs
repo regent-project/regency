@@ -8,7 +8,8 @@ use serde_json::Value;
 
 use crate::Session;
 use crate::client::api;
-use crate::client::{authed, client, command_id};
+use crate::client::{authed, client, command_id, format_ms};
+use crate::live::{LastRun, finished_mark, outcome_label, static_lines};
 use crate::pages::spawn_scoped;
 
 /// An expected state to display: a final state (D27) with the blame of
@@ -282,7 +283,12 @@ pub fn yamlish(value: &Value) -> String {
 /// stack of expected states (base first), Assess / Reach now with it, and
 /// its attributes with the state each one comes from.
 #[component]
-pub fn HostStateExplorer(#[prop(into)] host: Signal<Option<api::HostSummary>>) -> impl IntoView {
+pub fn HostStateExplorer(
+    #[prop(into)] host: Signal<Option<api::HostSummary>>,
+    /// Colour the attributes with the host's last finished job (its log).
+    #[prop(optional)]
+    with_last_run: bool,
+) -> impl IntoView {
     let session = expect_context::<Session>();
     // reload when the host or its effective state changes
     let key = Memo::new(move |_| {
@@ -326,6 +332,68 @@ pub fn HostStateExplorer(#[prop(into)] host: Signal<Option<api::HostSummary>>) -
             StateEntry::composed(&e.state_json, &e.revision, &e.blame, &e.warnings)
         })
     });
+    // the last finished job (D24 log), reloaded when another one finishes
+    let last_job = Memo::new(move |_| {
+        host.with(|h| {
+            h.as_ref()
+                .filter(|h| with_last_run && !h.last_job.is_empty())
+                .map(|h| (h.last_job.clone(), h.last_job_month.clone(), h.state_at))
+        })
+    });
+    // None: loading or no job; Some(Err): a note instead of colours
+    let last_run = RwSignal::new(None::<Result<LastRun, String>>);
+    Effect::new(move |_| {
+        let Some((job_id, month, at)) = last_job.get() else {
+            last_run.set(None);
+            return;
+        };
+        spawn_scoped(async move {
+            let request = api::GetRunLogRequest { job_id, month };
+            let result = match client()
+                .get_run_log(authed(request, &session.token()))
+                .await
+            {
+                Ok(response) => {
+                    let log = response.into_inner();
+                    let job = log.entries.first().map(|e| e.job).unwrap_or_default();
+                    if log.found {
+                        Ok(LastRun::from_log(job, at, &log))
+                    } else {
+                        Err("No log kept for the last job (run_log_max_bytes = 0, or an older runner / regops): outcomes per attribute unknown.".to_string())
+                    }
+                }
+                Err(status) => {
+                    session.check(&status);
+                    Err(status.message().to_string())
+                }
+            };
+            let _ = last_run.try_set(Some(result));
+        });
+    });
+    let run_ok = Signal::derive(move || {
+        last_run.with(|r| r.as_ref().and_then(|r| r.as_ref().ok()).cloned())
+    });
+    let last_head = move || {
+        if !with_last_run {
+            return None;
+        }
+        let compliance = host.with(|h| h.as_ref().map(|h| h.compliance.clone()));
+        Some(match (last_job.get(), last_run.get()) {
+            (None, _) => view! { <p class="muted">"No finished job within retention: the attributes' outcomes are unknown."</p> }.into_any(),
+            (Some(_), None) => view! { <p class="muted">"Loading the last job…"</p> }.into_any(),
+            (Some(_), Some(Err(note))) => view! { <p class="muted">{note}</p> }.into_any(),
+            (Some(_), Some(Ok(run))) => view! {
+                <div class="live-head">
+                    {finished_mark()}
+                    <b>{job_label(run.job)}</b>
+                    {compliance.map(crate::pages::badge)}
+                    <span class="muted">{format!("finished {}", format_ms(run.finished_at))}</span>
+                </div>
+                {run.warnings.iter().map(|w| view! { <p class="warn">{w.clone()}</p> }).collect::<Vec<_>>()}
+                {(!run.general.is_empty()).then(|| static_lines(&run.general))}
+            }.into_any(),
+        })
+    };
     let runnable = move || state.with(Option::is_some);
     let message = RwSignal::new(None::<String>);
     Effect::new(move |_| {
@@ -400,15 +468,22 @@ pub fn HostStateExplorer(#[prop(into)] host: Signal<Option<api::HostSummary>>) -
         </Show>
         <ol class="layers" title="Assignments selecting the host, in the order they are applied (priority, then name), each with its expected states (base first, the last wins)">{layers}</ol>
         {move || error().map(|e| view! { <p class="error">{e}</p> })}
+        {last_head}
         <Show when=runnable>
-            <ExpectedStateView state=state />
+            <ExpectedStateView state=state last_run=run_ok />
         </Show>
     }
 }
 
 /// The attributes of an expected state, one folded row each.
 #[component]
-pub fn ExpectedStateView(#[prop(into)] state: Signal<Option<StateEntry>>) -> impl IntoView {
+pub fn ExpectedStateView(
+    #[prop(into)] state: Signal<Option<StateEntry>>,
+    /// The host's last finished job: each attribute is coloured with its
+    /// outcome there and shows its lines when unfolded.
+    #[prop(optional, into)]
+    last_run: Option<Signal<Option<LastRun>>>,
+) -> impl IntoView {
     let open = RwSignal::new(false);
     move || match state.get() {
         None => view! { <p class="muted">"No expected state selected."</p> }.into_any(),
@@ -430,6 +505,13 @@ pub fn ExpectedStateView(#[prop(into)] state: Signal<Option<StateEntry>>) -> imp
                         .map(|(m, _)| m.clone())
                         .collect();
                     let (kind, name) = attribute_title(attribute);
+                    let ran = last_run.and_then(|run| {
+                        run.with(|run| {
+                            run.as_ref()
+                                .and_then(|run| run.attribute(i, name.as_deref().unwrap_or(&kind)))
+                        })
+                    });
+                    let class = ran.as_ref().map(|(outcome, _)| format!("run-{outcome}"));
                     let detail = match &attribute["Detail"] {
                         Value::Object(map) if map.len() == 1 => {
                             map.values().next().cloned().unwrap_or_default()
@@ -445,13 +527,24 @@ pub fn ExpectedStateView(#[prop(into)] state: Signal<Option<StateEntry>>) -> imp
                     if let Some(timeout) = attribute["Timeout"].as_str() {
                         extra.push(format!("timeout: {timeout}"));
                     }
+                    let pill = ran.as_ref().map(|(outcome, _)| view! {
+                        <span class=format!("run-pill run-{outcome}") title="Outcome in the last job">{outcome_label(outcome)}</span>
+                    });
+                    let last = ran.map(|(outcome, lines)| view! {
+                        <div class="attr-last-run">
+                            <span class="muted">"Last job: "</span>
+                            <span class=format!("run-pill run-{outcome}")>{outcome_label(outcome)}</span>
+                            {(!lines.is_empty()).then(|| static_lines(&lines))}
+                        </div>
+                    });
                     view! {
-                        <li>
+                        <li class=class>
                             <details prop:open=move || open.get()>
                                 <summary>
                                     <span class="index">{i + 1}</span>
                                     <span class="attr-type">{kind}</span>
                                     <span class="attr-name">{name.unwrap_or_default()}</span>
+                                    {pill}
                                     {(!warned.is_empty()).then(|| view! { <span class="attr-warning" title=warned.join("\n")>"⚠"</span> })}
                                     {origin.map(|o| {
                                         let title = match &from {
@@ -474,6 +567,7 @@ pub fn ExpectedStateView(#[prop(into)] state: Signal<Option<StateEntry>>) -> imp
                                 <div class="attr-body">
                                     <span class="muted">{extra.join(" · ")}</span>
                                     <pre>{yamlish(&detail)}</pre>
+                                    {last}
                                 </div>
                             </details>
                         </li>

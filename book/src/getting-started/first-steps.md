@@ -7,7 +7,7 @@ needed).
 
 ## 1. Add a host
 
-On the **Hosts** page, **Add host** offers two ways, one tab each.
+On the **Hosts** page, **Add host** offers three ways, one tab each.
 
 ### Over SSH, from the runners (nothing to install on the host)
 
@@ -30,8 +30,17 @@ the host key fingerprints (required from security level 2:
 `ssh-keyscan 10.0.0.5 | ssh-keygen -lf -`). **Add the host** creates its
 definition (in source `ui`), with the runner's key as its credentials.
 
-**Administration → Host definitions** edits it later, or defines hosts with
-other credentials (regent-sdk JSON, secrets as references only).
+The host's page (**Hosts →** the host, *Definition*) edits it later, or
+gives it other credentials (regent-sdk JSON, secrets as references only).
+
+### Over SSHOQ (SSH over QUIC/HTTP3)
+
+Same as over SSH, for a host running an SSHOQ server: authorize the same
+runner key, then fill in the **Over SSHOQ** form. The address defaults to
+port 443; the URL path is the server's (regent-sdk's default when empty);
+the server certificate is checked against the system CAs, a known_hosts
+file on the runners, or not at all (refused by runners from security
+level 2).
 
 ### With the regops agent
 

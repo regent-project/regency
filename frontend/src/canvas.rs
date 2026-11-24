@@ -19,7 +19,7 @@ use js_sys::wasm_bindgen::closure::Closure;
 use js_sys::wasm_bindgen::{JsCast, JsValue};
 use web_sys::CanvasRenderingContext2d as Ctx;
 
-use crate::map::{DOT, Layout, Rings, Tone, truncate};
+use crate::map::{DOT, Layout, Rings, Tone};
 
 /// Height of host names, in map units (a dot is `2 * DOT` wide).
 const NAME_FONT: f64 = 4.0;
@@ -136,6 +136,8 @@ pub struct Frame<'a> {
     pub hovered: Option<&'a str>,
     /// The host shown in the right panel.
     pub selected: Option<&'a str>,
+    /// Hosts picked on the map (Organize): indices in `layout.hosts`.
+    pub picked: &'a [usize],
     /// Draw host names (zoomed in).
     pub names: bool,
 }
@@ -274,6 +276,17 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
             ctx.stroke();
             let _ = ctx.set_line_dash(&solid);
         }
+        // the line between proactive (left) and passive (right) hosts
+        let _ = ctx.set_line_dash(&dash(&[4.0 / vp.k, 4.0 / vp.k]));
+        ctx.begin_path();
+        for a in areas.iter().filter(|a| !a.folded) {
+            if let Some(split) = a.split {
+                ctx.move_to(a.x + split, a.y + 12.0);
+                ctx.line_to(a.x + split, a.y + a.h - 12.0);
+            }
+        }
+        ctx.stroke();
+        let _ = ctx.set_line_dash(&solid);
     }
 
     // links: host -> its group
@@ -372,6 +385,20 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         }
         ctx.stroke();
     }
+    // picked (Organize): a dashed ring
+    if !f.picked.is_empty() {
+        ctx.set_stroke_style_str(&palette.accent);
+        ctx.set_line_width(vp.line(2.0 / vp.k).max(1.5));
+        let _ = ctx.set_line_dash(&dash(&[3.0, 2.0]));
+        ctx.begin_path();
+        for p in f.picked.iter().filter_map(|i| f.layout.hosts.get(*i)) {
+            if vp.seen(p.x, p.y) {
+                circle(ctx, p.x, p.y, (DOT + 4.0).max(6.0 / vp.k));
+            }
+        }
+        ctx.stroke();
+        let _ = ctx.set_line_dash(&solid);
+    }
     if let Some(id) = f.hovered {
         ctx.set_stroke_style_str(&palette.fg);
         ctx.set_line_width(vp.line(2.5));
@@ -383,19 +410,13 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
     }
 
     // names, in map units like the dots (they grow and shrink with them),
-    // cut to the space between two hosts (24 map units in both displays;
-    // a character is about 0.61 em wide); shown once readable
+    // in full; shown once readable
     if f.names && NAME_FONT * vp.k >= 7.0 {
-        let room = (24.0 / (NAME_FONT * 0.61)) as usize;
         ctx.set_fill_style_str(&palette.muted);
         ctx.set_font(&format!("{NAME_FONT}px system-ui, sans-serif"));
         ctx.set_text_align("center");
         for p in &hosts {
-            let _ = ctx.fill_text(
-                &truncate(&p.host_id, room),
-                p.x,
-                p.y + DOT + 1.0 + NAME_FONT,
-            );
+            let _ = ctx.fill_text(&p.host_id, p.x, p.y + DOT + 1.0 + NAME_FONT);
         }
     }
 }

@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -1610,7 +1610,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "dbwriter"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "endpoint"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2292,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "console_error_panic_hook",
  "futures",
@@ -6398,7 +6398,7 @@ dependencies = [
 
 [[package]]
 name = "regency-aio"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6418,7 +6418,7 @@ dependencies = [
 
 [[package]]
 name = "regencyctl"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6437,7 +6437,7 @@ dependencies = [
 
 [[package]]
 name = "regencylib"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "argon2 0.5.3",
  "axum",
@@ -6479,9 +6479,9 @@ dependencies = [
 
 [[package]]
 name = "regent-sdk"
-version = "0.26.0"
+version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c1a151ff96e284dcdb0b744c65b586daa53be6f68c4602c9be52f4e0a658094"
+checksum = "90e846d0a9f484984dae28c4711abff7d4a44f788e1503897d195704c672770b"
 dependencies = [
  "bytes",
  "chrono",
@@ -6674,7 +6674,7 @@ dependencies = [
 
 [[package]]
 name = "runner"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6981,7 +6981,7 @@ dependencies = [
 
 [[package]]
 name = "scheduler"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7563,7 +7563,7 @@ dependencies = [
 
 [[package]]
 name = "sourcesync"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",

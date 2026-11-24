@@ -112,6 +112,10 @@ a:hover { color: var(--accent-strong); text-decoration: underline; }
 .sidebar nav a:hover .nav-icon { color: var(--fg-strong); }
 .sidebar nav a[aria-current] { background: var(--nav-active); color: var(--accent); }
 .sidebar nav a[aria-current] .nav-icon { color: var(--accent); }
+/* the Live view's icon, while that page is shown: a slow fade to red and back */
+.sidebar nav a[aria-current][href="/"] .nav-icon { animation: live-nav 3s ease-in-out infinite alternate; }
+@keyframes live-nav { from { color: var(--accent); } to { color: var(--live); } }
+@media (prefers-reduced-motion: reduce) { .sidebar nav a[aria-current][href="/"] .nav-icon { animation: none; } }
 .sidebar .nav-section { margin: 1.1rem 0 .4rem; padding: 0 .75rem; font-size: 12px; text-transform: uppercase; letter-spacing: .02em; color: var(--nav-section); }
 .sidebar .nav-section:first-child { margin-top: .5rem; }
 .app.nav-folded .nav-label { display: none; }
@@ -209,7 +213,8 @@ td:has(> button) { white-space: nowrap; width: 1%; text-align: right; }
 .badge.aborted, .badge.ABORTED, .badge.ABORT_REQUIRED, .badge.EXPIRED { --tone: var(--warn); }
 .badge.PENDING, .badge.STARTED { --tone: var(--job); }
 .badge.ready { --tone: var(--ok); }
-.badge.unassigned { --tone: var(--muted); background: transparent; border-color: var(--line); }
+.badge.unassigned, .badge.never_run { --tone: var(--muted); background: transparent; border-color: var(--line); }
+.badge.never_run { border-style: dashed; }
 .badge.outdated { border-style: dashed; border-color: color-mix(in srgb, var(--tone) 60%, var(--panel)); }
 .badge.invalid { --tone: var(--warn); }
 .counts { display: flex; gap: .5rem; margin-bottom: 1rem; flex-wrap: wrap; }
@@ -275,6 +280,12 @@ svg.map { cursor: grab; touch-action: none; user-select: none; }
 svg.map:active { cursor: grabbing; }
 svg.map.over-host { cursor: pointer; }
 svg.map .group { cursor: pointer; }
+svg.map.organizing .group, svg.map.organizing.over-host { cursor: move; }
+svg.map.grabbing, svg.map.grabbing .group { cursor: grabbing; }
+svg.map.organizing { cursor: crosshair; }
+svg.map .group.picked .card { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 6 3; }
+svg.map .marquee { fill: color-mix(in srgb, var(--accent) 10%, transparent); stroke: var(--accent); stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; pointer-events: none; }
+.toolbar button.active { border-color: var(--primary); color: var(--accent); background: var(--brand-soft); }
 svg.map .group .card { fill: var(--panel); stroke: var(--line-strong); stroke-width: 1; }
 svg.map .group:hover .card { stroke: var(--primary); }
 svg.map .group .band { fill: var(--primary); opacity: .85; }
@@ -608,3 +619,21 @@ label.filter input, label.filter select { font-weight: 400; }
 table.run-jobs { font-size: 13px; }
 table.run-jobs td { padding: .4rem .7rem; }
 table.run-jobs td:last-child { text-align: right; }
+/* last known state: each attribute coloured with its outcome in the last job */
+.attributes > li[class*="run-"] { box-shadow: inset 3px 0 0 var(--tone); }
+.run-compliant, .run-fixed { --tone: var(--ok); }
+.run-not_compliant, .run-fix_failed, .run-cannot_fix, .run-failed { --tone: var(--bad); }
+.run-aborted { --tone: var(--warn); }
+.run-not_checked, .run-unknown { --tone: var(--unknown); }
+.run-pill { font-size: 11px; white-space: nowrap; padding: 0 .45rem; border-radius: 999px; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); border: 1px solid color-mix(in srgb, var(--tone) 35%, transparent); }
+.attr-last-run { margin-top: .5rem; }
+.live-log.static { max-height: 40vh; margin-top: .3rem; }
+.map-side .attributes summary { flex-wrap: wrap; row-gap: .15rem; }
+.attributes summary .attr-type, .attributes summary .run-pill, .attributes summary .attr-origin { flex: none; }
+.attributes summary .attr-name { flex: 1 1 6rem; min-width: 0; }
+/* a run in progress on the Live view's toolbar: brings its panel back */
+.toolbar button.run-chip { display: inline-flex; align-items: center; gap: .4rem; }
+.toolbar button.run-chip .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--live); }
+/* the runs in progress: at the toolbar's right end */
+.toolbar .run-chips { margin-left: auto; display: inline-flex; flex-wrap: wrap; gap: .4rem; justify-content: flex-end; }
+.toolbar.beside-panel { padding-right: calc(var(--right, 2.5rem) + .75rem); }

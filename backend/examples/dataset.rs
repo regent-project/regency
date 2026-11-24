@@ -2,7 +2,8 @@
 //! `dev/run_locally` runs it): API source `dataset` with thousands of hosts in
 //! labels, a few expected states and assignments selecting hosts by labels
 //! (D29: `baseline` for every host but the unassigned `bastion` ones, plus
-//! `web`/`db`/`edge` where their labels match) and
+//! `web`/`db`/`edge` where their labels match, and `ssh-managed` for the
+//! passive hosts only, runners' SSH settings, never the regops agents) and
 //! recurring orders, then a first Assess of everything so the map fills at
 //! once.
 //!
@@ -32,7 +33,10 @@
 //! `/tmp/regency-dev/agents/<host>/config.toml`, the endpoint's CA at PATH.
 //! They are not in the catalog: until regops can take its state from regency
 //! (D23), they show as unassigned hosts, with their outcomes and live logs. Each run rewrites those files with a fixed mix of
-//! compliant hosts and drift; `legacy` hosts are unreachable SSH hosts
+//! compliant hosts and drift (on about 4 % of the hosts, `etc/nginx` is
+//! read-only with `server_tokens` missing: a Reach cannot fix "hide nginx
+//! version" there, the web hosts among them stay not compliant on that one
+//! attribute); `legacy` hosts are unreachable SSH hosts
 //! (error outcomes); `edge` hosts belong to the `edge` runner pool.
 //! The catalog is only written when it differs (deterministic command ids);
 //! hosts beyond `--hosts` are removed from the catalog.
@@ -270,11 +274,22 @@ fn builder(host: &Host, ssh: Option<&SshTarget>) -> ManagedHostBuilder {
 
 /// Write the host's files: most hosts compliant, some drifting.
 fn prepare_files(host: &Host) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     let root = Path::new(ROOT).join("hosts").join(&host.id);
     for dir in ["etc/ssh", "etc/nginx", "etc/postgresql"] {
         std::fs::create_dir_all(root.join(dir))?;
     }
+    // writable again, should an earlier run have locked it
+    let nginx_dir = root.join("etc/nginx");
+    std::fs::set_permissions(&nginx_dir, std::fs::Permissions::from_mode(0o755))?;
+    if let Ok(meta) = std::fs::metadata(nginx_dir.join("nginx.conf")) {
+        let mut mode = meta.permissions();
+        mode.set_mode(0o644);
+        std::fs::set_permissions(nginx_dir.join("nginx.conf"), mode)?;
+    }
     let drift = |what: &str, percent: u64| roll(&host.id, what) < percent;
+    // a host a Reach cannot fix: its nginx configuration is read-only
+    let locked = drift("nginx-locked", 4);
     let mut motd = String::from("Welcome\n");
     if !drift("motd", 12) {
         motd.push_str("Managed by regency: unauthorized access is prohibited\n");
@@ -283,9 +298,15 @@ fn prepare_files(host: &Host) -> std::io::Result<()> {
     if drift("sshd", 6) {
         sshd.push_str("PermitRootLogin yes\n");
     }
+    if !drift("sshd-alive", 10) {
+        sshd.push_str("ClientAliveInterval 30\n");
+    }
+    if !drift("sshd-startups", 7) {
+        sshd.push_str("MaxStartups 100:30:200\n");
+    }
     let swappiness = if drift("sysctl", 8) { 60 } else { 10 };
     let mut nginx = String::from("worker_processes auto;\n");
-    if !drift("nginx", 15) {
+    if !locked && !drift("nginx", 15) {
         nginx.push_str("server_tokens off;\n");
     }
     let mut postgres = String::from("max_connections = 500\n");
@@ -304,6 +325,13 @@ fn prepare_files(host: &Host) -> std::io::Result<()> {
         format!("vm.swappiness = {swappiness}\n"),
     )?;
     std::fs::write(root.join("etc/nginx/nginx.conf"), nginx)?;
+    if locked {
+        std::fs::set_permissions(
+            nginx_dir.join("nginx.conf"),
+            std::fs::Permissions::from_mode(0o444),
+        )?;
+        std::fs::set_permissions(&nginx_dir, std::fs::Permissions::from_mode(0o555))?;
+    }
     std::fs::write(root.join("etc/postgresql/postgresql.conf"), postgres)?;
     std::fs::write(root.join("etc/firewall.rules"), firewall)?;
     Ok(())
@@ -327,6 +355,28 @@ fn doc_id(body: &CatalogBody) -> String {
     }
 }
 
+/// What runners need from the sshd of the hosts they reach (passive hosts
+/// only: regops agents are never reached over SSH).
+const SSH_MANAGED: &str = r#"---
+Attributes:
+  - Name: SSH keep-alive
+    Privilege: !None
+    Timeout: 20s
+    Detail: !LineInFile
+      FilePath: "/tmp/regency-dev/hosts/{{ host }}/etc/ssh/sshd_config"
+      State: !Present
+        Create: true
+      Line: !Raw "ClientAliveInterval 30"
+  - Name: SSH connection bursts
+    Privilege: !None
+    Timeout: 20s
+    Detail: !LineInFile
+      FilePath: "/tmp/regency-dev/hosts/{{ host }}/etc/ssh/sshd_config"
+      State: !Present
+        Create: true
+      Line: !Raw "MaxStartups 100:30:200"
+"#;
+
 fn selector(assignments: &[&str]) -> api::HostSelector {
     let mut selector = api::HostSelector::new();
     for assignment in assignments {
@@ -345,6 +395,13 @@ const ASSIGNMENTS: &[(&str, &str, i32, &[&str])] = &[
     ("web", r#"{kind=~"web|api"}"#, 10, &["web"]),
     ("db", r#"{storage="db"}"#, 10, &["db"]),
     ("edge", r#"{kind="edge"}"#, 10, &["edge"]),
+    // passive hosts only: a reporting agent's hosts carry `source="regops"`
+    (
+        "ssh-managed",
+        r#"{kind!="bastion", source!="regops"}"#,
+        5,
+        &["ssh-managed"],
+    ),
 ];
 
 enum Every {
@@ -523,6 +580,7 @@ async fn main() -> anyhow::Result<()> {
         ("web", WEB),
         ("db", DB),
         ("edge", EDGE),
+        ("ssh-managed", SSH_MANAGED),
     ] {
         items.push(CatalogBody::ExpectedState(ExpectedStateDef {
             source_id: SOURCE.into(),

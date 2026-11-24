@@ -117,6 +117,16 @@ fn short_json(text: &str) -> String {
     crate::map::truncate(&compact, 200)
 }
 
+/// A `remediation_finished` entry: the remediation was applied
+/// (`{"Success": …}`), not `{"Failure": …}` and not missing (never tried).
+pub fn remediation_succeeded(entry: &api::LiveEntry) -> bool {
+    match serde_json::from_str::<serde_json::Value>(&entry.text) {
+        Ok(serde_json::Value::Object(map)) => !map.contains_key("Failure"),
+        Ok(_) => true,
+        Err(_) => !entry.text.is_empty(),
+    }
+}
+
 /// How one entry reads in a log: its CSS class and text.
 pub fn describe(entry: &api::LiveEntry) -> (&'static str, String) {
     match entry.kind.as_str() {
@@ -148,6 +158,10 @@ pub fn describe(entry: &api::LiveEntry) -> (&'static str, String) {
         "remediation_finished" if entry.text.is_empty() => (
             "step bad",
             "  ⚙ remediation could not be applied".to_string(),
+        ),
+        "remediation_finished" if !remediation_succeeded(entry) => (
+            "step bad",
+            format!("  ⚙ failed: {}", short_json(&entry.text)),
         ),
         "remediation_finished" => ("step", format!("  ⚙ done: {}", short_json(&entry.text))),
         "command_started" => ("cmd", format!("  $ {}", entry.text)),
@@ -362,6 +376,152 @@ pub fn RunLogView(
     }
 }
 
+/// A finished job's log split per attribute (D24), to show next to each
+/// attribute of a host's state what the job found about it.
+#[derive(Clone, PartialEq, Default)]
+pub struct LastRun {
+    pub job: i32,
+    pub finished_at: i64,
+    /// Lines about no attribute (e.g. the run being aborted).
+    pub general: Vec<api::LiveEntry>,
+    /// Per attribute index of the run: its name there and its lines.
+    pub attributes: std::collections::BTreeMap<i64, (String, Vec<api::LiveEntry>)>,
+    pub aborted: bool,
+    /// Every update of the run was kept (nothing cropped or dropped).
+    pub complete: bool,
+    /// Why the log is incomplete, if it is.
+    pub warnings: Vec<String>,
+}
+
+impl LastRun {
+    pub fn from_log(job: i32, finished_at: i64, log: &api::GetRunLogResponse) -> Self {
+        let mut run = Self {
+            job,
+            finished_at,
+            complete: true,
+            ..Default::default()
+        };
+        if let Some(info) = &log.info {
+            run.warnings = log_warnings(info);
+            run.complete = run.warnings.is_empty();
+        }
+        for entry in &log.entries {
+            match entry.kind.as_str() {
+                "aborted" => run.aborted = true,
+                "dropped" => run.complete = false,
+                _ => {}
+            }
+            if entry.attribute_index < 0 {
+                run.general.push(entry.clone());
+            } else {
+                run.attributes
+                    .entry(entry.attribute_index)
+                    .or_insert_with(|| (entry.attribute.clone(), Vec::new()))
+                    .1
+                    .push(entry.clone());
+            }
+        }
+        run
+    }
+
+    /// What the run found about attribute `index`, whose name in a run is
+    /// `name` (its `Name`, or its kind when unnamed): its outcome
+    /// ([`attribute_outcome`]) and its lines. Found at the same place, or by
+    /// its name elsewhere when the run checked an earlier state (attributes
+    /// added or removed since moved the others); `not_checked` when the run
+    /// did not have it. `None` when it cannot be told: several attributes of
+    /// the run have that name (unnamed ones of one kind) and none is at its
+    /// place.
+    pub fn attribute(
+        &self,
+        index: usize,
+        name: &str,
+    ) -> Option<(&'static str, Vec<api::LiveEntry>)> {
+        let found = match self.attributes.get(&(index as i64)) {
+            Some((ran, entries)) if ran == name => Some(entries),
+            _ => {
+                let mut same = self.attributes.values().filter(|(ran, _)| ran == name);
+                match (same.next(), same.next()) {
+                    (Some((_, entries)), None) => Some(entries),
+                    (Some(_), Some(_)) => return None,
+                    _ => None,
+                }
+            }
+        };
+        match found {
+            Some(entries) => Some((
+                attribute_outcome(self.job, entries, self.aborted),
+                entries.clone(),
+            )),
+            None if self.complete => Some(("not_checked", Vec::new())),
+            None => Some(("unknown", Vec::new())),
+        }
+    }
+}
+
+/// One attribute's outcome in a run, from its log lines: `compliant`,
+/// `fixed` (Reach), `not_compliant`, `fix_failed`, `cannot_fix`, `failed`
+/// (the assessment itself), `aborted` or `unknown`.
+pub fn attribute_outcome(job: i32, entries: &[api::LiveEntry], aborted: bool) -> &'static str {
+    let reach = job == api::JobKind::Reach as i32;
+    let verdict = entries
+        .iter()
+        .find(|e| e.kind == "attribute_assessed")
+        .map(|e| e.verdict.as_str());
+    let started = entries
+        .iter()
+        .filter(|e| e.kind == "remediation_started")
+        .count();
+    let finished = entries.iter().filter(|e| e.kind == "remediation_finished");
+    let (done, refused) = finished.fold((0, 0), |(done, refused), e| {
+        if remediation_succeeded(e) {
+            (done + 1, refused)
+        } else {
+            (done, refused + 1)
+        }
+    });
+    match verdict {
+        None if aborted => "aborted",
+        None => "unknown",
+        Some("compliant") => "compliant",
+        Some("failed") => "failed",
+        Some("non_compliant_fatal") => "cannot_fix",
+        Some("non_compliant") if !reach => "not_compliant",
+        Some("non_compliant") if refused > 0 => "fix_failed",
+        Some("non_compliant") if started > 0 && done == started => "fixed",
+        Some("non_compliant") if aborted => "aborted",
+        Some("non_compliant") => "not_compliant",
+        Some(_) => "unknown",
+    }
+}
+
+/// How an attribute outcome reads.
+pub fn outcome_label(outcome: &str) -> &'static str {
+    match outcome {
+        "compliant" => "Compliant",
+        "fixed" => "Fixed",
+        "not_compliant" => "Not compliant",
+        "fix_failed" => "Fix failed",
+        "cannot_fix" => "Cannot be fixed",
+        "failed" => "Check failed",
+        "aborted" => "Aborted",
+        "not_checked" => "Not checked",
+        _ => "Unknown",
+    }
+}
+
+/// Log lines, rendered once (a finished run's).
+pub fn static_lines(entries: &[api::LiveEntry]) -> impl IntoView + use<> {
+    let lines = entries
+        .iter()
+        .map(|e| {
+            let (class, text) = describe(e);
+            view! { <div class=class>{text}</div> }
+        })
+        .collect::<Vec<_>>();
+    view! { <div class="live-log static">{lines}</div> }
+}
+
 /// Running jobs (newest first) of a host, from a jobs map.
 pub fn running_jobs(
     jobs: &std::collections::BTreeMap<String, api::JobSummary>,
@@ -396,7 +556,7 @@ pub fn HostLive(#[prop(into)] running: Signal<Vec<api::JobSummary>>) -> impl Int
 /// The hover tip of a map host: live when a job runs, else its last outcome.
 #[component]
 pub fn HostTip(host: api::HostSummary, running: Option<api::JobSummary>) -> impl IntoView {
-    let state = crate::pages::host_state(&host).to_string();
+    let state = crate::map::map_state(crate::pages::host_state(&host)).to_string();
     view! {
         <div class="tip-head"><b>{host.host_id.clone()}</b> " " {crate::pages::badge(state)}</div>
         {match running {
@@ -407,9 +567,8 @@ pub fn HostTip(host: api::HostSummary, running: Option<api::JobSummary>) -> impl
                         {finished_mark()}
                         <span class="muted">"last outcome " {format_ms(host.state_at)}</span>
                     </div>
-                    <div>{crate::pages::badge(host.compliance.clone())}</div>
                     {(!host.error.is_empty()).then(|| view! { <p class="error">{crate::map::truncate(&host.error, 200)}</p> })}
-                    <p class="muted">"No job running. Click the host for its details and last log."</p>
+                    <p class="muted">"No job running. Click the host for its last known state."</p>
                 </div>
             }.into_any(),
         }}
@@ -479,5 +638,123 @@ mod tests {
         out.attribute_index = -1;
         feed.entries.push(out);
         assert_eq!(feed.current_attribute(), Some((2, "nginx".into())));
+    }
+
+    fn at(kind: &str, index: i64, name: &str) -> api::LiveEntry {
+        api::LiveEntry {
+            kind: kind.into(),
+            attribute_index: index,
+            attribute: name.into(),
+            ..Default::default()
+        }
+    }
+
+    fn assessed(index: i64, name: &str, verdict: &str) -> api::LiveEntry {
+        api::LiveEntry {
+            verdict: verdict.into(),
+            ..at("attribute_assessed", index, name)
+        }
+    }
+
+    fn finished(index: i64, name: &str, text: &str) -> api::LiveEntry {
+        api::LiveEntry {
+            text: text.into(),
+            ..at("remediation_finished", index, name)
+        }
+    }
+
+    #[test]
+    fn attributes_get_their_outcome_from_the_log() {
+        let reach = api::JobKind::Reach as i32;
+        let assess = api::JobKind::Assess as i32;
+        let fixed = [
+            assessed(0, "a", "non_compliant"),
+            at("remediation_started", 0, "a"),
+            finished(0, "a", "{}"),
+        ];
+        assert_eq!(attribute_outcome(reach, &fixed, false), "fixed");
+        assert_eq!(
+            attribute_outcome(assess, &fixed[..1], false),
+            "not_compliant"
+        );
+        let refused = [
+            assessed(0, "a", "non_compliant"),
+            at("remediation_started", 0, "a"),
+            finished(0, "a", ""),
+        ];
+        assert_eq!(attribute_outcome(reach, &refused, false), "fix_failed");
+        // a remediation tried and failed: its outcome says so
+        let failed = [
+            assessed(0, "a", "non_compliant"),
+            at("remediation_started", 0, "a"),
+            finished(0, "a", r#"{"Failure":"Permission denied"}"#),
+        ];
+        assert_eq!(attribute_outcome(reach, &failed, false), "fix_failed");
+        assert_eq!(
+            describe(&failed[2]),
+            (
+                "step bad",
+                r#"  ⚙ failed: Failure "Permission denied""#.to_string()
+            )
+        );
+        let fixed_json = [
+            assessed(0, "a", "non_compliant"),
+            at("remediation_started", 0, "a"),
+            finished(0, "a", r#"{"Success":null}"#),
+        ];
+        assert_eq!(attribute_outcome(reach, &fixed_json, false), "fixed");
+        assert_eq!(attribute_outcome(reach, &refused[..2], true), "aborted");
+        assert_eq!(
+            attribute_outcome(assess, &[assessed(0, "a", "compliant")], false),
+            "compliant"
+        );
+        assert_eq!(
+            attribute_outcome(assess, &[assessed(0, "a", "failed")], false),
+            "failed"
+        );
+        assert_eq!(
+            attribute_outcome(assess, &[at("attribute_started", 0, "a")], true),
+            "aborted"
+        );
+
+        let log = api::GetRunLogResponse {
+            found: true,
+            info: Some(api::RunLogInfo::default()),
+            entries: vec![
+                at("attribute_started", 0, "Apt"),
+                assessed(0, "Apt", "compliant"),
+                at("attribute_started", 1, "sshd"),
+                assessed(1, "sshd", "non_compliant"),
+            ],
+        };
+        let run = LastRun::from_log(assess, 1, &log);
+        assert_eq!(run.attribute(0, "Apt").map(|r| r.0), Some("compliant"));
+        assert_eq!(
+            run.attribute(1, "sshd").map(|(o, lines)| (o, lines.len())),
+            Some(("not_compliant", 2))
+        );
+        // an earlier state: found by name elsewhere, or not checked at all
+        assert_eq!(run.attribute(3, "sshd").map(|r| r.0), Some("not_compliant"));
+        assert_eq!(run.attribute(1, "nginx").map(|r| r.0), Some("not_checked"));
+        // two unnamed attributes of one kind, neither at that place
+        let mut twice = run.clone();
+        twice.attributes.insert(5, ("Apt".into(), Vec::new()));
+        assert_eq!(twice.attribute(4, "Apt"), None);
+        assert_eq!(twice.attribute(5, "Apt").map(|r| r.0), Some("unknown"));
+        assert_eq!(run.attribute(2, "x").map(|r| r.0), Some("not_checked"));
+        let cropped = api::GetRunLogResponse {
+            info: Some(api::RunLogInfo {
+                omitted_updates: 3,
+                limit_bytes: 10,
+                ..Default::default()
+            }),
+            ..log
+        };
+        assert_eq!(
+            LastRun::from_log(assess, 1, &cropped)
+                .attribute(2, "x")
+                .map(|r| r.0),
+            Some("unknown")
+        );
     }
 }

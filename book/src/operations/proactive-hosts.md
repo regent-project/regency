@@ -7,7 +7,7 @@ appears in regency like any other, with its history.
 
 ## On the regops host
 
-**Hosts → Add host → With regops** issues an enrollment
+**Hosts → Add host → With Regops** issues an enrollment
 token for a host id and gives the commands writing the endpoint's CA
 certificate and the token, and the configuration below, filled in (with
 `server_name` when the endpoint's address is not in its certificate).

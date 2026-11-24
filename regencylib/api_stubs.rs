@@ -45,6 +45,7 @@ pub fn stubs() {
         .method(method("upsert_user", "UpsertUser", "UpsertUserRequest", "Accepted", false))
         .method(method("delete_user", "DeleteUser", "DeleteUserRequest", "Accepted", false))
         .method(method("create_api_token", "CreateApiToken", "CreateApiTokenRequest", "CreateApiTokenResponse", false))
+        .method(method("revoke_api_token", "RevokeApiToken", "RevokeApiTokenRequest", "Accepted", false))
         .method(method("upsert_policy", "UpsertPolicy", "UpsertPolicyRequest", "Accepted", false))
         .method(method("delete_policy", "DeletePolicy", "DeletePolicyRequest", "Accepted", false))
         .method(method("issue_enrollment_token", "IssueEnrollmentToken", "IssueEnrollmentTokenRequest", "IssueEnrollmentTokenResponse", false))

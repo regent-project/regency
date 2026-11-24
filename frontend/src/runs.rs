@@ -37,6 +37,74 @@ pub struct ActiveRun {
     pub status: RwSignal<RunStatus>,
 }
 
+/// A run the browser keeps (localStorage) until every job of it ended, so
+/// its panel comes back after a reload or a visit to another page.
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct KeptRun {
+    pub command_id: String,
+    /// `api::JobKind` as a number.
+    pub job: i32,
+    pub target: String,
+    pub expected: usize,
+    pub started_at: i64,
+}
+
+/// Runs older than this are forgotten (the jobs view covers 24 h).
+const KEPT_FOR_MS: i64 = 24 * 3600 * 1000;
+const KEPT_KEY: &str = "regency.map.runs";
+
+impl KeptRun {
+    pub fn of(run: &ActiveRun) -> Self {
+        KeptRun {
+            command_id: run.command_id.clone(),
+            job: run.job as i32,
+            target: run.target.clone(),
+            expected: run.expected,
+            started_at: run.started_at,
+        }
+    }
+
+    /// Back to a run followed in the panel; its command was accepted (a
+    /// refused one is never kept).
+    pub fn active(&self, status: RwSignal<RunStatus>) -> ActiveRun {
+        status.set(RunStatus::Accepted);
+        ActiveRun {
+            command_id: self.command_id.clone(),
+            job: api::JobKind::try_from(self.job).unwrap_or(api::JobKind::Assess),
+            target: self.target.clone(),
+            expected: self.expected,
+            started_at: self.started_at,
+            status,
+        }
+    }
+
+    /// The kept runs, oldest first, without those older than a day.
+    pub fn load(now: i64) -> Vec<KeptRun> {
+        let runs: Vec<KeptRun> = crate::client::storage()
+            .and_then(|s| s.get_item(KEPT_KEY).ok().flatten())
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default();
+        fresh(runs, now)
+    }
+
+    pub fn save(runs: &[KeptRun]) {
+        let Some(storage) = crate::client::storage() else {
+            return;
+        };
+        if runs.is_empty() {
+            let _ = storage.remove_item(KEPT_KEY);
+        } else if let Ok(json) = serde_json::to_string(runs) {
+            let _ = storage.set_item(KEPT_KEY, &json);
+        }
+    }
+}
+
+fn fresh(runs: Vec<KeptRun>, now: i64) -> Vec<KeptRun> {
+    runs.into_iter()
+        .filter(|r| now - r.started_at < KEPT_FOR_MS)
+        .collect()
+}
+
 /// The run's jobs counted by where they stand.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Progress {
@@ -105,6 +173,28 @@ impl Stage {
             _ => Stage::Other,
         }
     }
+}
+
+/// Follow the jobs of a kept run, whether its panel is open or not, and
+/// call `on_over` once every one of them has ended. Lives as long as the
+/// current owner (the run's "Job in progress" button).
+pub fn watch_run_over(command_id: String, on_over: Callback<()>) {
+    let jobs = RwSignal::new(BTreeMap::<String, api::JobSummary>::new());
+    let error = RwSignal::new(None::<String>);
+    watch_jobs_of(
+        Some(api::watch_jobs_request::Filter::Origin(command_id)),
+        24,
+        jobs,
+        error,
+    );
+    let told = StoredValue::new(false);
+    Effect::new(move |_| {
+        if jobs.with(|j| Progress::of(j).finished()) && !told.get_value() {
+            told.set_value(true);
+            // later: `on_over` removes the button, whose owner runs this effect
+            set_timeout(move || on_over.run(()), std::time::Duration::ZERO);
+        }
+    });
 }
 
 /// Jobs listed in the panel at most (the counts cover them all).
@@ -294,6 +384,25 @@ mod tests {
         assert!(!p.finished());
         let hosts: Vec<String> = ordered(&jobs).into_iter().map(|j| j.host_id).collect();
         assert_eq!(hosts, ["c", "d", "b", "e", "a", "f"]);
+    }
+
+    #[test]
+    fn kept_runs_last_a_day() {
+        let run = |id: &str, started_at| KeptRun {
+            command_id: id.into(),
+            job: api::JobKind::Reach as i32,
+            target: "assignment dataset/web".into(),
+            expected: 3,
+            started_at,
+        };
+        let now = 2 * KEPT_FOR_MS;
+        let kept = fresh(
+            vec![run("old", now - KEPT_FOR_MS - 1), run("new", now - 1000)],
+            now,
+        );
+        assert_eq!(kept, [run("new", now - 1000)]);
+        let json = serde_json::to_string(&kept).unwrap();
+        assert_eq!(serde_json::from_str::<Vec<KeptRun>>(&json).unwrap(), kept);
     }
 
     #[test]

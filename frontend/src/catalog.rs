@@ -1,6 +1,6 @@
 //! Catalog pages (D11, D23, D29): CRUD on the expected states and
 //! assignments of API/frontend sources; items of Git sources are shown
-//! read-only (edited in Git). Host definitions are in `config::HostsConfig`.
+//! read-only (edited in Git). Host definitions are in `hostdefs`.
 //! Every write is a `catalog.upsert` / `catalog.delete` command (D10):
 //! backend accepts it, dbwriter applies it, so lists are reloaded a moment
 //! after a change.

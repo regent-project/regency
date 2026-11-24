@@ -19,6 +19,18 @@ fn paths(name: &str) -> &'static str {
         "layers" => {
             r#"<path d="M12 3.5 20.5 8 12 12.5 3.5 8z"/><path d="m3.5 12 8.5 4.5 8.5-4.5"/><path d="m3.5 16 8.5 4.5 8.5-4.5"/>"#
         }
+        // a calendar with a repeat arrow: recurring jobs (CronJob)
+        "calendar" => {
+            r#"<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M15 14.5a3 3 0 1 1-1-2.2M15 11.5v1.8h-1.8"/>"#
+        }
+        // two people: accounts (Users)
+        "users" => {
+            r#"<circle cx="9" cy="8.5" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6M17.5 14.4c2 .8 3.5 2.9 3.5 5.6"/>"#
+        }
+        // a key: authorization policies (Policies)
+        "key" => {
+            r#"<circle cx="8" cy="15" r="4.5"/><path d="m11.2 11.8 8.8-8.8M16.5 6.5l2.5 2.5M14 9l2 2"/>"#
+        }
         "clock" => r#"<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>"#,
         "edit" => {
             r#"<path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17z"/><path d="m13.5 8.5 3 3"/>"#

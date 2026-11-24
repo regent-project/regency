@@ -24,47 +24,8 @@ use cedar_policy::{
 
 use crate::model::PolicyDoc;
 
-pub const SCHEMA: &str = r#"
-entity Group;
-entity User in [Group];
-entity ServiceAccount in [Group];
-entity Source;
-entity Assignment in [Source];
-entity Host in [Assignment, Source];
-entity ExpectedState in [Source];
-entity Order;
-entity Settings;
-entity Policy;
-
-action "read" appliesTo {
-  principal: [User, ServiceAccount],
-  resource: [Host, Source, Assignment, ExpectedState, Order, Settings, Policy],
-};
-action "assess", "reach", "abort", "host.delete", "host.approve_cert", "host.enroll" appliesTo {
-  principal: [User, ServiceAccount],
-  resource: [Host],
-};
-action "order.upsert", "order.delete" appliesTo {
-  principal: [User, ServiceAccount],
-  resource: [Order],
-};
-action "settings.set", "config.set", "user.upsert", "user.delete" appliesTo {
-  principal: [User, ServiceAccount],
-  resource: [Settings],
-};
-action "catalog.upsert", "catalog.delete" appliesTo {
-  principal: [User, ServiceAccount],
-  resource: [Source, Assignment, Host, ExpectedState],
-};
-action "source.refresh" appliesTo {
-  principal: [User, ServiceAccount],
-  resource: [Source],
-};
-action "policy.upsert", "policy.delete" appliesTo {
-  principal: [User, ServiceAccount],
-  resource: [Policy],
-};
-"#;
+/// Cedar schema (also shown by the web client's Policies page).
+pub const SCHEMA: &str = include_str!("policy.cedarschema");
 
 /// Shipped role templates (D12).
 pub const TEMPLATES: &[(&str, &str)] = &[

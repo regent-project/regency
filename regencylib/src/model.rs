@@ -804,6 +804,79 @@ impl SettingsDoc {
     }
 }
 
+/// D13 deny-list keys of the settings document.
+pub const REVOKED_HOSTS_KEY: &str = "revoked_hosts";
+pub const REVOKED_SERIALS_KEY: &str = "revoked_serials";
+pub const REVOKED_FINGERPRINTS_KEY: &str = "revoked_fingerprints";
+
+/// Check a deny list set through `settings.set` and write it the way the
+/// endpoint compares it (exact strings): serials as lowercase hex without
+/// separators, fingerprints as uppercase `AB:CD:…` SHA-256; entries trimmed,
+/// sorted, deduplicated, empty ones dropped. `None` when `key` is not a
+/// deny list.
+pub fn normalize_revocation(
+    key: &str,
+    value: &serde_json::Value,
+) -> Option<Result<serde_json::Value, String>> {
+    let normalize: fn(&str) -> Result<String, String> = match key {
+        REVOKED_HOSTS_KEY => |s| Ok(s.to_string()),
+        REVOKED_SERIALS_KEY => |s| {
+            let hex: String = s
+                .chars()
+                .filter(|c| !matches!(c, ':' | ' '))
+                .collect::<String>()
+                .to_ascii_lowercase();
+            let hex = hex.strip_prefix("0x").unwrap_or(&hex).to_string();
+            if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!("{s:?} is not a hexadecimal serial number"));
+            }
+            Ok(hex)
+        },
+        REVOKED_FINGERPRINTS_KEY => |s| {
+            let s = s.strip_prefix("SHA256:").unwrap_or(s);
+            let hex: String = s
+                .chars()
+                .filter(|c| !matches!(c, ':' | ' '))
+                .collect::<String>()
+                .to_ascii_uppercase();
+            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "{s:?} is not a SHA-256 fingerprint (64 hex digits, AB:CD:… or plain)"
+                ));
+            }
+            Ok(hex
+                .as_bytes()
+                .chunks(2)
+                .map(|pair| String::from_utf8_lossy(pair).into_owned())
+                .collect::<Vec<_>>()
+                .join(":"))
+        },
+        _ => return None,
+    };
+    let Some(items) = value.as_array() else {
+        return Some(Err(format!("{key} must be a list of strings")));
+    };
+    let mut out = BTreeSet::new();
+    for item in items {
+        let Some(text) = item.as_str() else {
+            return Some(Err(format!("{key} must be a list of strings")));
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        match normalize(text) {
+            Ok(entry) => {
+                out.insert(entry);
+            }
+            Err(e) => return Some(Err(format!("{key}: {e}"))),
+        }
+    }
+    Some(Ok(serde_json::Value::from(
+        out.into_iter().collect::<Vec<_>>(),
+    )))
+}
+
 // ---------------------------------------------------------------- orders (D16)
 
 pub fn order_doc_id(order_id: &str) -> String {
@@ -1381,5 +1454,46 @@ mod d28_tests {
         assert!(!head.serves("https://github.com/org/infra", "dev"));
         assert!(!head.serves("https://github.com/org/other", "main"));
         assert!(!head.serves("", "main"));
+    }
+}
+
+#[cfg(test)]
+mod revocation_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn deny_lists_are_written_as_the_endpoint_compares_them() {
+        assert!(normalize_revocation("retention_months", &json!(3)).is_none());
+        let hosts = normalize_revocation(
+            REVOKED_HOSTS_KEY,
+            &json!([" web-02 ", "", "db-01", "web-02"]),
+        );
+        assert_eq!(hosts, Some(Ok(json!(["db-01", "web-02"]))));
+        let serials = normalize_revocation(REVOKED_SERIALS_KEY, &json!(["0x1A:2B", "7f 00"]));
+        assert_eq!(serials, Some(Ok(json!(["1a2b", "7f00"]))));
+        let hex = "ab".repeat(32);
+        let colons = vec!["AB"; 32].join(":");
+        let fps = normalize_revocation(
+            REVOKED_FINGERPRINTS_KEY,
+            &json!([hex, format!("SHA256:{colons}")]),
+        );
+        assert_eq!(fps, Some(Ok(json!([colons]))));
+        assert!(matches!(
+            normalize_revocation(REVOKED_SERIALS_KEY, &json!(["zz"])),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            normalize_revocation(REVOKED_FINGERPRINTS_KEY, &json!(["ABCD"])),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            normalize_revocation(REVOKED_HOSTS_KEY, &json!("web-02")),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            normalize_revocation(REVOKED_HOSTS_KEY, &json!([1])),
+            Some(Err(_))
+        ));
     }
 }

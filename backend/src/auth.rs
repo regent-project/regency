@@ -187,17 +187,6 @@ impl Authenticator {
 
     /// `rgt_<account>.<token id>.<secret>`
     async fn api_token(&self, token: &str, rest: &str) -> Result<Caller, Status> {
-        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        if let Some((account, at)) = self
-            .verified_tokens
-            .lock()
-            .expect("tokens")
-            .get(&digest)
-            .cloned()
-            && at.elapsed() < TOKEN_CACHE
-        {
-            return self.local_caller(&account);
-        }
         let mut parts = rest.rsplitn(3, '.');
         let (Some(secret), Some(token_id), Some(account)) =
             (parts.next(), parts.next(), parts.next())
@@ -208,12 +197,25 @@ impl Authenticator {
             .view
             .user(account)
             .ok_or_else(|| Status::unauthenticated("invalid API token"))?;
+        // a revoked token (removed from its account) fails at once, cached or not
         let hash = user
             .tokens
             .iter()
             .find(|t| t.token_id == token_id)
             .map(|t| t.hash.clone())
             .ok_or_else(|| Status::unauthenticated("invalid API token"))?;
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if let Some((cached, at)) = self
+            .verified_tokens
+            .lock()
+            .expect("tokens")
+            .get(&digest)
+            .cloned()
+            && at.elapsed() < TOKEN_CACHE
+            && cached == account
+        {
+            return self.local_caller(account);
+        }
         let secret = secret.to_string();
         let ok = tokio::task::spawn_blocking(move || verify_secret(&secret, &hash))
             .await
