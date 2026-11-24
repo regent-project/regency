@@ -108,8 +108,8 @@ async fn fire(
         return Ok(());
     };
     let (hostdefs, all_assignments) = state.hosts();
-    // D29: the hosts its selector matches (each gets its whole effective
-    // state, every assignment of the host included)
+    // D29: the hosts its selector matches; D30: each runs this assignment
+    // only
     let resolution = resolve(
         &HostSelector::assignment(assignment.reference()),
         &hostdefs,
@@ -157,12 +157,17 @@ async fn fire(
     let ttl = (slot.end - Utc::now())
         .to_std()
         .unwrap_or(Duration::from_millis(1));
+    let scope = std::collections::BTreeSet::from([assignment.reference()]);
     let order_id = order.order_id.clone();
     let rev_owned = rev.to_string();
-    let key = move |host: &str| recurring_key(&order_id, &rev_owned, slot.number, host);
+    let key =
+        move |host: &str, _: Option<&str>| recurring_key(&order_id, &rev_owned, slot.number, host);
     let plan = Plan {
         job: order.job,
-        body: Body::Effective(&assignments),
+        body: Body::Assignments {
+            assignments: &assignments,
+            scope: Some(&scope),
+        },
         created_at: slot.start,
         origin: &order.order_id,
         ttl: Some(ttl),

@@ -390,6 +390,14 @@ impl View {
             }),
         };
         let effective = catalog.assignments.effective(&all_labels);
+        let revisions = effective
+            .assignments()
+            .into_iter()
+            .map(|a| {
+                let revision = catalog.assignments.revision_of(&a);
+                (a, revision)
+            })
+            .collect();
         let agent = report.as_ref().map(|report| {
             let head = self
                 .source_heads
@@ -425,6 +433,7 @@ impl View {
             labels: labels.into_iter().collect(),
             conflicting: catalog.conflicting.contains(host_id),
             effective,
+            revisions,
             agent,
         }
     }

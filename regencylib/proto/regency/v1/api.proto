@@ -168,6 +168,23 @@ message HostSummary {
   // How the applied state differs from its assignment's final state (D27);
   // empty = same, or no assignment.
   string state_drift = 30;
+  // D30: the host's state for each of its assignments (same order as
+  // `assignments`).
+  repeated AssignmentStatus assignment_states = 31;
+}
+
+// D30: a host's state for one assignment.
+message AssignmentStatus {
+  string assignment = 1;  // source/name
+  // As HostSummary.compliance; "unknown" when never checked (or cleared by
+  // retention).
+  string compliance = 2;
+  int64 state_at = 3;       // Unix ms of the outcome, 0 if none
+  string state_revision = 4;  // revision checked; empty = unknown
+  string revision = 5;      // the assignment's current revision
+  string job_id = 6;        // job of that outcome
+  string job_month = 7;
+  string error = 8;
 }
 
 message WatchHostsRequest {

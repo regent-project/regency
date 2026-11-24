@@ -97,6 +97,12 @@ pub fn design(db: &str) -> Value {
             "by_month".into(),
             json!({ "map": "function (doc) { if (doc.type === 'host') { if (doc.last_assess) emit(doc.last_assess.month, null); if (doc.last_reach && (!doc.last_assess || doc.last_reach.month !== doc.last_assess.month)) emit(doc.last_reach.month, null); } }" }),
         );
+        // D30: also the months of the states per assignment (a new name, as
+        // views are never changed in place, D20)
+        views.insert(
+            "by_month_v2".into(),
+            json!({ "map": "function (doc) { if (doc.type === 'host') { var m = {}; if (doc.last_assess) m[doc.last_assess.month] = 1; if (doc.last_reach) m[doc.last_reach.month] = 1; if (doc.assignments) { for (var a in doc.assignments) { var o = doc.assignments[a].outcome; if (o) m[o.month] = 1; } } for (var k in m) emit(k, null); } }" }),
+        );
     } else if db == DB_CATALOG {
         views.insert(
             "by_source".into(),

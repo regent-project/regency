@@ -201,6 +201,11 @@ reach_partitions = 2
         envelope.header.state_revision.is_some() && !envelope.header.one_shot,
         "effective state (D23)"
     );
+    // D30: the order's assignment only
+    assert_eq!(
+        envelope.header.assignment.as_deref(),
+        Some(format!("{source}/web").as_str())
+    );
     assert!(delivery.properties.expiration().is_some());
     assert!(
         envelope
@@ -243,7 +248,12 @@ reach_partitions = 2
             !key.starts_with(&format!("rec:{denied}:")),
             "denied order fired"
         );
-        if key == run_key(&command_id, &host) {
+        // D30: one task per assignment of the host
+        if key == run_key(&command_id, &host, Some(&format!("{source}/web"))) {
+            assert_eq!(
+                envelope.header.assignment.as_deref(),
+                Some(format!("{source}/web").as_str())
+            );
             assert_eq!(envelope.task.job(), Job::Reach);
             assert!(
                 delivery

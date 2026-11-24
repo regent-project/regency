@@ -559,6 +559,8 @@ pub fn HostTip(host: api::HostSummary, running: Option<api::JobSummary>) -> impl
     let state = crate::map::map_state(crate::pages::host_state(&host)).to_string();
     view! {
         <div class="tip-head"><b>{host.host_id.clone()}</b> " " {crate::pages::badge(state)}</div>
+        // D30: its state per assignment
+        {crate::pages::assignment_states(&host)}
         {match running {
             Some(job) => view! { <LiveJob job=job tail=8 /> }.into_any(),
             None => view! {

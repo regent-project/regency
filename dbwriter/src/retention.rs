@@ -120,7 +120,7 @@ async fn forget_instances(couch: &Couch, now: DateTime<Utc>) -> Result<(), Couch
 /// newer outcome always wins). Returns how many were reset.
 async fn reset_hosts(couch: &Couch, month: &str) -> Result<usize, CouchError> {
     let rows = couch
-        .view::<Value, Value>(DB_STATE, "regency", "by_month", &[("key", json!(month))])
+        .view::<Value, Value>(DB_STATE, "regency", "by_month_v2", &[("key", json!(month))])
         .await?;
     let mut count = 0;
     for row in rows {

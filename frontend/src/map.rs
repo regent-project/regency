@@ -1,20 +1,33 @@
-//! Main page: live infrastructure map, in two displays. Graph: each
-//! assignment (or label value, state) is a node (a card with its
-//! compliance and Assess/Reach buttons); its hosts are dots on rings around
-//! it, linked to it, colored by their compliance against their effective
-//! expected state (D23; grey: unassigned or outdated), in name order from
-//! the inner ring outwards; a host in several assignments (D29) is drawn
-//! around its last one (the most specific). Areas: each group is a
-//! rectangle holding its hosts in a grid, in name order (they never move
-//! when a state changes), its card in the top right corner; a host in
-//! several assignments is drawn in each of them. A host with a job
+//! Main page: live infrastructure map, a graph drawing each host once
+//! (D31; the areas display was dropped). Hosts are clustered by signature: the exact set of
+//! assignments selecting them (D29); a host's colour is the worst of its
+//! states per assignment (D30; grey: unassigned, outdated or not checked).
+//! Graph: each assignment is a node (a card with its hosts' states for it
+//! and Assess / Reach of that assignment only, D30), placed near the
+//! assignments it shares many hosts with ([`node_anchors`]); each cluster
+//! lies between its assignments' nodes, its hosts on rings inside a soft
+//! outline with a caption shown while the pointer is on it (one line per
+//! assignment, then the counts; a visual helper, never a card; folded, a
+//! small pie badge). Links ([`Links`]): grouped by default, one ribbon per
+//! (cluster, assignment), plain and as wide as its hosts (their dots show
+//! their colours), an arrow from the assignment to the hosts it constrains (faint
+//! chevrons slide along it, on a canvas of their own: [`canvas::draw_flow`];
+//! none with prefers-reduced-motion); hovering or clicking an assignment's card shows its ribbons'
+//! statistics (hosts per state); a host's own links (in its colour for
+//! each assignment) show on demand: hovering the host, hovering or
+//! clicking a ribbon (Escape closes them), or Links: per host. Hosts stay in name order in
+//! their cluster (they never move when a state changes). A host with a job
 //! in progress (PENDING, STARTED or ABORT_REQUIRED) is drawn in the job
 //! colour, without animation (redrawing rings every frame cost too much at
 //! scale). Zoom with the wheel,
-//! pan by dragging, click a card to fold/unfold its hosts (positions glide
-//! for 200 ms, [`Motion`]). Organize: dragging a card or a host moves it,
-//! kept by the browser per display ([`Arrangement`]); Auto-arrange goes
-//! back to the automatic layout.
+//! pan by dragging empty space (or with the middle button), click a
+//! cluster's card to fold/unfold its hosts (positions glide for 200 ms,
+//! [`Motion`]). Dragging a card, a host or a cluster (anywhere on its surface,
+//! [`Layout::cluster_on`]) moves it (no mode to enter);
+//! Ctrl / Cmd + click or a Shift + drag rectangle picks several, dragged
+//! together; Escape drops the picks. Moves are kept by the browser
+//! ([`Arrangement`]); Auto-arrange goes back to the automatic
+//! layout.
 //!
 //! Shown as "Live view". The legend is a layer on top of the map; one panel,
 //! on the right: groups and the selected host (the fleet counts and the
@@ -48,20 +61,20 @@ use crate::{Session, Theme};
 pub const DOT: f64 = 7.0;
 /// Distance between two hosts on a ring and between two rings.
 const RING_SPACING: f64 = 24.0;
-/// Radius of the first ring of hosts around a group card.
-const FIRST_RING: f64 = 150.0;
-const CARD_W: f64 = 236.0;
-const CARD_H: f64 = 124.0;
+/// D31 (graph display): radius of a folded cluster's badge (a pie of its
+/// hosts' states; unfolded, a cluster is only an outline around its hosts).
+const BADGE_R: f64 = 22.0;
+/// Height of a line of a cluster's caption (D31).
+const CAPTION_LINE: f64 = 14.0;
+/// Milliseconds between two frames of the ribbons' flow (D31).
+const FLOW_MS: f64 = 33.0;
+const CARD_W: f64 = 208.0;
+const CARD_H: f64 = 116.0;
 /// Free space between two groups.
 const GAP: f64 = 70.0;
-/// Areas display: grid step of the hosts, inner margin and free space
-/// between two areas.
-const CELL: f64 = 24.0;
-const AREA_PAD: f64 = 16.0;
 /// Graph display, a group with proactive and passive hosts: each half is
 /// pushed this far from the card's vertical axis (a gap twice as wide).
 const SPLIT: f64 = 36.0;
-const AREA_GAP: f64 = 40.0;
 
 fn is_ok(state: &str) -> bool {
     matches!(state, "compliant" | "reach_success")
@@ -82,35 +95,34 @@ pub fn map_state(state: &str) -> &str {
     }
 }
 
-/// How the map shows its groups.
+/// D31 graph display: how host → assignment links are drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Display {
-    /// Cards with their hosts on rings around them, linked to them.
-    Graph,
-    /// Rectangles holding their hosts.
-    Areas,
+pub enum Links {
+    /// One plain ribbon per (cluster, assignment), as wide as its hosts;
+    /// its statistics when its assignment is hovered or selected; a host's
+    /// own links only on demand (hovering it, a ribbon hovered or opened).
+    Grouped,
+    /// Every host's links (bundled only when zoomed far out or folded).
+    PerHost,
 }
 
-impl Display {
-    const KEY: &str = "regency.map.display";
+impl Links {
+    const KEY: &str = "regency.map.links";
 
     fn saved() -> Self {
         match crate::client::storage().and_then(|s| s.get_item(Self::KEY).ok().flatten()) {
-            Some(v) if v == "areas" => Display::Areas,
-            _ => Display::Graph,
+            Some(v) if v == "per-host" => Links::PerHost,
+            _ => Links::Grouped,
         }
     }
 
     fn save(self) {
         if let Some(storage) = crate::client::storage() {
-            let _ = storage.set_item(Self::KEY, self.name());
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Display::Graph => "graph",
-            Display::Areas => "areas",
+            let value = match self {
+                Links::Grouped => "grouped",
+                Links::PerHost => "per-host",
+            };
+            let _ = storage.set_item(Self::KEY, value);
         }
     }
 }
@@ -229,48 +241,53 @@ pub struct Placed {
     pub gy: f64,
     /// Index of its group in the layout.
     pub group: usize,
+    /// D31 (graph display): its links, one per assignment selecting it:
+    /// the index of the assignment's node in the layout, and the host's
+    /// colour for that assignment (D30).
+    pub links: Vec<(usize, Tone)>,
+}
+
+/// What a group of the map is (D31).
+#[derive(Clone, PartialEq, Debug)]
+enum Kind {
+    /// An assignment's node (graph display): its card and Assess / Reach.
+    Node,
+    /// The hosts selected by exactly these assignments (their signature;
+    /// empty: unassigned hosts), each host drawn once.
+    Cluster { signature: Vec<String> },
 }
 
 #[derive(Clone, PartialEq)]
 struct Group {
+    /// Unique key (moves, fold): `a:<assignment>` or `c:<signature>`.
     name: String,
+    /// What the card shows.
+    label: String,
+    kind: Kind,
+    /// Its card's size.
+    card: (f64, f64),
     /// What the Assess/Reach buttons select; `None` = no buttons.
     target: Option<GroupTarget>,
     /// Center of its card.
     x: f64,
     y: f64,
     radius: f64,
-    /// Its rectangle (areas display).
-    area: Option<Area>,
     total: usize,
     ok: usize,
     bad: usize,
     collapsed: bool,
 }
 
-/// A group's rectangle in the areas display (top left corner and size).
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Area {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub folded: bool,
-    /// A group with proactive and passive hosts: x of the line between its
-    /// two columns, from `x`.
-    pub split: Option<f64>,
-}
-
 #[derive(Clone, PartialEq, Default)]
 pub struct Layout {
     groups: Vec<Group>,
-    /// Hosts of the unfolded groups (areas display: one per group of the
-    /// host, so a host may be placed more than once).
+    /// Hosts of the unfolded clusters, each once (D31).
     pub hosts: Vec<Placed>,
     /// Draw the links of hosts to their group (graph display).
     pub links: bool,
-    /// Rectangles of the groups (areas display), drawn under the hosts.
-    pub areas: Vec<Area>,
+    /// D31 (graph display): the links of a cluster to one of its
+    /// assignments, bundled (zoomed out, or the cluster folded).
+    pub bundles: Vec<Bundle>,
     /// Every host (folded ones too): its groups, and its index in `hosts`
     /// in each of them.
     of_host: HashMap<String, Vec<(usize, Option<usize>)>>,
@@ -278,7 +295,125 @@ pub struct Layout {
     bounds: (f64, f64, f64, f64),
 }
 
+/// The links of a cluster's hosts to one assignment node (D31).
+#[derive(Clone, PartialEq, Debug)]
+pub struct Bundle {
+    pub cluster: usize,
+    pub node: usize,
+    /// Hosts per colour, indexed by [`Tone::rank`].
+    pub tones: [usize; 5],
+}
+
 impl Layout {
+    /// Center of group `index` (a node's card, a cluster's center).
+    pub fn center(&self, index: usize) -> Option<(f64, f64)> {
+        self.groups.get(index).map(|g| (g.x, g.y))
+    }
+
+    /// D31: where the ribbon of `bundle` starts (on its cluster's outline)
+    /// and ends (under its assignment's card).
+    pub fn bundle_ends(&self, bundle: &Bundle) -> Option<((f64, f64), (f64, f64))> {
+        let (c, n) = (
+            self.groups.get(bundle.cluster)?,
+            self.groups.get(bundle.node)?,
+        );
+        let (dx, dy) = (n.x - c.x, n.y - c.y);
+        let len = (dx * dx + dy * dy).sqrt().max(1e-9);
+        let start = (c.x + dx / len * c.radius, c.y + dy / len * c.radius);
+        Some((start, canvas::link_end(start.0, start.1, n.x, n.y)))
+    }
+
+    /// D31: the cluster under (`x`, `y`): inside its outline (or badge),
+    /// a few units around it, or on its caption above it (one line per
+    /// assignment and the counts); the smallest one when they overlap.
+    pub fn cluster_at(&self, x: f64, y: f64) -> Option<usize> {
+        self.cluster_near(x, y, true)
+    }
+
+    /// D31: the cluster whose surface (inside its outline, or its badge
+    /// when folded) holds (`x`, `y`): grabbed there to move it; the
+    /// smallest one when they overlap.
+    pub fn cluster_on(&self, x: f64, y: f64) -> Option<usize> {
+        self.cluster_near(x, y, false)
+    }
+
+    fn cluster_near(&self, x: f64, y: f64, around: bool) -> Option<usize> {
+        self.groups
+            .iter()
+            .enumerate()
+            .filter_map(|(i, g)| {
+                let Kind::Cluster { signature } = &g.kind else {
+                    return None;
+                };
+                let (dx, dy) = (x - g.x, y - g.y);
+                let margin = if around { 10.0 } else { 0.0 };
+                let inside = (dx * dx + dy * dy).sqrt() <= g.radius + margin;
+                let lines = signature.len().max(1) as f64 + 1.0;
+                let caption = around
+                    && dy <= -g.radius
+                    && dy >= -g.radius - 12.0 - lines * CAPTION_LINE
+                    && dx.abs() <= g.radius.max(130.0);
+                (inside || caption).then_some((i, g.radius))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+
+    /// D31: the ribbon nearest to (`x`, `y`) among those `drawn`, within
+    /// its half width plus a few pixels (`k`: map units per pixel).
+    pub fn bundle_at(
+        &self,
+        x: f64,
+        y: f64,
+        k: f64,
+        drawn: impl Fn(&Bundle) -> bool,
+    ) -> Option<usize> {
+        self.bundles
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| drawn(b))
+            .filter_map(|(i, b)| {
+                let ((ax, ay), (bx, by)) = self.bundle_ends(b)?;
+                let (vx, vy) = (bx - ax, by - ay);
+                let len2 = (vx * vx + vy * vy).max(1e-9);
+                let t = (((x - ax) * vx + (y - ay) * vy) / len2).clamp(0.0, 1.0);
+                let d = ((x - ax - t * vx).powi(2) + (y - ay - t * vy).powi(2)).sqrt();
+                let reach = (ribbon_pixels(b.tones.iter().sum()) / 2.0 + 4.0) * k;
+                (d <= reach).then_some((i, d))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+
+    /// The names of the cluster and the node of bundle `index`.
+    fn bundle_names(&self, index: usize) -> Option<(String, String)> {
+        let b = self.bundles.get(index)?;
+        Some((
+            self.groups.get(b.cluster)?.name.clone(),
+            self.groups.get(b.node)?.name.clone(),
+        ))
+    }
+
+    /// The bundle of that cluster and node (names), if any.
+    pub fn bundle_index(&self, names: &(String, String)) -> Option<usize> {
+        self.bundles.iter().position(|b| {
+            self.groups
+                .get(b.cluster)
+                .is_some_and(|g| g.name == names.0)
+                && self.groups.get(b.node).is_some_and(|g| g.name == names.1)
+        })
+    }
+
+    /// A cluster folded (its hosts not drawn).
+    pub fn folded(&self, index: usize) -> bool {
+        self.groups.get(index).is_some_and(|g| g.collapsed)
+    }
+
+    /// Index of the node of assignment `name` (its group key).
+    pub fn group_index(&self, name: &str) -> Option<usize> {
+        self.groups.iter().position(|g| g.name == name)
+    }
+
     /// Every place where host `host_id` is drawn.
     pub fn placements<'a>(&'a self, host_id: &str) -> impl Iterator<Item = &'a Placed> + 'a {
         self.of_host
@@ -325,7 +460,17 @@ impl Layout {
         }
     }
 
-    fn place(&mut self, group: usize, host: &api::HostSummary, x: f64, y: f64, gx: f64, gy: f64) {
+    #[allow(clippy::too_many_arguments)]
+    fn place(
+        &mut self,
+        group: usize,
+        host: &api::HostSummary,
+        x: f64,
+        y: f64,
+        gx: f64,
+        gy: f64,
+        links: Vec<(usize, Tone)>,
+    ) {
         self.of_host
             .entry(host.host_id.clone())
             .or_default()
@@ -341,6 +486,7 @@ impl Layout {
             gx,
             gy,
             group,
+            links,
         });
     }
 
@@ -352,12 +498,12 @@ impl Layout {
     }
 }
 
-/// Positions of `n` hosts on concentric rings around a card, and the radius
-/// of the outer ring.
-fn ring_offsets(n: usize) -> (Vec<(f64, f64)>, f64) {
+/// Positions of `n` hosts on concentric rings around a card, the first at
+/// `first`, and the radius of the outer ring.
+fn ring_offsets(n: usize, first: f64) -> (Vec<(f64, f64)>, f64) {
     let mut out = Vec::with_capacity(n);
-    let mut radius = FIRST_RING;
-    let mut outer = FIRST_RING;
+    let mut radius = first;
+    let mut outer = first;
     let mut ring = 0usize;
     while out.len() < n {
         let capacity = ((std::f64::consts::TAU * radius) / RING_SPACING).floor() as usize;
@@ -380,6 +526,11 @@ fn card_radius() -> f64 {
     (CARD_W * CARD_W + CARD_H * CARD_H).sqrt() / 2.0 + 10.0
 }
 
+/// Width in pixels of a bundle's ribbon of `hosts` links (graph display).
+pub fn ribbon_pixels(hosts: usize) -> f64 {
+    (1.5 + (hosts as f64).sqrt() * 0.6).min(14.0)
+}
+
 /// A proactive host (an agent reports for it, D28), else passive (reached
 /// by runners).
 fn is_active(host: &api::HostSummary) -> bool {
@@ -389,10 +540,10 @@ fn is_active(host: &api::HostSummary) -> bool {
 /// Positions of `n` hosts on concentric half rings right of the card
 /// (mirrored when `left`), pushed `SPLIT` away from its vertical axis, and
 /// the radius of the outer ring.
-fn half_ring_offsets(n: usize, left: bool) -> (Vec<(f64, f64)>, f64) {
+fn half_ring_offsets(n: usize, left: bool, first: f64) -> (Vec<(f64, f64)>, f64) {
     let mut out = Vec::with_capacity(n);
-    let mut radius = FIRST_RING;
-    let mut outer = FIRST_RING;
+    let mut radius = first;
+    let mut outer = first;
     let mut ring = 0usize;
     while out.len() < n {
         let capacity = ((std::f64::consts::PI * radius) / RING_SPACING).floor() as usize;
@@ -419,16 +570,17 @@ fn half_ring_offsets(n: usize, left: bool) -> (Vec<(f64, f64)>, f64) {
 fn graph_offsets(hosts: &[&api::HostSummary]) -> (Vec<(f64, f64)>, f64) {
     let active = hosts.iter().filter(|h| is_active(h)).count();
     if active == 0 || active == hosts.len() {
-        let (offsets, outer) = ring_offsets(hosts.len());
-        let radius = if offsets.is_empty() {
-            card_radius()
-        } else {
-            outer + DOT + 24.0
-        };
-        return (offsets, radius);
+        // nothing in the middle (D31: no chip): the first host there
+        if hosts.is_empty() {
+            return (Vec::new(), BADGE_R);
+        }
+        let (mut offsets, outer) = ring_offsets(hosts.len() - 1, RING_SPACING);
+        offsets.insert(0, (0.0, 0.0));
+        let outer = if hosts.len() == 1 { 0.0 } else { outer };
+        return (offsets, outer + DOT + 12.0);
     }
-    let (left, l_outer) = half_ring_offsets(active, true);
-    let (right, r_outer) = half_ring_offsets(hosts.len() - active, false);
+    let (left, l_outer) = half_ring_offsets(active, true, RING_SPACING);
+    let (right, r_outer) = half_ring_offsets(hosts.len() - active, false, RING_SPACING);
     let (mut left, mut right) = (left.into_iter(), right.into_iter());
     let offsets = hosts
         .iter()
@@ -441,128 +593,105 @@ fn graph_offsets(hosts: &[&api::HostSummary]) -> (Vec<(f64, f64)>, f64) {
             .expect("one offset per host")
         })
         .collect();
-    (offsets, l_outer.max(r_outer) + SPLIT + DOT + 24.0)
+    (offsets, l_outer.max(r_outer) + SPLIT + DOT + 12.0)
 }
 
-/// A group before placement: its hosts, worst first.
-struct Members<'a> {
-    name: String,
-    target: Option<GroupTarget>,
-    hosts: Vec<&'a api::HostSummary>,
-    collapsed: bool,
-}
-
-impl Members<'_> {
-    fn counts(&self) -> (usize, usize, usize) {
-        let ok = self.hosts.iter().filter(|h| is_ok(host_state(h))).count();
-        let bad = self.hosts.iter().filter(|h| is_bad(host_state(h))).count();
-        (self.hosts.len(), ok, bad)
+/// D30: a host's colour for one of its assignments.
+fn link_tone(host: &api::HostSummary, reference: &str) -> Tone {
+    match host
+        .assignment_states
+        .iter()
+        .find(|s| s.assignment == reference)
+    {
+        Some(status) => tone(crate::pages::link_state(host, status)),
+        // a backend from before D30: the host's one state
+        None => tone(host_state(host)),
     }
 }
 
-/// The groups of `hosts`, the same in both displays: one per assignment, a
-/// host in every assignment selecting it (D29), drawn in each.
-/// `assignments`: selector of each assignment (D23), for its Assess / Reach.
-fn members<'a>(
+/// D31: the map's groups before placement: a node per assignment, and the
+/// hosts by signature (the exact set of assignments selecting them).
+struct Groups<'a> {
+    /// reference -> (its target, hosts it selects, ok, bad)
+    nodes: BTreeMap<String, (Option<GroupTarget>, usize, usize, usize)>,
+    /// signature -> its hosts, in name order
+    clusters: BTreeMap<Vec<String>, Vec<&'a api::HostSummary>>,
+}
+
+fn node_key(reference: &str) -> String {
+    format!("a:{reference}")
+}
+
+fn cluster_key(signature: &[String]) -> String {
+    format!("c:{}", signature.join("+"))
+}
+
+fn cluster_label(signature: &[String]) -> String {
+    if signature.is_empty() {
+        "(unassigned)".to_string()
+    } else {
+        signature.join(" + ")
+    }
+}
+
+/// `assignments`: selector of each assignment (D23), for its Assess /
+/// Reach; every assignment gets a node, selecting hosts or not.
+fn groups<'a>(
     hosts: &'a BTreeMap<String, api::HostSummary>,
-    collapsed: &BTreeSet<String>,
     assignments: &BTreeMap<String, api::HostSelector>,
-) -> Vec<Members<'a>> {
-    let mut members: BTreeMap<String, (Option<GroupTarget>, Vec<&api::HostSummary>)> =
-        BTreeMap::new();
+) -> Groups<'a> {
+    let target = |reference: &str| {
+        assignments
+            .get(reference)
+            .map(|selector| GroupTarget::Assignment(reference.to_string(), selector.clone()))
+    };
+    let mut nodes: BTreeMap<String, (Option<GroupTarget>, usize, usize, usize)> = assignments
+        .keys()
+        .map(|r| (r.clone(), (target(r), 0, 0, 0)))
+        .collect();
+    let mut clusters: BTreeMap<Vec<String>, Vec<&api::HostSummary>> = BTreeMap::new();
     for host in hosts.values() {
-        let groups: Vec<(String, Option<GroupTarget>)> = if host.assignments.is_empty() {
-            vec![("(unassigned)".to_string(), None)]
-        } else {
-            host.assignments
-                .iter()
-                .map(|reference| {
-                    let target = assignments.get(reference).map(|selector| {
-                        GroupTarget::Assignment(reference.clone(), selector.clone())
-                    });
-                    (reference.clone(), target)
-                })
-                .collect()
-        };
-        for (name, target) in groups {
-            members
-                .entry(name)
-                .or_insert_with(|| (target, Vec::new()))
-                .1
-                .push(host);
+        let mut signature = host.assignments.clone();
+        signature.sort();
+        signature.dedup();
+        for reference in &signature {
+            let node = nodes
+                .entry(reference.clone())
+                .or_insert_with(|| (target(reference), 0, 0, 0));
+            node.1 += 1;
+            match link_tone(host, reference) {
+                Tone::Ok => node.2 += 1,
+                Tone::Bad => node.3 += 1,
+                _ => {}
+            }
         }
+        clusters.entry(signature).or_default().push(host);
     }
-    members
-        .into_iter()
-        // hosts in name order (the map's), whatever their state
-        .map(|(name, (target, hosts))| Members {
-            collapsed: collapsed.contains(&name),
-            name,
-            target,
-            hosts,
-        })
-        .collect()
+    Groups { nodes, clusters }
 }
 
-/// Shelf packing: the top left corner of each `(width, height)` box, in
-/// rows about as wide as the whole is tall, rows centered on x = 0. Each box
-/// is centered vertically in its row when `center` is set.
-fn shelves(sizes: &[(f64, f64)], gap: f64, center: bool) -> Vec<(f64, f64)> {
-    let area: f64 = sizes.iter().map(|(w, h)| (w + gap) * (h + gap)).sum();
-    let widest = sizes.iter().map(|(w, _)| w + gap).fold(0.0, f64::max);
-    let row_width = (area.sqrt() * 1.3).max(widest);
-    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
-    let mut x = 0.0;
-    for (i, (w, _)) in sizes.iter().enumerate() {
-        if x + w + gap > row_width && x > 0.0 {
-            rows.push(Vec::new());
-            x = 0.0;
-        }
-        x += w + gap;
-        rows.last_mut().expect("one row").push(i);
-    }
-    let mut out = vec![(0.0, 0.0); sizes.len()];
-    let mut y = 0.0;
-    for row in rows {
-        let height = row.iter().map(|i| sizes[*i].1 + gap).fold(0.0, f64::max);
-        let width: f64 = row.iter().map(|i| sizes[*i].0 + gap).sum();
-        let mut x = -width / 2.0;
-        for i in row {
-            let (w, h) = sizes[i];
-            let dy = if center {
-                (height - h - gap) / 2.0
-            } else {
-                0.0
-            };
-            out[i] = (x + gap / 2.0, y + gap / 2.0 + dy);
-            x += w + gap;
-        }
-        y += height;
-    }
-    out
+fn counts(hosts: &[&api::HostSummary]) -> (usize, usize, usize) {
+    let ok = hosts.iter().filter(|h| is_ok(host_state(h))).count();
+    let bad = hosts.iter().filter(|h| is_bad(host_state(h))).count();
+    (hosts.len(), ok, bad)
 }
 
 fn layout(
     hosts: &BTreeMap<String, api::HostSummary>,
-    display: Display,
     collapsed: &BTreeSet<String>,
     assignments: &BTreeMap<String, api::HostSelector>,
 ) -> Layout {
-    let groups = members(hosts, collapsed, assignments);
-    let mut layout = match display {
-        // same groups and name order in both displays (a host changing
-        // state stays where it is); only the shape differs
-        Display::Graph => graph_layout(groups),
-        Display::Areas => areas_layout(groups),
-    };
+    // each host drawn once, in name order in its cluster (a host changing
+    // state stays where it is; D31)
+    let mut layout = graph_layout(&groups(hosts, assignments), collapsed);
     if layout.groups.is_empty() {
         layout.bounds = (-200.0, -200.0, 200.0, 200.0);
     }
     layout
 }
 
-/// What the user moved on the map (Organize), per display, kept by the
-/// browser: a moved group's card center, and a moved host's offset from
+/// What the user moved on the map, kept by the browser: a moved group's
+/// card center, and a moved host's offset from
 /// its group's card center (so it follows its group). Everything else stays
 /// in the automatic layout; "Auto-arrange" forgets it all.
 #[derive(Clone, Default, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
@@ -575,26 +704,25 @@ struct Arrangement {
 }
 
 impl Arrangement {
-    fn key(display: Display) -> String {
-        format!("regency.map.arrangement.{}", display.name())
-    }
+    /// v2: groups are assignment nodes and clusters (D31); the graph
+    /// display's key (the only display left).
+    const KEY: &str = "regency.map.arrangement.v2.graph";
 
-    fn saved(display: Display) -> Self {
+    fn saved() -> Self {
         crate::client::storage()
-            .and_then(|s| s.get_item(&Self::key(display)).ok().flatten())
+            .and_then(|s| s.get_item(Self::KEY).ok().flatten())
             .and_then(|v| serde_json::from_str(&v).ok())
             .unwrap_or_default()
     }
 
-    fn save(&self, display: Display) {
+    fn save(&self) {
         let Some(storage) = crate::client::storage() else {
             return;
         };
-        let key = Self::key(display);
         if self.is_empty() {
-            let _ = storage.remove_item(&key);
+            let _ = storage.remove_item(Self::KEY);
         } else if let Ok(json) = serde_json::to_string(self) {
-            let _ = storage.set_item(&key, &json);
+            let _ = storage.set_item(Self::KEY, &json);
         }
     }
 
@@ -603,8 +731,7 @@ impl Arrangement {
     }
 }
 
-/// Move the groups and hosts of `layout` where the user put them; areas
-/// grow to hold their moved hosts.
+/// Move the groups and hosts of `layout` where the user put them.
 fn arrange(layout: &mut Layout, arrangement: &Arrangement) {
     // nothing on the map yet (loading): its default bounds stay
     if arrangement.is_empty() || layout.groups.is_empty() {
@@ -616,14 +743,10 @@ fn arrange(layout: &mut Layout, arrangement: &Arrangement) {
             *shift = (x - group.x, y - group.y);
             group.x = x;
             group.y = y;
-            if let Some(area) = group.area.as_mut() {
-                area.x += shift.0;
-                area.y += shift.1;
-            }
         }
     }
     for p in &mut layout.hosts {
-        let group = &mut layout.groups[p.group];
+        let group = &layout.groups[p.group];
         let (dx, dy) = shifts[p.group];
         match arrangement
             .hosts
@@ -634,33 +757,16 @@ fn arrange(layout: &mut Layout, arrangement: &Arrangement) {
             None => (p.x, p.y) = (p.x + dx, p.y + dy),
         }
         (p.gx, p.gy) = (group.x, group.y);
-        if let Some(area) = group.area.as_mut() {
-            let m = CELL / 2.0;
-            let (x1, y1) = (
-                (area.x + area.w).max(p.x + m),
-                (area.y + area.h).max(p.y + m),
-            );
-            let line = area.split.map(|s| area.x + s);
-            area.x = area.x.min(p.x - m);
-            area.y = area.y.min(p.y - m);
-            area.split = line.map(|l| l - area.x);
-            area.w = x1 - area.x;
-            area.h = y1 - area.y;
-        }
     }
-    layout.areas = layout.groups.iter().filter_map(|g| g.area).collect();
     layout.bounds = Layout::empty().bounds;
     for i in 0..layout.groups.len() {
         let g = &layout.groups[i];
-        let (x0, y0, x1, y1) = match g.area {
-            Some(a) => (a.x, a.y, a.x + a.w, a.y + a.h),
-            None => (
-                g.x - g.radius,
-                g.y - g.radius,
-                g.x + g.radius,
-                g.y + g.radius,
-            ),
-        };
+        let (x0, y0, x1, y1) = (
+            g.x - g.radius,
+            g.y - g.radius,
+            g.x + g.radius,
+            g.y + g.radius,
+        );
         layout.grow(x0, y0, x1, y1);
     }
     for i in 0..layout.hosts.len() {
@@ -669,7 +775,7 @@ fn arrange(layout: &mut Layout, arrangement: &Arrangement) {
     }
 }
 
-/// Something picked on the map (Organize): a group (by name) or a host in
+/// Something picked on the map: a group (by name) or a host in
 /// one of its groups. Picked things are dragged together.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Grab {
@@ -723,10 +829,6 @@ impl Layout {
             let group = &mut out.groups[index];
             group.x += dx;
             group.y += dy;
-            if let Some(area) = group.area.as_mut() {
-                area.x += dx;
-                area.y += dy;
-            }
         }
         for p in &mut out.hosts {
             if groups.contains(&p.group) {
@@ -739,7 +841,6 @@ impl Layout {
             out.hosts[i].x += dx;
             out.hosts[i].y += dy;
         }
-        out.areas = out.groups.iter().filter_map(|g| g.area).collect();
         out
     }
 
@@ -763,14 +864,25 @@ impl Layout {
         }
     }
 
-    /// What a selection rectangle holds (map units): the groups whose card
-    /// center is inside, and the hosts inside but not in those groups.
+    /// What a selection rectangle holds (map units): the assignments whose
+    /// card center is inside, the clusters whose whole outline is inside
+    /// (a host lies at a cluster's center), and the hosts inside but not in
+    /// those groups.
     fn in_box(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Picks {
         let (x0, x1) = (x0.min(x1), x0.max(x1));
         let (y0, y1) = (y0.min(y1), y0.max(y1));
         let inside = |x: f64, y: f64| x >= x0 && x <= x1 && y >= y0 && y <= y1;
         let groups: Vec<usize> = (0..self.groups.len())
-            .filter(|i| inside(self.groups[*i].x, self.groups[*i].y))
+            .filter(|i| {
+                let g = &self.groups[*i];
+                match g.kind {
+                    Kind::Node => inside(g.x, g.y),
+                    Kind::Cluster { .. } => {
+                        inside(g.x - g.radius, g.y - g.radius)
+                            && inside(g.x + g.radius, g.y + g.radius)
+                    }
+                }
+            })
             .collect();
         let mut picks: Picks = groups
             .iter()
@@ -793,7 +905,7 @@ impl Layout {
 /// next layouts glide for a moment (hosts unfolding leave their card,
 /// folding ones go back under it). Positions only, eased out.
 struct Motion {
-    groups: HashMap<String, (f64, f64, Option<Area>)>,
+    groups: HashMap<String, (f64, f64)>,
     /// group name -> host id -> position
     hosts: HashMap<String, HashMap<String, (f64, f64)>>,
     before: Vec<Placed>,
@@ -820,7 +932,7 @@ impl Motion {
             groups: layout
                 .groups
                 .iter()
-                .map(|g| (g.name.clone(), (g.x, g.y, g.area)))
+                .map(|g| (g.name.clone(), (g.x, g.y)))
                 .collect(),
             hosts,
             before: layout.hosts.clone(),
@@ -849,15 +961,9 @@ impl Motion {
         });
         let mut out = to.clone();
         for g in &mut out.groups {
-            if let Some((x, y, area)) = self.groups.get(&g.name) {
+            if let Some((x, y)) = self.groups.get(&g.name) {
                 g.x = lerp(*x, g.x);
                 g.y = lerp(*y, g.y);
-                if let (Some(a), Some(b)) = (area, g.area.as_mut()) {
-                    b.x = lerp(a.x, b.x);
-                    b.y = lerp(a.y, b.y);
-                    b.w = lerp(a.w, b.w);
-                    b.h = lerp(a.h, b.h);
-                }
             }
         }
         for p in &mut out.hosts {
@@ -868,7 +974,7 @@ impl Motion {
                 .and_then(|hosts| hosts.get(&p.host_id))
                 .copied()
                 // unfolding: from its card
-                .or_else(|| self.groups.get(&g.name).map(|(x, y, _)| (*x, *y)))
+                .or_else(|| self.groups.get(&g.name).copied())
                 .unwrap_or((p.x, p.y));
             p.x = lerp(fx, p.x);
             p.y = lerp(fy, p.y);
@@ -885,222 +991,320 @@ impl Motion {
             (p.gx, p.gy) = (g.x, g.y);
             out.hosts.push(p);
         }
-        out.areas = out.groups.iter().filter_map(|g| g.area).collect();
         out
     }
 }
 
-/// Graph display: a card per group, its hosts on rings around it.
-fn graph_layout(groups: Vec<Members>) -> Layout {
-    let rings: Vec<(Vec<(f64, f64)>, f64)> = groups
+/// A cluster before placement (graph display): its signature, hosts,
+/// whether folded, its hosts' offsets and its radius.
+type GraphCluster<'a> = (
+    &'a Vec<String>,
+    &'a Vec<&'a api::HostSummary>,
+    bool,
+    Vec<(f64, f64)>,
+    f64,
+);
+
+/// D31 graph display: a node (card) per assignment, on a circle; each
+/// cluster of hosts starts between its assignments' nodes (beyond its
+/// node for a single assignment, below everything when unassigned), then
+/// everything overlapping is pushed apart. Deterministic: the same fleet
+/// gives the same map.
+fn graph_layout(groups: &Groups, collapsed: &BTreeSet<String>) -> Layout {
+    let references: Vec<&String> = groups.nodes.keys().collect();
+    let node_r = card_radius();
+    // the clusters' hosts around them, unless folded
+    let clusters: Vec<GraphCluster> = groups
+        .clusters
         .iter()
-        .map(|g| {
-            if g.collapsed {
-                (Vec::new(), card_radius())
+        .map(|(signature, hosts)| {
+            let folded = collapsed.contains(&cluster_key(signature));
+            let (offsets, radius) = if folded {
+                (Vec::new(), BADGE_R)
             } else {
-                graph_offsets(&g.hosts)
-            }
+                graph_offsets(hosts)
+            };
+            (signature, hosts, folded, offsets, radius.max(BADGE_R))
         })
         .collect();
-    let sizes: Vec<(f64, f64)> = rings.iter().map(|(_, r)| (2.0 * r, 2.0 * r)).collect();
-    let corners = shelves(&sizes, GAP, true);
+    let area: f64 = references.len() as f64 * (node_r + GAP).powi(2) * std::f64::consts::PI
+        + clusters
+            .iter()
+            .map(|c| (c.4 + GAP).powi(2) * std::f64::consts::PI)
+            .sum::<f64>();
+    let n = references.len().max(1) as f64;
+    let ring = ((area / std::f64::consts::PI).sqrt() * 0.8)
+        .max(n * (2.0 * node_r + GAP) / std::f64::consts::TAU);
+    let anchors = node_anchors(&references, &clusters, node_r, ring);
+    // the nodes' extent (clusters without assignment go below it)
+    let ring = anchors
+        .iter()
+        .map(|(x, y)| (x * x + y * y).sqrt())
+        .fold(0.0, f64::max);
+    let index_of: HashMap<&str, usize> = references
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.as_str(), i))
+        .collect();
+    // discs: (x, y, radius, target x, target y, mass); nodes first
+    let mut discs: Vec<[f64; 6]> = anchors
+        .iter()
+        .map(|&(x, y)| [x, y, node_r, x, y, 4.0])
+        .collect();
+    for (k, (signature, _, _, _, radius)) in clusters.iter().enumerate() {
+        let nodes: Vec<(f64, f64)> = signature
+            .iter()
+            .filter_map(|r| index_of.get(r.as_str()).map(|i| anchors[*i]))
+            .collect();
+        let (tx, ty) = match nodes.len() {
+            0 => (0.0, ring + node_r + radius + 2.0 * GAP),
+            // outwards (from the nodes' center), else around the node
+            1 => {
+                let (x, y) = nodes[0];
+                let len = (x * x + y * y).sqrt();
+                let out = node_r + radius + GAP;
+                let (ux, uy) = if len < 1.0 {
+                    let a = k as f64 * 2.399;
+                    (a.cos(), a.sin())
+                } else {
+                    (x / len, y / len)
+                };
+                (x + ux * out, y + uy * out)
+            }
+            m => (
+                nodes.iter().map(|p| p.0).sum::<f64>() / m as f64,
+                nodes.iter().map(|p| p.1).sum::<f64>() / m as f64,
+            ),
+        };
+        // a little apart from clusters with the same target
+        let a = k as f64 * 2.399;
+        discs.push([
+            tx + a.cos(),
+            ty + a.sin(),
+            *radius,
+            tx,
+            ty,
+            1.0 + radius / 200.0,
+        ]);
+    }
+    for iteration in 0..500 {
+        let pull = if iteration < 350 { 0.04 } else { 0.0 };
+        for d in &mut discs {
+            d[0] += (d[3] - d[0]) * pull;
+            d[1] += (d[4] - d[1]) * pull;
+        }
+        for i in 0..discs.len() {
+            for j in i + 1..discs.len() {
+                let (dx, dy) = (discs[j][0] - discs[i][0], discs[j][1] - discs[i][1]);
+                let d = (dx * dx + dy * dy).sqrt();
+                let min = discs[i][2] + discs[j][2] + GAP;
+                if d >= min {
+                    continue;
+                }
+                let (ux, uy) = if d < 1e-6 {
+                    let a = (i * 7 + j * 13) as f64;
+                    (a.cos(), a.sin())
+                } else {
+                    (dx / d, dy / d)
+                };
+                let (mi, mj) = (discs[i][5], discs[j][5]);
+                let push = min - d;
+                discs[i][0] -= ux * push * mj / (mi + mj);
+                discs[i][1] -= uy * push * mj / (mi + mj);
+                discs[j][0] += ux * push * mi / (mi + mj);
+                discs[j][1] += uy * push * mi / (mi + mj);
+            }
+        }
+    }
 
     let mut layout = Layout {
         links: true,
         ..Layout::empty()
     };
-    for ((group, (offsets, radius)), (x, y)) in groups.into_iter().zip(rings).zip(corners) {
-        let (cx, cy) = (x + radius, y + radius);
+    for (i, reference) in references.iter().enumerate() {
+        let [x, y, radius, ..] = discs[i];
+        let (target, total, ok, bad) = groups.nodes[*reference].clone();
+        layout.grow(x - radius, y - radius, x + radius, y + radius);
+        layout.groups.push(Group {
+            name: node_key(reference),
+            label: (*reference).clone(),
+            kind: Kind::Node,
+            card: (CARD_W, CARD_H),
+            target,
+            x,
+            y,
+            radius,
+            total,
+            ok,
+            bad,
+            collapsed: false,
+        });
+    }
+    for (k, (signature, hosts, folded, offsets, radius)) in clusters.into_iter().enumerate() {
+        let [cx, cy, ..] = discs[references.len() + k];
         layout.grow(cx - radius, cy - radius, cx + radius, cy + radius);
         let index = layout.groups.len();
-        let (total, ok, bad) = group.counts();
-        for host in &group.hosts[offsets.len()..] {
+        let (total, ok, bad) = counts(hosts);
+        let mut tones = vec![[0usize; 5]; signature.len()];
+        for host in hosts.iter() {
+            for (slot, reference) in tones.iter_mut().zip(signature.iter()) {
+                slot[link_tone(host, reference).rank() as usize] += 1;
+            }
+        }
+        for (reference, tones) in signature.iter().zip(tones) {
+            if let Some(&node) = index_of.get(reference.as_str()) {
+                layout.bundles.push(Bundle {
+                    cluster: index,
+                    node,
+                    tones,
+                });
+            }
+        }
+        for host in &hosts[offsets.len()..] {
             layout.fold(index, host);
         }
-        for (host, (dx, dy)) in group.hosts.iter().zip(offsets) {
-            layout.place(index, host, cx + dx, cy + dy, cx, cy);
+        for (host, (dx, dy)) in hosts.iter().zip(offsets) {
+            let links = signature
+                .iter()
+                .filter_map(|r| Some((*index_of.get(r.as_str())?, link_tone(host, r))))
+                .collect();
+            layout.place(index, host, cx + dx, cy + dy, cx, cy, links);
         }
         layout.groups.push(Group {
-            name: group.name,
-            target: group.target,
+            name: cluster_key(signature),
+            label: cluster_label(signature),
+            kind: Kind::Cluster {
+                signature: signature.clone(),
+            },
+            card: (2.0 * radius, 2.0 * radius),
+            target: None,
             x: cx,
             y: cy,
             radius,
-            area: None,
             total,
             ok,
             bad,
-            collapsed: group.collapsed,
+            collapsed: folded,
         });
     }
     layout
 }
 
-/// Host offsets in an area, and the area's width and height.
-type Cells = (Vec<(f64, f64)>, f64, f64);
-
-/// Areas display: cells of the hosts of a group, row by row, around its card
-/// (top right corner): offsets from the area's top left corner, and the
-/// area's size.
-fn area_cells(n: usize) -> Cells {
-    // the card, and a margin around it, in the top right corner
-    let card_cols = ((CARD_W + AREA_PAD) / CELL).ceil() as usize;
-    let card_rows = ((CARD_H + AREA_PAD) / CELL).ceil() as usize;
-    let cols = if n == 0 {
-        card_cols
-    } else {
-        // about square, but at least a few columns left of the card
-        ((n + card_cols * card_rows) as f64)
-            .sqrt()
-            .ceil()
-            .max((card_cols + 4) as f64) as usize
+/// D31: where the assignment nodes go, centered on (0, 0). Assignments
+/// sharing many hosts lie close together (their shared clusters between
+/// them), unrelated ones apart: each pair gets a target distance from its
+/// overlap (shared hosts / hosts of the smaller one: 1 when one holds all
+/// the other's hosts), reached by stress majorization (stochastic
+/// gradient descent, Zheng et al. 2018), from a ring ordered so that each
+/// node follows the one it shares most with. Deterministic.
+fn node_anchors(
+    references: &[&String],
+    clusters: &[GraphCluster],
+    node_r: f64,
+    ring: f64,
+) -> Vec<(f64, f64)> {
+    let n = references.len();
+    if n < 2 {
+        return vec![(0.0, 0.0); n];
+    }
+    let index: HashMap<&str, usize> = references
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.as_str(), i))
+        .collect();
+    let mut size = vec![0usize; n];
+    let mut shared = vec![vec![0usize; n]; n];
+    // largest cluster between two nodes, around one node
+    let mut between = vec![vec![0.0f64; n]; n];
+    let mut own = vec![0.0f64; n];
+    for (signature, hosts, _, _, radius) in clusters {
+        let ids: Vec<usize> = signature
+            .iter()
+            .filter_map(|r| index.get(r.as_str()).copied())
+            .collect();
+        for &i in &ids {
+            size[i] += hosts.len();
+            own[i] = own[i].max(*radius);
+            for &j in &ids {
+                if i != j {
+                    shared[i][j] += hosts.len();
+                    between[i][j] = between[i][j].max(*radius);
+                }
+            }
+        }
+    }
+    let overlap = |i: usize, j: usize| match size[i].min(size[j]) {
+        0 => 0.0,
+        m => shared[i][j] as f64 / m as f64,
     };
-    let mut cells = Vec::with_capacity(n);
-    let mut row = 0;
-    while cells.len() < n {
-        for col in 0..cols {
-            if cells.len() == n {
-                break;
-            }
-            if row < card_rows && col >= cols - card_cols {
-                continue;
-            }
-            cells.push((
-                AREA_PAD + (col as f64 + 0.5) * CELL,
-                AREA_PAD + (row as f64 + 0.5) * CELL,
-            ));
+    // ring order: from the largest node, each next one the unplaced node
+    // sharing most with the last (ties: name order)
+    let mut order = vec![
+        (0..n)
+            .max_by_key(|i| (size[*i], std::cmp::Reverse(*i)))
+            .unwrap_or(0),
+    ];
+    let mut left: Vec<usize> = (0..n).filter(|i| *i != order[0]).collect();
+    while !left.is_empty() {
+        let last = *order.last().unwrap_or(&0);
+        let (k, _) = left
+            .iter()
+            .enumerate()
+            .max_by(|a, b| {
+                overlap(last, *a.1)
+                    .total_cmp(&overlap(last, *b.1))
+                    .then(b.1.cmp(a.1))
+            })
+            .unwrap_or((0, &0));
+        order.push(left.remove(k));
+    }
+    let mut pos = vec![(0.0, 0.0); n];
+    for (k, &i) in order.iter().enumerate() {
+        let a = -std::f64::consts::FRAC_PI_2 + k as f64 / n as f64 * std::f64::consts::TAU;
+        pos[i] = (ring * a.cos(), ring * a.sin());
+    }
+    // target distances: sharing everything = side by side with their
+    // clusters between them; nothing in common = well apart
+    let mut pairs = Vec::new();
+    for i in 0..n {
+        for j in i + 1..n {
+            let close = 2.0 * node_r + GAP + 2.0 * between[i][j];
+            let apart = ((2.0 * node_r + 2.0 * GAP + own[i] + own[j]) * 1.6).max(close);
+            pairs.push((i, j, close + (apart - close) * (1.0 - overlap(i, j))));
         }
-        row += 1;
     }
-    let rows = row.max(card_rows);
-    let w = 2.0 * AREA_PAD + cols as f64 * CELL;
-    let h = 2.0 * AREA_PAD + rows as f64 * CELL;
-    (cells, w, h)
-}
-
-/// Areas display: the cells of an unfolded group's hosts (in `hosts`'
-/// order), the area's size and the x of the line between its columns:
-/// proactive hosts in a left column, passive ones in a right column under
-/// the card, when it has both; else [`area_cells`].
-fn split_cells(hosts: &[&api::HostSummary]) -> (Cells, Option<f64>) {
-    let active = hosts.iter().filter(|h| is_active(h)).count();
-    let passive = hosts.len() - active;
-    if active == 0 || passive == 0 {
-        return (area_cells(hosts.len()), None);
-    }
-    let card_cols = ((CARD_W + AREA_PAD) / CELL).ceil() as usize;
-    let card_rows = ((CARD_H + AREA_PAD) / CELL).ceil() as usize;
-    // about square overall; each column as wide as its hosts need to end
-    // at about the same height
-    let cells_needed = active + passive + card_cols * card_rows;
-    let rows = (cells_needed as f64)
-        .sqrt()
-        .ceil()
-        .max((card_rows + 1) as f64) as usize;
-    let left_cols = active.div_ceil(rows).max(1);
-    let right_cols = (passive + card_cols * card_rows)
-        .div_ceil(rows)
-        .max(card_cols + 2);
-    // one empty column between them, holding the line
-    let right_x = AREA_PAD + (left_cols + 1) as f64 * CELL;
-    let mut left = (0..active).map(|i| {
-        (
-            AREA_PAD + ((i % left_cols) as f64 + 0.5) * CELL,
-            AREA_PAD + ((i / left_cols) as f64 + 0.5) * CELL,
-        )
-    });
-    let mut right = Vec::with_capacity(passive);
-    let mut row = 0;
-    while right.len() < passive {
-        for col in 0..right_cols {
-            if right.len() == passive {
-                break;
-            }
-            if row < card_rows && col >= right_cols - card_cols {
-                continue;
-            }
-            right.push((
-                right_x + (col as f64 + 0.5) * CELL,
-                AREA_PAD + (row as f64 + 0.5) * CELL,
-            ));
-        }
-        row += 1;
-    }
-    let rows = active.div_ceil(left_cols).max(row).max(card_rows);
-    let mut right = right.into_iter();
-    let cells = hosts
+    let (l_min, l_max) = pairs
         .iter()
-        .map(|h| {
-            if is_active(h) {
-                left.next()
+        .fold((f64::MAX, 0.0f64), |(a, b), p| (a.min(p.2), b.max(p.2)));
+    let (eta_max, eta_min) = (l_max * l_max, 0.01 * l_min * l_min);
+    const EPOCHS: usize = 60;
+    let decay = (eta_max / eta_min).ln() / (EPOCHS - 1) as f64;
+    for epoch in 0..EPOCHS {
+        let eta = eta_max * (-decay * epoch as f64).exp();
+        let forward = epoch % 2 == 0;
+        for k in 0..pairs.len() {
+            let (i, j, l) = pairs[if forward { k } else { pairs.len() - 1 - k }];
+            let mu = (eta / (l * l)).min(1.0);
+            let (dx, dy) = (pos[i].0 - pos[j].0, pos[i].1 - pos[j].1);
+            let d = (dx * dx + dy * dy).sqrt();
+            let (ux, uy) = if d < 1e-6 {
+                let a = (i * 7 + j * 13) as f64;
+                (a.cos(), a.sin())
             } else {
-                right.next()
-            }
-            .expect("one cell per host")
-        })
-        .collect();
-    let w = 2.0 * AREA_PAD + (left_cols + 1 + right_cols) as f64 * CELL;
-    let h = 2.0 * AREA_PAD + rows as f64 * CELL;
-    (
-        (cells, w, h),
-        Some(AREA_PAD + (left_cols as f64 + 0.5) * CELL),
-    )
-}
-
-fn areas_layout(groups: Vec<Members>) -> Layout {
-    let cells: Vec<(Cells, Option<f64>)> = groups
-        .iter()
-        .map(|g| {
-            if g.collapsed {
-                // the card alone
-                (
-                    (Vec::new(), CARD_W + 2.0 * AREA_PAD, CARD_H + 2.0 * AREA_PAD),
-                    None,
-                )
-            } else {
-                split_cells(&g.hosts)
-            }
-        })
-        .collect();
-    let sizes: Vec<(f64, f64)> = cells.iter().map(|((_, w, h), _)| (*w, *h)).collect();
-    let corners = shelves(&sizes, AREA_GAP, false);
-
-    let mut layout = Layout::empty();
-    for ((group, ((offsets, w, h), split)), (x, y)) in groups.into_iter().zip(cells).zip(corners) {
-        layout.grow(x, y, x + w, y + h);
-        let index = layout.groups.len();
-        let (total, ok, bad) = group.counts();
-        // card: top right corner, inside the margin
-        let (cx, cy) = (x + w - AREA_PAD - CARD_W / 2.0, y + AREA_PAD + CARD_H / 2.0);
-        for host in &group.hosts[offsets.len()..] {
-            layout.fold(index, host);
+                (dx / d, dy / d)
+            };
+            let r = mu * (d - l) / 2.0;
+            pos[i].0 -= r * ux;
+            pos[i].1 -= r * uy;
+            pos[j].0 += r * ux;
+            pos[j].1 += r * uy;
         }
-        for (host, (dx, dy)) in group.hosts.iter().zip(offsets) {
-            layout.place(index, host, x + dx, y + dy, cx, cy);
-        }
-        let area = Area {
-            x,
-            y,
-            w,
-            h,
-            folded: group.collapsed,
-            split,
-        };
-        layout.areas.push(area);
-        layout.groups.push(Group {
-            name: group.name,
-            target: group.target,
-            x: cx,
-            y: cy,
-            radius: card_radius(),
-            area: Some(area),
-            total,
-            ok,
-            bad,
-            collapsed: group.collapsed,
-        });
     }
-    layout
+    let (mx, my) = (
+        pos.iter().map(|p| p.0).sum::<f64>() / n as f64,
+        pos.iter().map(|p| p.1).sum::<f64>() / n as f64,
+    );
+    pos.iter().map(|(x, y)| (x - mx, y - my)).collect()
 }
 
 /// SVG donut arc: a circle stroke covering `[start, start + len)` of the
@@ -1159,28 +1363,51 @@ pub fn Map() -> impl IntoView {
         })
     });
 
-    let display = RwSignal::new(Display::saved());
     // hosts are grouped by assignment (D23: colours mean "against the
     // assignments"), hosts without one in "(unassigned)"
     let collapsed = RwSignal::new(BTreeSet::<String>::new());
     let rings = Memo::new(move |_| jobs.with(rings));
-    // where the user moved groups and hosts (Organize), per display
-    let arrangement = RwSignal::new(Arrangement::saved(display.get_untracked()));
+    // where the user moved groups and hosts
+    let arrangement = RwSignal::new(Arrangement::saved());
     let map = Memo::new(move |_| {
         hosts.with(|hosts| {
             collapsed.with(|collapsed| {
                 selectors.with(|selectors| {
-                    let mut map = layout(hosts, display.get(), collapsed, selectors);
+                    let mut map = layout(hosts, collapsed, selectors);
                     arrangement.with(|a| arrange(&mut map, a));
                     map
                 })
             })
         })
     });
-    // Organize: cards and hosts are picked (click, Ctrl + click, a
-    // selection rectangle) and dragged together
-    let organize = RwSignal::new(false);
+    // cards and hosts are moved by dragging them (no mode to enter); several
+    // are picked with Ctrl / Cmd + click or a Shift + drag rectangle and
+    // dragged together; Escape or a click on empty space drops the picks
+    // D31: how links are drawn; the ribbon under the pointer and the ones
+    // opened by a click (cluster, node names): their hosts' links fan out
+    let links_mode = RwSignal::new(Links::saved());
+    let hovered_bundle = RwSignal::new(None::<(String, String)>);
+    let opened = RwSignal::new(BTreeSet::<(String, String)>::new());
+    // D31: assignment nodes selected by a click on their card (their
+    // ribbons' statistics stay shown); Escape or empty space drops them
+    let chosen = RwSignal::new(BTreeSet::<String>::new());
     let picks = RwSignal::new(Picks::new());
+    // a card or host pressed: it becomes a drag once the pointer moves
+    let pressed = StoredValue::new(None::<Grab>);
+    let escape = window_event_listener(leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" {
+            if picks.with_untracked(|p| !p.is_empty()) {
+                picks.set(Picks::new());
+            }
+            if opened.with_untracked(|o| !o.is_empty()) {
+                opened.set(BTreeSet::new());
+            }
+            if chosen.with_untracked(|c| !c.is_empty()) {
+                chosen.set(BTreeSet::new());
+            }
+        }
+    });
+    on_cleanup(move || escape.remove());
     // the picks being dragged, by how much (map units)
     let grab = RwSignal::new(None::<(f64, f64)>);
     // a selection rectangle being drawn (map units: start, end), and
@@ -1270,6 +1497,27 @@ pub fn Map() -> impl IntoView {
         })
     };
     let host_under = move |ev: &web_sys::MouseEvent| grabbed_host(ev).map(|(id, _)| id);
+    // D31: the ribbon under the pointer, if drawn (cluster, node names)
+    let bundle_under = move |ev: &web_sys::MouseEvent| {
+        let (w, h, left, top) = metrics(ev.current_target())?;
+        let view = untrack(view);
+        let (x, y) = view.map_point(
+            ev.client_x() as f64 - left,
+            ev.client_y() as f64 - top,
+            w,
+            h,
+        );
+        let k = view.units_per_pixel(w, h);
+        let per_host = links_mode.get_untracked() == Links::PerHost;
+        let tiny = DOT / k < 3.0;
+        map.with_untracked(|m| {
+            if !m.links {
+                return None;
+            }
+            let i = m.bundle_at(x, y, k, |b| !per_host || tiny || m.folded(b.cluster))?;
+            m.bundle_names(i)
+        })
+    };
     // the map point under the pointer
     let map_point = move |ev: &web_sys::MouseEvent| {
         let (w, h, left, top) = metrics(ev.current_target())?;
@@ -1283,6 +1531,10 @@ pub fn Map() -> impl IntoView {
 
     // hovered host (its id: the side panel follows its live summary)
     let hovered = RwSignal::new(None::<String>);
+    // D31: hovered assignment node (its ribbons' statistics shown)
+    let hovered_node = RwSignal::new(None::<String>);
+    // D31: hovered cluster (name, signature): its assignments' cards stand out
+    let hovered_cluster = RwSignal::new(None::<(String, Vec<String>)>);
     let host_with_job = move |id: &str| {
         let job = rings.with(|rings| rings.get(id).map(|r| r.state().to_string()));
         hosts
@@ -1382,6 +1634,8 @@ pub fn Map() -> impl IntoView {
     // canvas: redrawn on the next animation frame after a change only (job
     // events included: a host with a job only changes colour)
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
+    // D31: the flow along the ribbons, animated on its own canvas
+    let flow_ref = NodeRef::<leptos::html::Canvas>::new();
     let Theme(theme) = expect_context::<Theme>();
     let alive = Arc::new(AtomicBool::new(true));
     let dirty = Arc::new(AtomicBool::new(true));
@@ -1398,6 +1652,11 @@ pub fn Map() -> impl IntoView {
             scale.track();
             center.track();
             hovered.track();
+            hovered_node.track();
+            chosen.track();
+            hovered_bundle.track();
+            opened.track();
+            links_mode.track();
             selected.track();
             rings.track();
             flashes.track();
@@ -1411,6 +1670,16 @@ pub fn Map() -> impl IntoView {
         // colours of the current theme, read again when it changes
         let mut palette = Palette::read();
         let mut palette_theme = theme.get_untracked();
+        // the flow: ~30 frames a second, none when the user asks for
+        // reduced motion
+        let mut last_flow = f64::MIN;
+        let still = web_sys::window()
+            .and_then(|w| {
+                w.match_media("(prefers-reduced-motion: reduce)")
+                    .ok()
+                    .flatten()
+            })
+            .is_some_and(|m| m.matches());
         let context = |canvas: &web_sys::HtmlCanvasElement| {
             canvas
                 .get_context("2d")
@@ -1436,8 +1705,23 @@ pub fn Map() -> impl IntoView {
                 hosts_canvas.set_width(bw);
                 hosts_canvas.set_height(bh);
             }
-            if !(dirty.swap(false, Ordering::Relaxed) || resized) {
+            let flow_canvas = flow_ref.get_untracked().filter(|_| !still);
+            let mut flow_resized = false;
+            if let Some(c) = &flow_canvas
+                && (c.width() != bw || c.height() != bh)
+            {
+                c.set_width(bw);
+                c.set_height(bh);
+                flow_resized = true;
+            }
+            let redraw = dirty.swap(false, Ordering::Relaxed) || resized;
+            let flow_due =
+                flow_canvas.is_some() && (redraw || flow_resized || now - last_flow >= FLOW_MS);
+            if !redraw && !flow_due {
                 return;
+            }
+            if flow_due {
+                last_flow = now;
             }
             if theme.get_untracked() != palette_theme {
                 palette_theme = theme.get_untracked();
@@ -1484,7 +1768,7 @@ pub fn Map() -> impl IntoView {
                 cards.set(now_cards);
             }
             let draw = |layout: &Layout| {
-                // hosts picked on their own (Organize)
+                // hosts picked on their own
                 let picked = picks.with_untracked(|p| {
                     if p.is_empty() {
                         Vec::new()
@@ -1494,18 +1778,45 @@ pub fn Map() -> impl IntoView {
                 });
                 rings.with_untracked(|rings| {
                     flashes.with_untracked(|flashes| {
+                        // assignments hovered, clicked or picked
+                        let mut focus: Vec<usize> = hovered_node
+                            .with_untracked(|n| n.as_deref().and_then(|n| layout.group_index(n)))
+                            .into_iter()
+                            .collect();
+                        chosen.with_untracked(|c| {
+                            focus.extend(c.iter().filter_map(|n| layout.group_index(n)))
+                        });
+                        picks.with_untracked(|p| {
+                            focus.extend(p.iter().filter_map(|g| match g {
+                                Grab::Group(n) => layout.group_index(n),
+                                Grab::Host { .. } => None,
+                            }))
+                        });
+                        focus.retain(|i| matches!(layout.groups[*i].kind, Kind::Node));
+                        let bundle = hovered_bundle
+                            .with_untracked(|b| b.as_ref().and_then(|b| layout.bundle_index(b)));
+                        let open: Vec<usize> = opened.with_untracked(|o| {
+                            o.iter().filter_map(|b| layout.bundle_index(b)).collect()
+                        });
                         let frame = Frame {
                             layout,
                             rings,
                             flashes,
                             view,
                             hovered: hovered.as_deref(),
+                            focus: &focus,
+                            links: links_mode.get_untracked(),
+                            hovered_bundle: bundle,
+                            opened: &open,
                             selected: selected.as_deref(),
                             picked: &picked,
                             names,
                         };
-                        if let Some(ctx) = context(&hosts_canvas) {
+                        if redraw && let Some(ctx) = context(&hosts_canvas) {
                             canvas::draw_hosts(&ctx, w, h, dpr, &palette, &frame);
+                        }
+                        if flow_due && let Some(ctx) = flow_canvas.as_ref().and_then(context) {
+                            canvas::draw_flow(&ctx, w, h, dpr, &palette, &frame, now);
                         }
                     })
                 })
@@ -1532,6 +1843,14 @@ pub fn Map() -> impl IntoView {
             job,
             hosts: count,
         }));
+    };
+    // Run on an assignment's card: one attribute written by hand, run once
+    // on its hosts (D23)
+    let run_attribute = move |target: GroupTarget, hosts: usize| {
+        if moved.get_untracked() {
+            return;
+        }
+        one_shot.set(Some((target, hosts)));
     };
     // the run asked last: followed live in the right panel
     let active_run = RwSignal::new(None::<ActiveRun>);
@@ -1678,25 +1997,30 @@ pub fn Map() -> impl IntoView {
             "map-page no-panel"
         }
     };
+    // only clusters fold (D31)
     let all_folded = move || {
         map.with(|m| {
-            collapsed.with(|c| !m.groups.is_empty() && m.groups.iter().all(|g| c.contains(&g.name)))
+            collapsed.with(|c| {
+                let mut clusters = m
+                    .groups
+                    .iter()
+                    .filter(|g| matches!(g.kind, Kind::Cluster { .. }))
+                    .peekable();
+                clusters.peek().is_some() && clusters.all(|g| c.contains(&g.name))
+            })
         })
     };
     let svg_class = move || {
         let mut class = String::from("map");
-        if hovered.get().is_some() {
+        if hovered.get().is_some() || hovered_bundle.with(Option::is_some) {
             class.push_str(" over-host");
-        }
-        if organize.get() {
-            class.push_str(" organizing");
         }
         if grab.with(Option::is_some) {
             class.push_str(" grabbing");
         }
         class
     };
-    // a drag (Organize) ends: the picks stay where they were dropped; a
+    // a drag ends: the picks stay where they were dropped; a
     // selection rectangle picks what it holds
     let drop_grab = move || {
         if let Some((x0, y0, x1, y1)) = marquee.get_untracked() {
@@ -1723,7 +2047,7 @@ pub fn Map() -> impl IntoView {
         }
         let mut arranged = arrangement.get_untracked();
         picks.with_untracked(|p| map.with_untracked(|m| m.moved(p, dx, dy, &mut arranged)));
-        arranged.save(display.get_untracked());
+        arranged.save();
         arrangement.set(arranged);
     };
     let toggle_group = move |name: String| {
@@ -1756,47 +2080,44 @@ pub fn Map() -> impl IntoView {
                 // while the right panel floats over the map, the toolbar stops
                 // at its left edge (the runs' buttons stay visible)
                 <div class="toolbar" class:beside-panel=move || panel_open.get()>
-                    <span class="muted">"Display"</span>
-                    <select title="Graph: hosts around their group; areas: hosts inside their group"
-                        on:change=move |ev| {
-                            let value = if event_target_value(&ev) == "areas" { Display::Areas } else { Display::Graph };
-                            value.save();
-                            scale.set(1.0);
-                            center.set(None);
-                            fitted.set(None);
-                            arrangement.set(Arrangement::saved(value));
-                            display.set(value);
-                        }>
-                        <option value="graph" selected=move || display.get() == Display::Graph>"graph"</option>
-                        <option value="areas" selected=move || display.get() == Display::Areas>"areas"</option>
-                    </select>
+                        <span class="muted">"Links"</span>
+                        <select title="Grouped: one ribbon per cluster and assignment (hover or click an assignment for its ribbons' statistics, a ribbon or a host for its hosts' links); per host: every host's link"
+                            on:change=move |ev| {
+                                let value = if event_target_value(&ev) == "per-host" { Links::PerHost } else { Links::Grouped };
+                                value.save();
+                                opened.set(BTreeSet::new());
+                                links_mode.set(value);
+                            }>
+                            <option value="grouped" selected=move || links_mode.get() == Links::Grouped>"grouped"</option>
+                            <option value="per-host" selected=move || links_mode.get() == Links::PerHost>"per host"</option>
+                        </select>
                     // one button: fold every group, or unfold them all once all are folded
-                    <button title="Fold or unfold every group"
+                    <button title="Fold or unfold every cluster of hosts"
                         on:click=move |_| {
                             hold_view();
                             glide();
                             if all_folded() {
                                 collapsed.set(BTreeSet::new());
                             } else {
-                                collapsed.set(map.with_untracked(|m| m.groups.iter().map(|g| g.name.clone()).collect()));
+                                collapsed.set(map.with_untracked(|m| m.groups.iter().filter(|g| matches!(g.kind, Kind::Cluster { .. })).map(|g| g.name.clone()).collect()));
                             }
                         }>
                         {move || if all_folded() { "Unfold" } else { "Fold" }}
                     </button>
-                    <button class:active=move || organize.get()
-                        title="Move group cards and hosts: drag them; pick several with Ctrl + click or a selection rectangle (drag on empty space); pan with the middle button"
+                    <button title="Zoom and pan so that everything on the map fits in view (moved cards and hosts stay where they are)"
                         on:click=move |_| {
-                            organize.update(|o| *o = !*o);
-                            picks.set(Picks::new());
+                            scale.set(1.0);
+                            center.set(None);
+                            fitted.set(None);
                         }>
-                        "Organize"
+                        "Center"
                     </button>
-                    <button title="Put every group and host back where the map places them"
+                    <button title="Put every card and host back where the map places them (drag them to move them; Ctrl + click or Shift + drag to pick several)"
                         disabled=move || arrangement.with(Arrangement::is_empty)
                         on:click=move |_| {
                             glide();
                             let empty = Arrangement::default();
-                            empty.save(display.get_untracked());
+                            empty.save();
                             arrangement.set(empty);
                             // the whole map in view
                             scale.set(1.0);
@@ -1844,6 +2165,7 @@ pub fn Map() -> impl IntoView {
                 </Show>
                 <div class="map-view">
                 <canvas node_ref=canvas_ref />
+                <canvas class="flow" node_ref=flow_ref />
                 <svg class=svg_class viewBox=view_box
                     on:wheel=move |ev| {
                         ev.prevent_default();
@@ -1864,58 +2186,71 @@ pub fn Map() -> impl IntoView {
                         hovered.set(None);
                         moved.set(false);
                         let (x, y) = (ev.client_x() as f64, ev.client_y() as f64);
-                        // Organize, main button: pick and move cards and
-                        // hosts, or draw a selection rectangle
-                        if organize.get_untracked() && ev.button() == 0 {
-                            let Some((w, h, _, _)) = metrics(ev.current_target()) else { return };
-                            let ctrl = ev.ctrl_key() || ev.meta_key();
-                            let card = ev
-                                .target()
-                                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-                                .and_then(|e| e.closest("g.group").ok().flatten())
-                                .and_then(|e| e.get_attribute("data-group"));
-                            let what = match card {
-                                Some(name) => Some(Grab::Group(name)),
-                                None => grabbed_host(&ev).map(|(host, group)| Grab::Host { group, host }),
-                            };
-                            match what {
-                                Some(what) if ctrl => {
-                                    // add or remove it; not a click (no fold,
-                                    // no selection of the host)
-                                    moved.set(true);
-                                    picks.update(|p| if !p.remove(&what) { p.insert(what); });
-                                }
-                                Some(what) => {
-                                    if !picks.with_untracked(|p| p.contains(&what)) {
-                                        picks.set([what].into());
-                                    }
-                                    hold_view();
-                                    grab_start.set_value((x, y, units_per_pixel(w, h)));
-                                    grab.set(Some((0.0, 0.0)));
-                                }
-                                None => {
-                                    let Some((mx, my)) = map_point(&ev) else { return };
-                                    hold_view();
-                                    marquee_adds.set_value(ctrl);
-                                    grab_start.set_value((x, y, units_per_pixel(w, h)));
-                                    marquee.set(Some((mx, my, mx, my)));
-                                }
-                            }
+                        pressed.set_value(None);
+                        // middle button: pan, whatever is under the pointer
+                        if ev.button() == 1 {
+                            ev.prevent_default();
+                            drag.set(Some((x, y)));
                             return;
                         }
-                        // middle button (or not organizing): pan
-                        if ev.button() == 0 || ev.button() == 1 {
-                            if ev.button() == 1 {
-                                ev.prevent_default();
+                        if ev.button() != 0 {
+                            return;
+                        }
+                        let Some((w, h, _, _)) = metrics(ev.current_target()) else { return };
+                        let ctrl = ev.ctrl_key() || ev.meta_key();
+                        // a card's buttons only click
+                        let on_button = ev
+                            .target()
+                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                            .and_then(|e| e.closest("g.btn").ok().flatten())
+                            .is_some();
+                        if on_button {
+                            return;
+                        }
+                        let card = ev
+                            .target()
+                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                            .and_then(|e| e.closest("g.group").ok().flatten())
+                            .and_then(|e| e.get_attribute("data-group"));
+                        // a card; else a host; else a cluster's surface
+                        // (anywhere inside its outline): the cluster
+                        let what = match card {
+                            Some(name) => Some(Grab::Group(name)),
+                            None => grabbed_host(&ev)
+                                .map(|(host, group)| Grab::Host { group, host })
+                                .or_else(|| {
+                                    let (mx, my) = map_point(&ev)?;
+                                    map.with_untracked(|m| {
+                                        Some(Grab::Group(m.groups[m.cluster_on(mx, my)?].name.clone()))
+                                    })
+                                }),
+                        };
+                        grab_start.set_value((x, y, units_per_pixel(w, h)));
+                        match what {
+                            // add it to the picks, or take it out; not a
+                            // click (no fold, no host selected)
+                            Some(what) if ctrl => {
+                                moved.set(true);
+                                picks.update(|p| if !p.remove(&what) { p.insert(what); });
                             }
-                            drag.set(Some((x, y)));
+                            // a drag once the pointer moves, else a click
+                            Some(what) => pressed.set_value(Some(what)),
+                            // Shift + drag on empty space: selection rectangle
+                            None if ev.shift_key() => {
+                                let Some((mx, my)) = map_point(&ev) else { return };
+                                hold_view();
+                                marquee_adds.set_value(ctrl);
+                                marquee.set(Some((mx, my, mx, my)));
+                            }
+                            // empty space: pan
+                            None => drag.set(Some((x, y))),
                         }
                     }
                     // the middle button pans, without the browser's autoscroll
                     on:mousedown=move |ev: web_sys::MouseEvent| if ev.button() == 1 { ev.prevent_default(); }
-                    on:pointerup=move |_| { drag.set(None); drop_grab(); }
-                    on:pointercancel=move |_| { drag.set(None); grab.set(None); marquee.set(None); }
-                    on:pointerleave=move |_| { drag.set(None); drop_grab(); hovered.set(None); }
+                    on:pointerup=move |_| { pressed.set_value(None); drag.set(None); drop_grab(); }
+                    on:pointercancel=move |_| { pressed.set_value(None); drag.set(None); grab.set(None); marquee.set(None); }
+                    on:pointerleave=move |_| { pressed.set_value(None); drag.set(None); drop_grab(); hovered.set(None); hovered_bundle.set(None); hovered_cluster.set(None); }
                     on:click=move |ev| {
                         if moved.get_untracked() {
                             return;
@@ -1928,12 +2263,59 @@ pub fn Map() -> impl IntoView {
                             .and_then(|e| e.closest("g.group").ok().flatten())
                             .is_some();
                         if on_card {
+                            // an assignment's card: select it (its ribbons'
+                            // statistics stay shown), or drop it
+                            let node = ev
+                                .target()
+                                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                                .and_then(|e| e.closest("g.group.node").ok().flatten())
+                                .and_then(|e| e.get_attribute("data-group"));
+                            if let Some(name) = node {
+                                let ctrl = ev.ctrl_key() || ev.meta_key();
+                                chosen.update(|c| {
+                                    if c.contains(&name) {
+                                        c.remove(&name);
+                                    } else if ctrl {
+                                        c.insert(name);
+                                    } else {
+                                        *c = [name].into();
+                                    }
+                                });
+                            }
+                            return;
+                        }
+                        // D31: a ribbon: open its hosts' links (or close them)
+                        let host = host_under(&ev);
+                        if host.is_none() && let Some(names) = bundle_under(&ev) {
+                            opened.update(|o| if !o.remove(&names) { o.insert(names); });
                             return;
                         }
                         // a host: show it in the right panel; empty space: deselect
-                        selected.set(host_under(&ev));
+                        if host.is_none() && chosen.with_untracked(|c| !c.is_empty()) {
+                            chosen.set(BTreeSet::new());
+                        }
+                        selected.set(host);
+                        if picks.with_untracked(|p| !p.is_empty()) {
+                            picks.set(Picks::new());
+                        }
                     }
                     on:pointermove=move |ev| {
+                        // a pressed card or host: dragged once the pointer
+                        // has moved a little (it and the other picks)
+                        if let Some(what) = pressed.get_value() {
+                            let (x0, y0, _) = grab_start.get_value();
+                            let (nx, ny) = (ev.client_x() as f64, ev.client_y() as f64);
+                            if (nx - x0).abs() + (ny - y0).abs() < 4.0 {
+                                return;
+                            }
+                            pressed.set_value(None);
+                            if !picks.with_untracked(|p| p.contains(&what)) {
+                                picks.set([what].into());
+                            }
+                            hovered.set(None);
+                            hold_view();
+                            grab.set(Some((0.0, 0.0)));
+                        }
                         if grab.with_untracked(Option::is_some) || marquee.with_untracked(Option::is_some) {
                             let (x0, y0, k) = grab_start.get_value();
                             let (nx, ny) = (ev.client_x() as f64, ev.client_y() as f64);
@@ -1961,8 +2343,24 @@ pub fn Map() -> impl IntoView {
                         let Some((x, y)) = drag.get_untracked() else {
                             pointer.set((ev.client_x() as f64, ev.client_y() as f64));
                             let id = host_under(&ev);
+                            let ribbon = if id.is_none() { bundle_under(&ev) } else { None };
                             if hovered.with_untracked(|h| *h != id) {
                                 hovered.set(id);
+                            }
+                            if hovered_bundle.with_untracked(|b| *b != ribbon) {
+                                hovered_bundle.set(ribbon);
+                            }
+                            // the cluster under the pointer, inside its
+                            // outline too: its caption shows
+                            let cluster = map_point(&ev).and_then(|(mx, my)| {
+                                map.with_untracked(|m| {
+                                    let g = &m.groups[m.cluster_at(mx, my)?];
+                                    let Kind::Cluster { signature } = &g.kind else { return None };
+                                    Some((g.name.clone(), signature.clone()))
+                                })
+                            });
+                            if hovered_cluster.with_untracked(|c| c.as_ref().map(|c| &c.0) != cluster.as_ref().map(|c| &c.0)) {
+                                hovered_cluster.set(cluster);
                             }
                             return;
                         };
@@ -1985,10 +2383,10 @@ pub fn Map() -> impl IntoView {
                         })
                         // the target too: the buttons appear once the assignments are loaded
                         key=|(g, running)| (g.name.clone(), g.total, g.ok, g.bad, *running, g.collapsed, g.target.is_some())
-                        let:card>
-                        {group_card(card.0, card.1, CardSignals { cards, picks, organize, moved }, toggle_group, ask)}
+                        let:entry>
+                        {card(entry.0, entry.1, CardSignals { cards, picks, moved, hovered_node, hovered_cluster, chosen }, toggle_group, CardActions { ask, run_attribute })}
                     </For>
-                    // selection rectangle (Organize)
+                    // selection rectangle
                     {move || marquee.get().map(|(x0, y0, x1, y1)| view! {
                         <rect class="marquee" x=x0.min(x1) y=y0.min(y1)
                             width=(x1 - x0).abs() height=(y1 - y0).abs() />
@@ -2008,7 +2406,10 @@ pub fn Map() -> impl IntoView {
                                 <li><svg width="16" height="16"><circle cx="8" cy="8" r="7" fill="none" stroke="var(--accent)" stroke-width="2" /></svg> " selected host"</li>
                                 <li><svg width="16" height="16"><path d="M8 1 L15 8 L8 15 L1 8 Z" fill="var(--unknown)" /></svg> " proactive host (regops): its own Git state, coloured by its last pass"</li>
                                 <li><svg width="16" height="16"><path d="M8 1 L15 8 L8 15 L1 8 Z" fill="none" stroke="var(--warn)" stroke-width="2" /></svg> " proactive host behind its repository's latest commit"</li>
-                                <li><svg width="16" height="16"><path d="M8 1 V15" stroke="var(--muted)" stroke-width="2" stroke-dasharray="2 2" /></svg> " a group with both: proactive hosts on the left, passive ones on the right"</li>
+                                <li><svg width="16" height="16"><path d="M8 1 V15" stroke="var(--muted)" stroke-width="2" stroke-dasharray="2 2" /></svg> " a cluster with both: proactive hosts on the left, passive ones on the right"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="6.5" fill="none" stroke="var(--muted)" stroke-width="1" /></svg> " graph: hosts selected by exactly the same assignments, drawn together; point at it for its assignments and counts (folded: a pie of their states)"</li>
+                                <li><svg width="16" height="16"><path d="M1 8 H9" stroke="var(--muted)" stroke-width="5" opacity=".5" /><path d="M9 3 L15 8 L9 13 Z" fill="var(--muted)" opacity=".5" /></svg> " graph: one ribbon per cluster and assignment, as wide as its hosts, pointing from the assignment to the hosts it constrains (faint chevrons flow along it); assignments sharing many hosts lie close together; hover or click the assignment for its hosts' states, the ribbon for its hosts' links"</li>
+                                <li><svg width="16" height="16"><path d="M15 4 L5 10" stroke="var(--bad)" stroke-width="2" /><path d="M1 12.5 L6.5 12.6 L4.4 7.6 Z" fill="var(--bad)" /></svg> " a link assignment → host (hover a host or a ribbon, or Links: per host): the host's state for that assignment only; a host is its worst link"</li>
                             </ul>
                         </details>
                 </div>
@@ -2072,17 +2473,8 @@ pub fn Map() -> impl IntoView {
                             }}
                             {reach.then(|| view! { <p class="reach-warning">"Reach changes the hosts to match their expected state."</p> })}
                             <div class="actions">
-                                {matches!(run.target, GroupTarget::Assignment(..)).then(|| {
-                                    let (target, hosts) = (run.target.clone(), run.hosts);
-                                    view! {
-                                        <button type="button" class="left" title="Write one attribute by hand and run it once on these hosts"
-                                            on:click=move |_| { pending.set(None); one_shot.set(Some((target.clone(), hosts))); }>
-                                            "Run an attribute…"
-                                        </button>
-                                    }
-                                })}
                                 <button type="button" on:click=move |_| pending.set(None)>"Cancel"</button>
-                                <button class="primary" type="submit">{job_label(run.job as i32)}</button>
+                                <button class="primary" class:reach=reach type="submit">{job_label(run.job as i32)}</button>
                             </div>
                         </form>
                     </div>
@@ -2111,7 +2503,7 @@ fn host_summary(host: api::HostSummary, job: Option<String>, with_name: bool) ->
         <dl>
             {with_name.then(|| view! { <dt>"Host"</dt><dd><b>{host.host_id.clone()}</b></dd> })}
             <dt>"State"</dt><dd>{badge(host_state(&host).to_string())}</dd>
-            <dt>"Assignments"</dt><dd>{assignments_line(&host)}</dd>
+            <dt>"Assignments"</dt><dd>{assignments_line(&host)}{crate::pages::assignment_states(&host)}</dd>
             {crate::pages::agent_lines(&host)}
             {job.map(|state| view! { <dt>"Job"</dt><dd>{badge(state)}</dd> })}
             {host.conflicting.then(|| view! { <dt>"Flag"</dt><dd>"conflicting definitions"</dd> })}
@@ -2130,81 +2522,230 @@ struct CardSignals {
     /// Where each card is drawn.
     cards: RwSignal<HashMap<String, (f64, f64)>>,
     picks: RwSignal<Picks>,
-    organize: RwSignal<bool>,
     /// The pointer moved since it went down (a drag, not a click).
     moved: RwSignal<bool>,
+    /// D31: the assignment node under the pointer (its links highlighted).
+    hovered_node: RwSignal<Option<String>>,
+    /// D31: the cluster under the pointer (name, signature): its
+    /// assignments' cards are highlighted.
+    hovered_cluster: RwSignal<Option<(String, Vec<String>)>>,
+    /// D31: assignment nodes selected by a click (their ribbons' statistics
+    /// shown).
+    chosen: RwSignal<BTreeSet<String>>,
 }
 
-/// A group (assignment, label or state) node: name, counts, compliance donut,
-/// Assess / Reach buttons.
-fn group_card(
+/// What an assignment's buttons do: `ask` confirms an Assess / Reach,
+/// `run_attribute` opens the one-shot dialog (D23).
+#[derive(Clone, Copy)]
+struct CardActions<A, R> {
+    ask: A,
+    run_attribute: R,
+}
+
+/// A group's card: an assignment's node, or a cluster's chip / card.
+fn card(
     group: Group,
     running: usize,
     signals: CardSignals,
     toggle_group: impl Fn(String) + Copy + 'static,
-    ask: impl Fn(GroupTarget, api::JobKind, usize) + Copy + 'static,
-) -> impl IntoView {
-    let CardSignals {
-        cards,
-        picks,
-        organize,
-        moved,
-    } = signals;
-    let (w, h) = (CARD_W, CARD_H);
-    let (left, top) = (-w / 2.0, -h / 2.0);
-    let name = group.name.clone();
-    let toggle = {
-        let name = name.clone();
-        move |_| {
-            // Organize: a click picks the card (pointerdown), no fold
-            if !moved.get_untracked() && !organize.get_untracked() {
-                toggle_group(name.clone());
-            }
-        }
-    };
-    let picked_as = Grab::Group(group.name.clone());
-    let (name_for_title, collapsed_now) = (group.name.clone(), group.collapsed);
-    // where it is drawn (it glides and is dragged), else where it belongs
-    let (gx, gy) = (group.x, group.y);
-    let transform = move || {
+    actions: CardActions<
+        impl Fn(GroupTarget, api::JobKind, usize) + Copy + 'static,
+        impl Fn(GroupTarget, usize) + Copy + 'static,
+    >,
+) -> AnyView {
+    match &group.kind {
+        Kind::Node => group_card(group, running, signals, actions).into_any(),
+        Kind::Cluster { .. } => cluster_chip(group, running, signals, toggle_group).into_any(),
+    }
+}
+
+/// Where a card is drawn: as it glides or is dragged, else where it belongs.
+fn card_transform(
+    cards: RwSignal<HashMap<String, (f64, f64)>>,
+    group: &Group,
+) -> impl Fn() -> String + use<> {
+    let (name, gx, gy) = (group.name.clone(), group.x, group.y);
+    move || {
         let (x, y) = cards.with(|c| c.get(&name).copied()).unwrap_or((gx, gy));
         format!("translate({x} {y})")
+    }
+}
+
+/// A click on a cluster's card folds / unfolds it (not at the end of a drag,
+/// nor a Ctrl + click, which picks it).
+fn fold_click(
+    name: String,
+    signals: CardSignals,
+    toggle_group: impl Fn(String) + Copy + 'static,
+) -> impl Fn(web_sys::MouseEvent) {
+    move |_| {
+        if !signals.moved.get_untracked() {
+            toggle_group(name.clone());
+        }
+    }
+}
+
+/// D31 graph display: a cluster is only a visual helper, not a thing of
+/// its own: a soft outline around its hosts with a small caption on its
+/// edge (its assignments, its count); folded, a small badge (a pie of its
+/// hosts' states). Grab the outline, the caption or the badge to move it;
+/// a click on the caption or the badge folds / unfolds it. Hosts inside
+/// stay clickable (the outline's inside lets the pointer through).
+fn cluster_chip(
+    group: Group,
+    running: usize,
+    signals: CardSignals,
+    toggle_group: impl Fn(String) + Copy + 'static,
+) -> impl IntoView {
+    let r = if group.collapsed {
+        BADGE_R
+    } else {
+        group.radius
     };
+    let signature = match &group.kind {
+        Kind::Cluster { signature } => signature.clone(),
+        Kind::Node => Vec::new(),
+    };
+    let picked_as = Grab::Group(group.name.clone());
+    let picks = signals.picks;
+    let hovered_cluster = signals.hovered_cluster;
+    let count = format!(
+        "{} host{}",
+        group.total,
+        if group.total == 1 { "" } else { "s" }
+    );
+    let bad = (group.bad > 0).then(|| format!(" · {} not compliant", group.bad));
+    let busy = (running > 0).then(|| format!(" · {running} running"));
+    // one line per assignment, then the counts; the last line just above
+    // the outline
+    let names: Vec<String> = if signature.is_empty() {
+        vec![cluster_label(&signature)]
+    } else {
+        signature.iter().map(|a| truncate(a, 40)).collect()
+    };
+    let top = -r - 9.0 - names.len() as f64 * CAPTION_LINE;
+    let shown_as = group.name.clone();
+    let shown = move || hovered_cluster.with(|h| h.as_ref().is_some_and(|h| h.0 == shown_as));
+    let title = format!(
+        "Hosts selected by exactly: {}. Not a group of its own, only where these hosts are drawn. Click the caption to {}, drag to move",
+        group.label,
+        if group.collapsed { "unfold" } else { "fold" }
+    );
+    let caption = view! {
+        <text class="caption" class:shown=shown x="0" y=top text-anchor="middle"
+            on:click=fold_click(group.name.clone(), signals, toggle_group)>
+            {names.into_iter().enumerate().map(|(i, name)| view! {
+                <tspan x="0" dy=if i == 0 { 0.0 } else { CAPTION_LINE }>{name}</tspan>
+            }).collect_view()}
+            <tspan class="caption-count" x="0" dy=CAPTION_LINE>{count}</tspan>
+            {bad.map(|b| view! { <tspan class="count-bad">{b}</tspan> })}
+            {busy.map(|b| view! { <tspan class="running">{b}</tspan> })}
+            {group.collapsed.then_some(" · folded")}
+        </text>
+    };
+    let body = if group.collapsed {
+        let total = group.total.max(1) as f64;
+        let (ok, bad) = (group.ok as f64 / total, group.bad as f64 / total);
+        let other = 1.0 - ok - bad;
+        let ring = r - 4.0;
+        view! {
+            <g class="badge" on:click=fold_click(group.name.clone(), signals, toggle_group)>
+                <circle class="badge-bg" r=r />
+                {(group.ok > 0).then(|| arc(0.0, 0.0, ring, 0.0, ok, "var(--ok)"))}
+                {(group.bad > 0).then(|| arc(0.0, 0.0, ring, ok, bad, "var(--bad)"))}
+                {(other > 0.001 && group.total > 0).then(|| arc(0.0, 0.0, ring, ok + bad, other, "var(--unknown)"))}
+                <text class="badge-count" y="4" text-anchor="middle">{group.total.to_string()}</text>
+            </g>
+        }
+        .into_any()
+    } else {
+        view! {
+            <circle class="hull" r=r />
+            <circle class="hull-hit" r=r />
+        }
+        .into_any()
+    };
+    view! {
+        <g class="group cluster" class:picked=move || picks.with(|p| p.contains(&picked_as))
+            class:folded=group.collapsed
+            data-group=group.name.clone() transform=card_transform(signals.cards, &group)>
+            {body}
+            {caption}
+            <title>{title}</title>
+        </g>
+    }
+}
+
+/// An assignment's node: name, host count (and jobs running), counts and
+/// compliance donut, then Assess, Reach and Run (one attribute written by
+/// hand, run once on its hosts).
+fn group_card(
+    group: Group,
+    running: usize,
+    signals: CardSignals,
+    actions: CardActions<
+        impl Fn(GroupTarget, api::JobKind, usize) + Copy + 'static,
+        impl Fn(GroupTarget, usize) + Copy + 'static,
+    >,
+) -> impl IntoView {
+    let CardSignals {
+        picks,
+        hovered_node,
+        hovered_cluster,
+        chosen,
+        ..
+    } = signals;
+    let CardActions { ask, run_attribute } = actions;
+    let reference = group.label.clone();
+    let related =
+        move || hovered_cluster.with(|c| c.as_ref().is_some_and(|c| c.1.contains(&reference)));
+    let (w, h) = (CARD_W, CARD_H);
+    let (left, top) = (-w / 2.0, -h / 2.0);
+    let picked_as = Grab::Group(group.name.clone());
+    let chosen_as = group.name.clone();
+    let name_for_title = group.label.clone();
+    let transform = card_transform(signals.cards, &group);
+    let (enter, leave) = (group.name.clone(), group.name.clone());
     let total = group.total.max(1) as f64;
     let (ok, bad) = (group.ok as f64 / total, group.bad as f64 / total);
     let other = 1.0 - ok - bad;
-    let (dx, dy, dr) = (left + 34.0, 6.0, 17.0);
+    // the donut on the right, under the title, beside the counts
+    let (dx, dy, dr) = (-left - 32.0, top + 58.0, 17.0);
     let pct = if group.total == 0 {
         "—".to_string()
     } else {
         format!("{}%", (ok * 100.0).round())
     };
     let sub = format!(
-        "{} host{}{}",
+        "{} host{}",
         group.total,
         if group.total == 1 { "" } else { "s" },
-        if group.collapsed { " · folded" } else { "" }
     );
     let running_text = (running > 0).then(|| {
-        view! {
-            <text class="running" x=-left - 12.0 y=top + 24.0 text-anchor="end">{format!("{} running", running)}</text>
-        }
+        view! { <tspan class="running">{format!(" · {running} running")}</tspan> }
     });
     let buttons = group.target.clone().map(|target| {
-        let bw = (w - 36.0) / 2.0;
-        let by = h / 2.0 - 30.0;
+        let (gap, pad) = (6.0, 12.0);
+        let bw = (w - 2.0 * pad - 2.0 * gap) / 3.0;
+        let by = top + h - 30.0;
+        let x = |i: f64| left + pad + i * (bw + gap);
         let count = group.total;
-        let (t1, t2) = (target.clone(), target);
+        let (t1, t2, t3) = (target.clone(), target.clone(), target);
         view! {
             <g class="btn assess" on:click=move |ev| { ev.stop_propagation(); ask(t1.clone(), api::JobKind::Assess, count); }>
-                <rect x=left + 12.0 y=by width=bw height="22" rx="6" />
-                <text x=left + 12.0 + bw / 2.0 y=by + 15.0 text-anchor="middle">"Assess"</text>
-                <title>"Assess every host of this group"</title>
+                <rect x=x(0.0) y=by width=bw height="22" rx="6" />
+                <text x=x(0.0) + bw / 2.0 y=by + 15.0 text-anchor="middle">"Assess"</text>
+                <title>"Assess this assignment on its hosts (read only; its expected state only)"</title>
             </g>
             <g class="btn reach" on:click=move |ev| { ev.stop_propagation(); ask(t2.clone(), api::JobKind::Reach, count); }>
-                <rect x=left + 24.0 + bw y=by width=bw height="22" rx="6" />
-                <text x=left + 24.0 + bw * 1.5 y=by + 15.0 text-anchor="middle">"Reach"</text>
-                <title>"Reach the expected state on every host of this group"</title>
+                <rect x=x(1.0) y=by width=bw height="22" rx="6" />
+                <text x=x(1.0) + bw / 2.0 y=by + 15.0 text-anchor="middle">"Reach"</text>
+                <title>"Reach this assignment's expected state on its hosts: changes them (only this assignment)"</title>
+            </g>
+            <g class="btn run" on:click=move |ev| { ev.stop_propagation(); run_attribute(t3.clone(), count); }>
+                <rect x=x(2.0) y=by width=bw height="22" rx="6" />
+                <text x=x(2.0) + bw / 2.0 y=by + 15.0 text-anchor="middle">"Run"</text>
+                <title>"Write one attribute by hand and run it once on this assignment's hosts (Assess or Reach)"</title>
             </g>
         }
     });
@@ -2214,26 +2755,24 @@ fn group_card(
         "count-none"
     };
     view! {
-        <g class="group" class:picked=move || picks.with(|p| p.contains(&picked_as))
-            data-group=group.name.clone() transform=transform on:click=toggle>
+        <g class="group node" class:picked=move || picks.with(|p| p.contains(&picked_as)) class:related=related
+            class:chosen=move || chosen.with(|c| c.contains(&chosen_as))
+            data-group=group.name.clone() transform=transform
+            on:mouseenter=move |_| hovered_node.set(Some(enter.clone()))
+            on:mouseleave=move |_| if hovered_node.with_untracked(|h| h.as_ref() == Some(&leave)) { hovered_node.set(None) }>
             <rect class="card" x=left y=top width=w height=h rx="10" />
             <rect class="band" x=left + 8.0 y=top width=w - 16.0 height="4" />
-            <text class="title" x=left + 12.0 y=top + 24.0>{truncate(&group.name, if running > 0 { 18 } else { 28 })}</text>
-            <text class="sub" x=left + 12.0 y=top + 40.0>{sub}</text>
+            <text class="title" x=left + 12.0 y=top + 24.0>{truncate(&group.label, 20)}</text>
+            <text class="sub" x=left + 12.0 y=top + 40.0>{sub}{running_text}</text>
             <circle class="donut-track" cx=dx cy=dy r=dr />
             {(group.ok > 0).then(|| arc(dx, dy, dr, 0.0, ok, "var(--ok)"))}
             {(group.bad > 0).then(|| arc(dx, dy, dr, ok, bad, "var(--bad)"))}
             {(other > 0.001 && group.total > 0).then(|| arc(dx, dy, dr, ok + bad, other, "var(--unknown)"))}
             <text class="pct" x=dx y=dy + 3.5 text-anchor="middle">{pct}</text>
-            <text class="count-ok" x=left + 64.0 y=dy - 3.0>{format!("{} compliant", group.ok)}</text>
-            <text class=bad_class x=left + 64.0 y=dy + 12.0>{format!("{} not compliant", group.bad)}</text>
-            {running_text}
+            <text class="count-ok" x=left + 12.0 y=top + 60.0>{format!("{} compliant", group.ok)}</text>
+            <text class=bad_class x=left + 12.0 y=top + 75.0>{format!("{} not compliant", group.bad)}</text>
             {buttons}
-            <title>{move || if organize.get() {
-                format!("{} — drag to move (Ctrl + click: add to the picked ones)", name_for_title)
-            } else {
-                format!("{} — click to {}", name_for_title, if collapsed_now { "unfold" } else { "fold" })
-            }}</title>
+            <title>{format!("Assignment {} — its hosts' states for it; hover or click it for the statistics of its ribbons; drag to move, Ctrl + click to pick", name_for_title)}</title>
         </g>
     }
 }
@@ -2251,12 +2790,12 @@ mod tests {
     }
 
     #[test]
-    fn rings_never_overlap_and_clear_the_card() {
-        let (points, outer) = ring_offsets(500);
+    fn rings_never_overlap() {
+        let (points, outer) = ring_offsets(500, RING_SPACING);
         assert_eq!(points.len(), 500);
         for (i, a) in points.iter().enumerate() {
             let r = (a.0 * a.0 + a.1 * a.1).sqrt();
-            assert!(r >= card_radius() - 10.0 && r <= outer + 0.01, "{r}");
+            assert!(r >= RING_SPACING - 0.01 && r <= outer + 0.01, "{r}");
             for b in &points[i + 1..] {
                 let d = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
                 assert!(d > DOT * 2.5, "{d}");
@@ -2264,9 +2803,20 @@ mod tests {
         }
     }
 
-    /// A host checked against its current effective state: label `kind`
-    /// = its first kind; assignments `git/base`, then `git/<kind>` for each
-    /// kind (D29: they add up); none for a host without kind.
+    fn status(assignment: &str, compliance: &str) -> api::AssignmentStatus {
+        api::AssignmentStatus {
+            assignment: assignment.into(),
+            compliance: compliance.into(),
+            state_at: 1,
+            state_revision: "r1".into(),
+            revision: "r1".into(),
+            ..Default::default()
+        }
+    }
+
+    /// A host with assignments `git/base`, then `git/<kind>` for each kind
+    /// (D29: they add up; none for a host without kind), each checked at
+    /// its current revision with `compliance` (D30).
     fn host(id: &str, kinds: &[&str], compliance: &str) -> api::HostSummary {
         let mut assignments = Vec::new();
         if !kinds.is_empty() {
@@ -2281,6 +2831,7 @@ mod tests {
                 .map(|k| ("kind".to_string(), k.to_string()))
                 .into_iter()
                 .collect(),
+            assignment_states: assignments.iter().map(|a| status(a, compliance)).collect(),
             assignments,
             effective_revision: "r1".into(),
             state_revision: "r1".into(),
@@ -2299,68 +2850,6 @@ mod tests {
                 (r.to_string(), selector)
             })
             .collect()
-    }
-
-    #[test]
-    fn groups_by_assignment() {
-        let hosts = fleet();
-        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
-        let names: Vec<&str> = map.groups.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(names.len(), 5, "{names:?}");
-        let base = map.groups.iter().find(|g| g.name == "git/base").unwrap();
-        assert_eq!(base.total, 121);
-        assert!(matches!(&base.target, Some(GroupTarget::Assignment(r, s))
-            if r == "git/base" && s.assignments == ["git/base"]));
-        // hosts are in every assignment selecting them (D29)
-        let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
-        assert_eq!(web.total, 41);
-        assert_eq!(map.placements("shared").count(), 3);
-        // the host without assignment: its own group, nothing to run, grey
-        let none = map
-            .groups
-            .iter()
-            .find(|g| g.name == "(unassigned)")
-            .unwrap();
-        assert!(none.target.is_none() && none.total == 1);
-        let lonely = map.placements("lonely").next().unwrap();
-        assert_eq!(lonely.tone, Tone::Unassigned);
-    }
-
-    #[test]
-    fn both_displays_show_the_same_groups() {
-        let hosts = mixed_fleet();
-        let groups = |display| {
-            let map = layout(&hosts, display, &BTreeSet::new(), &selectors());
-            let mut groups: Vec<(String, usize)> = map
-                .groups
-                .iter()
-                .map(|g| (g.name.clone(), g.total))
-                .collect();
-            groups.sort();
-            (groups, map.hosts.len(), map.placements("shared").count())
-        };
-        let graph = groups(Display::Graph);
-        assert_eq!(graph, groups(Display::Areas));
-        // every host in each assignment selecting it, e.g. git/base holds all
-        assert!(graph.0.contains(&("git/base".to_string(), 121)));
-        assert_eq!(graph.2, 3);
-    }
-
-    #[test]
-    fn host_states_follow_assignments() {
-        let mut h = host("h", &["web"], "compliant");
-        assert_eq!(host_state(&h), "compliant");
-        h.state_revision = "r0".into();
-        assert_eq!(host_state(&h), "outdated");
-        h.assignment_error = "same Name at equal priority".into();
-        assert_eq!(host_state(&h), "invalid");
-        h.assignments.clear();
-        assert_eq!(host_state(&h), "unassigned");
-        // D28: a proactive host shows its own pass's compliance
-        h.agent = "regops".into();
-        assert_eq!(host_state(&h), "compliant");
-        h.compliance = "not_compliant".into();
-        assert_eq!(host_state(&h), "not_compliant");
     }
 
     /// 120 hosts of three kinds, one of two kinds, one of none.
@@ -2394,11 +2883,227 @@ mod tests {
         hosts
     }
 
+    const WEB: &str = "c:git/base+git/web";
+    const DB: &str = "c:git/base+git/db";
+
+    fn clusters(map: &Layout) -> Vec<&Group> {
+        map.groups
+            .iter()
+            .filter(|g| matches!(g.kind, Kind::Cluster { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn hosts_are_drawn_once_by_signature() {
+        let hosts = fleet();
+        {
+            let map = layout(&hosts, &BTreeSet::new(), &selectors());
+            let mut names: Vec<(&str, usize)> = clusters(&map)
+                .iter()
+                .map(|g| (g.name.as_str(), g.total))
+                .collect();
+            names.sort();
+            assert_eq!(
+                names,
+                [
+                    ("c:", 1),
+                    ("c:git/base+git/cache", 40),
+                    (DB, 40),
+                    ("c:git/base+git/db+git/web", 1),
+                    (WEB, 40),
+                ]
+            );
+            // every host once
+            assert_eq!(map.hosts.len(), 122);
+            assert_eq!(map.placements("shared").count(), 1);
+            let lonely = map.placements("lonely").next().unwrap();
+            assert_eq!(lonely.tone, Tone::Unassigned);
+            let none = map.groups.iter().find(|g| g.name == "c:").unwrap();
+            assert_eq!(none.label, "(unassigned)");
+        }
+    }
+
+    #[test]
+    fn graph_has_a_node_per_assignment_and_links_per_host() {
+        let hosts = fleet();
+        let map = layout(&hosts, &BTreeSet::new(), &selectors());
+        assert!(map.links);
+        let nodes: Vec<&Group> = map.groups.iter().filter(|g| g.kind == Kind::Node).collect();
+        assert_eq!(nodes.len(), 4);
+        let base = nodes.iter().find(|g| g.label == "git/base").unwrap();
+        assert_eq!(base.total, 121);
+        assert!(matches!(&base.target, Some(GroupTarget::Assignment(r, s))
+            if r == "git/base" && s.assignments == ["git/base"]));
+        // the shared host: one link per assignment, to each node
+        let shared = map.placements("shared").next().unwrap();
+        let linked: BTreeSet<&str> = shared
+            .links
+            .iter()
+            .map(|(i, _)| map.groups[*i].label.as_str())
+            .collect();
+        assert_eq!(linked, ["git/base", "git/db", "git/web"].into());
+        assert!(map.placements("lonely").next().unwrap().links.is_empty());
+        // bundles: one per (cluster, assignment)
+        assert_eq!(map.bundles.len(), 2 + 2 + 2 + 3);
+        let web = map.group_index(WEB).unwrap();
+        let web_node = map.group_index("a:git/web").unwrap();
+        let bundle = map
+            .bundles
+            .iter()
+            .find(|b| b.cluster == web && b.node == web_node)
+            .unwrap();
+        assert_eq!(bundle.tones.iter().sum::<usize>(), 40);
+        assert!(bundle.tones[Tone::Bad.rank() as usize] > 0);
+        // nothing overlaps: nodes and clusters
+        for (i, a) in map.groups.iter().enumerate() {
+            for b in &map.groups[i + 1..] {
+                let d = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+                assert!(d + 1.0 >= a.radius + b.radius, "{} / {}", a.name, b.name);
+            }
+        }
+        // deterministic
+        let again = layout(&hosts, &BTreeSet::new(), &selectors());
+        assert!(again == map);
+    }
+
+    #[test]
+    fn a_cluster_is_hovered_inside_and_on_its_caption() {
+        let hosts = fleet();
+        let map = layout(&hosts, &BTreeSet::new(), &selectors());
+        let web = map.group_index(WEB).unwrap();
+        let g = &map.groups[web];
+        // inside, near the edge (its hosts on rings)
+        assert_eq!(map.cluster_at(g.x + g.radius * 0.7, g.y), Some(web));
+        // on its caption: above the outline, two assignments and the counts
+        assert_eq!(
+            map.cluster_at(g.x, g.y - g.radius - 2.5 * CAPTION_LINE),
+            Some(web)
+        );
+        // far away
+        let (x, y) = (map.bounds.2 + 1000.0, map.bounds.3 + 1000.0);
+        assert_eq!(map.cluster_at(x, y), None);
+        // grabbed anywhere on its surface, not on its caption
+        assert_eq!(map.cluster_on(g.x + g.radius * 0.7, g.y), Some(web));
+        assert_eq!(
+            map.cluster_on(g.x, g.y - g.radius - 2.5 * CAPTION_LINE),
+            None
+        );
+    }
+
+    #[test]
+    fn assignments_sharing_hosts_lie_close() {
+        // cache only ever with web; db alone
+        let mut hosts = BTreeMap::new();
+        for i in 0..30 {
+            for (id, kinds) in [
+                (format!("wc{i}"), &["web", "cache"][..]),
+                (format!("d{i}"), &["db"][..]),
+            ] {
+                hosts.insert(id.clone(), host(&id, kinds, "compliant"));
+            }
+        }
+        for i in 0..5 {
+            let id = format!("w{i}");
+            hosts.insert(id.clone(), host(&id, &["web"], "compliant"));
+        }
+        let map = layout(&hosts, &BTreeSet::new(), &selectors());
+        let at = |r: &str| {
+            map.center(map.group_index(&format!("a:git/{r}")).unwrap())
+                .unwrap()
+        };
+        let dist = |a: &str, b: &str| {
+            let ((x0, y0), (x1, y1)) = (at(a), at(b));
+            ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt()
+        };
+        assert!(dist("web", "cache") < dist("web", "db"));
+        assert!(dist("web", "cache") < dist("cache", "db"));
+        // the one everywhere is nearer to each than they are to each other
+        assert!(dist("base", "db") < dist("web", "db"));
+    }
+
+    #[test]
+    fn links_have_the_hosts_state_for_their_assignment() {
+        let mut hosts = fleet();
+        // compliant with base, not with web: its web link red, the host red
+        let h = hosts.get_mut("h0").unwrap();
+        h.assignment_states = vec![
+            status("git/base", "compliant"),
+            status("git/web", "reach_failed"),
+        ];
+        let map = layout(&hosts, &BTreeSet::new(), &selectors());
+        let p = map.placements("h0").next().unwrap();
+        let tone_of = |label: &str| {
+            p.links
+                .iter()
+                .find(|(i, _)| map.groups[*i].label == label)
+                .unwrap()
+                .1
+        };
+        assert_eq!(tone_of("git/base"), Tone::Ok);
+        assert_eq!(tone_of("git/web"), Tone::Bad);
+        assert_eq!(p.tone, Tone::Bad);
+        // the web node counts it as not compliant, the base node as compliant
+        let base = map.groups.iter().find(|g| g.name == "a:git/base").unwrap();
+        let web = map.groups.iter().find(|g| g.name == "a:git/web").unwrap();
+        let bad_web = hosts
+            .values()
+            .filter(|h| h.assignments.contains(&"git/web".to_string()))
+            .filter(|h| {
+                is_bad(crate::pages::link_state(
+                    h,
+                    h.assignment_states
+                        .iter()
+                        .find(|s| s.assignment == "git/web")
+                        .unwrap(),
+                ))
+            })
+            .count();
+        assert_eq!(web.bad, bad_web);
+        assert_eq!(base.bad, 18 - 1, "h0 is fine with base");
+    }
+
+    #[test]
+    fn host_states_follow_assignments() {
+        let mut h = host("h", &["web"], "compliant");
+        assert_eq!(host_state(&h), "compliant");
+        // one assignment changed since its check: outdated (grey), the worst
+        // but for a bad one
+        h.assignment_states[1].revision = "r2".into();
+        assert_eq!(host_state(&h), "outdated");
+        h.assignment_states[0].compliance = "not_compliant".into();
+        assert_eq!(host_state(&h), "not_compliant");
+        // never checked for one assignment
+        let mut fresh = host("f", &["web"], "compliant");
+        fresh.assignment_states[1] = api::AssignmentStatus {
+            assignment: "git/web".into(),
+            compliance: "unknown".into(),
+            revision: "r1".into(),
+            ..Default::default()
+        };
+        assert_eq!(host_state(&fresh), "unknown");
+        h.assignment_error = "same Name at equal priority".into();
+        assert_eq!(host_state(&h), "invalid");
+        h.assignments.clear();
+        assert_eq!(host_state(&h), "unassigned");
+        // D28: a proactive host shows its own pass's compliance
+        h.agent = "regops".into();
+        h.compliance = "compliant".into();
+        assert_eq!(host_state(&h), "compliant");
+        h.compliance = "not_compliant".into();
+        assert_eq!(host_state(&h), "not_compliant");
+        // a backend from before D30: one state for the whole effective state
+        let mut old = host("o", &["web"], "compliant");
+        old.assignment_states.clear();
+        assert_eq!(host_state(&old), "compliant");
+        old.state_revision = "r0".into();
+        assert_eq!(host_state(&old), "outdated");
+    }
+
     #[test]
     fn proactive_left_passive_right() {
         let hosts = mixed_fleet();
-        // graph: every host of a mixed group on its side of the gap
-        let map = layout(&hosts, Display::Graph, &BTreeSet::new(), &selectors());
+        // graph: every host of a mixed cluster on its side of the gap
+        let map = layout(&hosts, &BTreeSet::new(), &selectors());
         let mut sides = (0, 0);
         for p in &map.hosts {
             let g = &map.groups[p.group];
@@ -2418,153 +3123,66 @@ mod tests {
                 assert!(p.x >= g.x + SPLIT, "{}", p.host_id);
                 sides.1 += 1;
             }
-            // within the group's radius
             let d = ((p.x - g.x).powi(2) + (p.y - g.y).powi(2)).sqrt();
             assert!(d + DOT <= g.radius, "{}", p.host_id);
         }
         assert!(sides.0 > 0 && sides.1 > 0);
-        for (i, a) in map.groups.iter().enumerate() {
-            for b in &map.groups[i + 1..] {
-                let d = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
-                assert!(d >= a.radius + b.radius, "{} / {}", a.name, b.name);
-            }
-        }
-        // areas: two columns either side of the line, off the card
-        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
-        let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
-        let area = web.area.unwrap();
-        let line = area.x + area.split.expect("a mixed group is split");
-        let mut seen = 0;
-        for p in map.hosts.iter().filter(|p| (p.gx, p.gy) == (web.x, web.y)) {
-            if hosts[&p.host_id].agent.is_empty() {
-                assert!(p.x - DOT >= line, "{}", p.host_id);
-            } else {
-                assert!(p.x + DOT <= line, "{}", p.host_id);
-            }
-            assert!(p.x + DOT <= area.x + area.w && p.y + DOT <= area.y + area.h);
-            let on_card = (p.x - web.x).abs() < CARD_W / 2.0 + DOT
-                && (p.y - web.y).abs() < CARD_H / 2.0 + DOT;
-            assert!(!on_card, "{}", p.host_id);
-            seen += 1;
-        }
-        assert_eq!(seen, web.total);
-        // a group of passive hosts only: not split
-        let map = layout(&fleet(), Display::Areas, &BTreeSet::new(), &selectors());
-        assert!(map.areas.iter().all(|a| a.split.is_none()));
     }
 
     #[test]
-    fn areas_keep_hosts_in_name_order() {
-        // states vary across the fleet: the cells must not follow them,
+    fn hosts_stay_in_name_order() {
+        // states vary across the fleet: places follow names, not states,
         // or every host would move when one changes state
         let hosts = fleet();
-        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
-        for group in &map.groups {
-            let mut cells: Vec<(f64, f64, &str)> = map
-                .of_host
-                .keys()
-                .flat_map(|id| {
-                    map.placements(id)
-                        .filter(|p| (p.gx, p.gy) == (group.x, group.y))
-                        .map(move |p| (p.y, p.x, id.as_str()))
-                })
-                .collect();
-            cells.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-            let ids: Vec<&str> = cells.iter().map(|c| c.2).collect();
-            let mut sorted = ids.clone();
-            sorted.sort();
-            assert_eq!(ids, sorted, "{}", group.name);
+        {
+            let map = layout(&hosts, &BTreeSet::new(), &selectors());
+            for (index, group) in map.groups.iter().enumerate() {
+                let ids: Vec<&str> = map
+                    .hosts
+                    .iter()
+                    .filter(|p| p.group == index)
+                    .map(|p| p.host_id.as_str())
+                    .collect();
+                let mut sorted = ids.clone();
+                sorted.sort();
+                assert_eq!(ids, sorted, "{}", group.name);
+            }
         }
     }
 
     #[test]
-    fn graph_keeps_hosts_in_name_order() {
-        // like areas: ring places follow names, not states
+    fn folded_clusters_keep_their_bundles() {
         let hosts = fleet();
-        let map = layout(&hosts, Display::Graph, &BTreeSet::new(), &selectors());
-        for group in &map.groups {
-            let ids: Vec<&str> = map
-                .hosts
-                .iter()
-                .filter(|p| (p.gx, p.gy) == (group.x, group.y))
-                .map(|p| p.host_id.as_str())
-                .collect();
-            let mut sorted = ids.clone();
-            sorted.sort();
-            assert_eq!(ids, sorted, "{}", group.name);
-        }
-    }
-
-    #[test]
-    fn areas_hold_their_hosts() {
-        let hosts = fleet();
-        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
-        assert!(!map.links);
-        assert_eq!(map.areas.len(), 5);
-        // the shared host is drawn in its three assignments, and counted in each
-        assert_eq!(map.placements("shared").count(), 3);
-        assert_eq!(map.hosts.len(), 244);
-        let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
-        assert_eq!(web.total, 41);
-        for (i, a) in map.areas.iter().enumerate() {
-            for b in &map.areas[i + 1..] {
-                let apart =
-                    a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
-                assert!(apart, "{a:?} / {b:?}");
-            }
-        }
-        for (index, group) in map.groups.iter().enumerate() {
-            let a = group.area.unwrap();
-            // card inside its area, top right
-            assert!(group.x + CARD_W / 2.0 <= a.x + a.w && group.y - CARD_H / 2.0 >= a.y);
-            let ids: Vec<&str> = map
-                .of_host
-                .iter()
-                .filter(|(_, places)| places.iter().any(|(g, _)| *g == index))
-                .map(|(id, _)| id.as_str())
-                .collect();
-            for id in ids {
-                for p in map
-                    .placements(id)
-                    .filter(|p| (p.gx, p.gy) == (group.x, group.y))
-                {
-                    // inside the area, off the card
-                    assert!(p.x - DOT >= a.x && p.x + DOT <= a.x + a.w, "{id}");
-                    assert!(p.y - DOT >= a.y && p.y + DOT <= a.y + a.h, "{id}");
-                    let on_card = (p.x - group.x).abs() < CARD_W / 2.0 + DOT
-                        && (p.y - group.y).abs() < CARD_H / 2.0 + DOT;
-                    assert!(!on_card, "{id}");
-                }
-            }
-        }
-        // folded: the card alone, its hosts not drawn there
-        let folded: BTreeSet<String> = ["git/web".to_string()].into();
-        let map = layout(&hosts, Display::Areas, &folded, &selectors());
-        let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
-        let area = web.area.unwrap();
-        assert!(area.folded && area.w < CARD_W + 40.0 && web.total == 41);
-        assert_eq!(map.placements("shared").count(), 2);
+        let folded: BTreeSet<String> = [WEB.to_string(), DB.to_string()].into();
+        let map = layout(&hosts, &folded, &selectors());
+        let web = map.group_index(WEB).unwrap();
+        assert!(map.folded(web));
+        assert!(map.hosts.iter().all(|p| p.group != web));
+        assert_eq!(map.placements("h3").count(), 0);
+        assert_eq!(map.bundles.iter().filter(|b| b.cluster == web).count(), 2);
+        // nodes never fold
+        assert!(!map.folded(map.group_index("a:git/web").unwrap()));
     }
 
     #[test]
     fn moved_groups_and_hosts_stay_where_put() {
         let hosts = fleet();
-        for display in [Display::Graph, Display::Areas] {
-            let auto = layout(&hosts, display, &BTreeSet::new(), &selectors());
-            let (web_index, web) = auto.group_named("git/web").unwrap();
-            let h3 = auto.placed_in("git/web", "h3").unwrap();
+        {
+            let auto = layout(&hosts, &BTreeSet::new(), &selectors());
+            let (web_index, web) = auto.group_named(WEB).unwrap();
+            let h3 = auto.placed_in(WEB, "h3").unwrap();
             let mut arranged = Arrangement::default();
             arranged
                 .groups
-                .insert("git/web".into(), (web.x + 1000.0, web.y - 500.0));
+                .insert(WEB.into(), (web.x + 1000.0, web.y - 500.0));
             arranged
                 .hosts
-                .entry("git/web".into())
+                .entry(WEB.into())
                 .or_default()
                 .insert("h3".into(), (-400.0, 30.0));
             let mut map = auto.clone();
             arrange(&mut map, &arranged);
-            let (_, moved) = map.group_named("git/web").unwrap();
+            let (_, moved) = map.group_named(WEB).unwrap();
             assert_eq!((moved.x, moved.y), (web.x + 1000.0, web.y - 500.0));
             // its other hosts follow it, the moved one sits at its offset
             for (i, (a, b)) in auto.hosts.iter().zip(&map.hosts).enumerate() {
@@ -2577,16 +3195,9 @@ mod tests {
                         "{}",
                         a.host_id
                     );
-                    assert_eq!((b.gx, b.gy), (moved.x, moved.y));
                 } else {
                     assert_eq!((a.x, a.y), (b.x, b.y));
                 }
-            }
-            // areas hold their moved hosts; bounds hold everything
-            if let Some(area) = moved.area {
-                let p = &map.hosts[h3];
-                assert!(p.x >= area.x && p.x <= area.x + area.w);
-                assert_eq!(map.areas[web_index], area);
             }
             let (x0, y0, x1, y1) = map.bounds;
             assert!(
@@ -2595,51 +3206,51 @@ mod tests {
                     .all(|p| p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1)
             );
             // a drag shows the same as its result
-            let picks: Picks = [Grab::Group("git/web".into())].into();
+            let picks: Picks = [Grab::Group(WEB.into())].into();
             let dragged = auto.shifted(&picks, 1000.0, -500.0);
-            let (_, g) = dragged.group_named("git/web").unwrap();
+            let (_, g) = dragged.group_named(WEB).unwrap();
             assert_eq!((g.x, g.y), (moved.x, moved.y));
             // nothing moved: the automatic layout
             let mut same = auto.clone();
             arrange(&mut same, &Arrangement::default());
             assert!(same == auto);
         }
+        // graph: a node moved, its links follow (they point at its center)
+        let auto = layout(&hosts, &BTreeSet::new(), &selectors());
+        let node = auto.group_index("a:git/web").unwrap();
+        let mut arranged = Arrangement::default();
+        arranged.groups.insert("a:git/web".into(), (5000.0, 5000.0));
+        let mut map = auto.clone();
+        arrange(&mut map, &arranged);
+        assert_eq!(map.center(node), Some((5000.0, 5000.0)));
     }
 
     #[test]
     fn picks_move_together() {
         let hosts = fleet();
-        let auto = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
+        let auto = layout(&hosts, &BTreeSet::new(), &selectors());
         let host = |group: &str, host: &str| Grab::Host {
             group: group.into(),
             host: host.into(),
         };
-        // a group, one of its hosts (moves with it, once) and a host of
-        // another group
-        let picks: Picks = [
-            Grab::Group("git/web".into()),
-            host("git/web", "h3"),
-            host("git/db", "h1"),
-        ]
-        .into();
+        let picks: Picks = [Grab::Group(WEB.into()), host(WEB, "h3"), host(DB, "h1")].into();
         let mut arranged = Arrangement::default();
         auto.moved(&picks, 50.0, 20.0, &mut arranged);
-        let (_, web) = auto.group_named("git/web").unwrap();
-        assert_eq!(arranged.groups["git/web"], (web.x + 50.0, web.y + 20.0));
+        let (_, web) = auto.group_named(WEB).unwrap();
+        assert_eq!(arranged.groups[WEB], (web.x + 50.0, web.y + 20.0));
         assert_eq!(arranged.hosts.len(), 1);
         let mut map = auto.clone();
         arrange(&mut map, &arranged);
         let dragged = auto.shifted(&picks, 50.0, 20.0);
         for (i, a) in auto.hosts.iter().enumerate() {
             let (b, c) = (&map.hosts[i], &dragged.hosts[i]);
-            // the drag shows what is saved
             assert!(
                 (b.x - c.x).abs() < 1e-6 && (b.y - c.y).abs() < 1e-6,
                 "{}",
                 a.host_id
             );
-            let moves = auto.groups[a.group].name == "git/web"
-                || (auto.groups[a.group].name == "git/db" && a.host_id == "h1");
+            let moves = auto.groups[a.group].name == WEB
+                || (auto.groups[a.group].name == DB && a.host_id == "h1");
             let d = (b.x - a.x, b.y - a.y);
             if moves {
                 assert!(
@@ -2656,41 +3267,37 @@ mod tests {
     #[test]
     fn a_selection_rectangle_picks_what_it_holds() {
         let hosts = fleet();
-        let map = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
-        // around a whole area: its group, not its hosts one by one
-        let (_, web) = map.group_named("git/web").unwrap();
-        let a = web.area.unwrap();
-        let picks = map.in_box(a.x + a.w + 1.0, a.y + a.h + 1.0, a.x - 1.0, a.y - 1.0);
-        assert!(picks.contains(&Grab::Group("git/web".into())));
+        let map = layout(&hosts, &BTreeSet::new(), &selectors());
+        let (_, web) = map.group_named(WEB).unwrap();
+        let r = web.radius + 1.0;
+        let picks = map.in_box(web.x + r, web.y + r, web.x - r, web.y - r);
+        assert!(picks.contains(&Grab::Group(WEB.into())));
         assert!(
             !picks
                 .iter()
-                .any(|p| matches!(p, Grab::Host { group, .. } if group == "git/web"))
+                .any(|p| matches!(p, Grab::Host { group, .. } if group == WEB))
         );
-        // around one host: that host
-        let i = map.placed_in("git/db", "h1").unwrap();
+        let i = map.placed_in(DB, "h1").unwrap();
         let p = &map.hosts[i];
         let picks = map.in_box(p.x - 2.0, p.y - 2.0, p.x + 2.0, p.y + 2.0);
         assert_eq!(
             picks,
             [Grab::Host {
-                group: "git/db".into(),
+                group: DB.into(),
                 host: "h1".into()
             }]
             .into()
         );
-        // empty space: nothing
         assert!(map.in_box(-1e6, -1e6, -1e6 + 5.0, -1e6 + 5.0).is_empty());
     }
 
     #[test]
     fn folding_glides_from_the_layout_before() {
         let hosts = fleet();
-        let open = layout(&hosts, Display::Areas, &BTreeSet::new(), &selectors());
-        let folded: BTreeSet<String> = ["git/web".to_string()].into();
-        let closed = layout(&hosts, Display::Areas, &folded, &selectors());
+        let open = layout(&hosts, &BTreeSet::new(), &selectors());
+        let folded: BTreeSet<String> = [WEB.to_string()].into();
+        let closed = layout(&hosts, &folded, &selectors());
         let mut motion = Motion::of(&open);
-        // start: where things were, the folding hosts included
         let first = motion.frame(&closed, 0.0);
         assert_eq!(first.hosts.len(), open.hosts.len());
         for p in &first.hosts {
@@ -2703,18 +3310,16 @@ mod tests {
                 p.host_id
             );
         }
-        // end: the new layout, the folded hosts under their card
         let last = motion.frame(&closed, 1.0);
-        let (web_index, web) = closed.group_named("git/web").unwrap();
+        let (web_index, web) = closed.group_named(WEB).unwrap();
         for p in &last.hosts[closed.hosts.len()..] {
             assert_eq!((p.group, p.x, p.y), (web_index, web.x, web.y));
         }
         assert!(last.hosts[..closed.hosts.len()] == closed.hosts[..]);
-        // unfolding: hosts leave their card
         let mut motion = Motion::of(&closed);
         let first = motion.frame(&open, 0.0);
-        let (_, folded_web) = closed.group_named("git/web").unwrap();
-        let h3 = open.placed_in("git/web", "h3").unwrap();
+        let (_, folded_web) = closed.group_named(WEB).unwrap();
+        let h3 = open.placed_in(WEB, "h3").unwrap();
         assert_eq!(
             (first.hosts[h3].x, first.hosts[h3].y),
             (folded_web.x, folded_web.y)
@@ -2722,7 +3327,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_groups_without_overlap() {
+    fn jobs_in_progress_count_in_their_cluster() {
         let hosts = fleet();
         let job = |id: &str, host: &str, state: &str, created_at| {
             let job = api::JobSummary {
@@ -2734,7 +3339,6 @@ mod tests {
             };
             (job.job_id.clone(), job)
         };
-        // h1: a job started; h2: an old pending job, then a finished one
         let jobs = [
             job("a", "h1", "STARTED", 10),
             job("b", "h2", "PENDING", 10),
@@ -2744,51 +3348,34 @@ mod tests {
         .collect();
         let rings = rings(&jobs);
         assert_eq!(rings, [("h1".to_string(), Ring::Started)].into());
-        let map = layout(&hosts, Display::Graph, &BTreeSet::new(), &selectors());
-        // every assignment of a host, as in the areas display
-        assert_eq!(map.groups.len(), 5);
-        assert_eq!(map.hosts.len(), 244);
-        let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
-        assert!(matches!(&web.target, Some(GroupTarget::Assignment(r, _)) if r == "git/web"));
-        assert!(
-            map.groups
-                .iter()
-                .any(|g| g.name == "(unassigned)" && g.target.is_none())
-        );
-        // h1 runs a job: counted in each of its groups (git/base, git/db)
-        assert_eq!(map.running(&rings).iter().sum::<usize>(), 2);
-        // worst hosts on the inner ring
-        let first_web = map
-            .hosts
-            .iter()
-            .find(|p| (p.gx, p.gy) == (web.x, web.y))
-            .unwrap();
-        assert_eq!(first_web.tone, Tone::Bad);
-        // hit test
+        let map = layout(&hosts, &BTreeSet::new(), &selectors());
+        assert_eq!(map.running(&rings).iter().sum::<usize>(), 1);
         let h1 = map.placements("h1").next().unwrap();
         assert_eq!(
             map.host_at(h1.x + 2.0, h1.y - 2.0, DOT).unwrap().host_id,
             "h1"
         );
-        assert!(map.host_at(web.x, web.y, DOT).is_none());
-        for (i, a) in map.groups.iter().enumerate() {
-            for b in &map.groups[i + 1..] {
-                let d = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
-                assert!(d >= a.radius + b.radius, "{} / {}", a.name, b.name);
-            }
+        let (_, web) = map.group_named(WEB).unwrap();
+        // D31: no chip in the middle, a host there; nothing past the outline
+        assert!(map.host_at(web.x, web.y, DOT).is_some());
+        assert!(map.host_at(web.x + web.radius + DOT, web.y, DOT).is_none());
+    }
+
+    #[test]
+    fn ribbons_start_on_the_outline_and_are_found_under_the_pointer() {
+        let map = layout(&fleet(), &BTreeSet::new(), &selectors());
+        for b in &map.bundles {
+            let c = &map.groups[b.cluster];
+            let ((sx, sy), (ex, ey)) = map.bundle_ends(b).unwrap();
+            let d = ((sx - c.x).powi(2) + (sy - c.y).powi(2)).sqrt();
+            assert!((d - c.radius).abs() < 1e-6, "{d} vs {}", c.radius);
+            // a ribbon is found at its middle (that one, or one as near)
+            let (mx, my) = ((sx + ex) / 2.0, (sy + ey) / 2.0);
+            let found = map.bundle_at(mx, my, 1.0, |_| true).unwrap();
+            let names = map.bundle_names(found).unwrap();
+            assert_eq!(map.bundle_index(&names), Some(found));
+            // nothing drawn, nothing found
+            assert!(map.bundle_at(mx, my, 1.0, |_| false).is_none());
         }
-        // folded: no hosts placed
-        let folded: BTreeSet<String> = ["git/web".to_string(), "git/db".to_string()].into();
-        let map = layout(&hosts, Display::Graph, &folded, &selectors());
-        let web = map.groups.iter().find(|g| g.name == "git/web").unwrap();
-        assert!(web.collapsed && web.total == 41);
-        assert!(map.hosts.iter().all(|p| (p.gx, p.gy) != (web.x, web.y)));
-        // folded hosts still count in their group (h1 is a db), but are not
-        // placed there (only in git/base, not folded)
-        let db_index = map.groups.iter().position(|g| g.name == "git/db").unwrap();
-        assert_eq!(map.running(&rings)[db_index], 1);
-        let db = &map.groups[db_index];
-        assert!(map.placements("h1").all(|p| (p.gx, p.gy) != (db.x, db.y)));
-        assert_eq!(map.placements("h1").count(), 1);
     }
 }

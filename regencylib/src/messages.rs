@@ -72,6 +72,10 @@ pub struct TaskHeader {
     /// A one-shot raw attribute (D23): its outcome never sets the host state.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub one_shot: bool,
+    /// D30: the assignment whose final state the task runs (`state_revision`
+    /// is then its revision); `None` for one-shot attributes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment: Option<String>,
 }
 
 impl TaskHeader {
@@ -109,15 +113,18 @@ impl TaskEnvelope {
                 origin: origin.into(),
                 state_revision: None,
                 one_shot: false,
+                assignment: None,
             },
             task,
         }
     }
 
-    /// What the task checks (D23): the host's effective state at `revision`,
-    /// or a one-shot attribute (`None`).
-    pub fn checking(mut self, revision: Option<String>) -> Self {
-        self.header.one_shot = revision.is_none();
+    /// What the task checks (D23, D30): an assignment's final state at its
+    /// revision, or a one-shot attribute (`None`).
+    pub fn checking(mut self, checked: Option<(String, String)>) -> Self {
+        self.header.one_shot = checked.is_none();
+        let (assignment, revision) = checked.unzip();
+        self.header.assignment = assignment;
         self.header.state_revision = revision;
         self
     }
@@ -175,6 +182,9 @@ pub fn set_checked(envelope: &mut crate::proto::OutcomeEnvelope, header: &TaskHe
     if let Some(revision) = &header.state_revision {
         envelope.set_state_revision(revision.as_str());
     }
+    if let Some(assignment) = &header.assignment {
+        envelope.set_assignment(assignment.as_str());
+    }
     envelope.set_one_shot(header.one_shot);
 }
 
@@ -196,6 +206,8 @@ pub struct DecodedOutcome {
     /// Revision of the effective expected state checked (D23), if known.
     pub state_revision: Option<String>,
     pub one_shot: bool,
+    /// D30: the assignment checked, if the job checked one.
+    pub assignment: Option<String>,
     /// regent-sdk `RunLog` bytes (D24), if the producer kept the run's log.
     pub run_log_bytes: Option<Vec<u8>>,
 }
@@ -231,6 +243,7 @@ pub fn decode_outcome(bytes: &[u8]) -> Result<DecodedOutcome, MessageError> {
         reporter_bytes: envelope.reporter().to_vec(),
         state_revision: Some(envelope.state_revision().to_string()).filter(|r| !r.is_empty()),
         one_shot: envelope.one_shot(),
+        assignment: Some(envelope.assignment().to_string()).filter(|a| !a.is_empty()),
         run_log_bytes: Some(envelope.run_log().to_vec()).filter(|b| !b.is_empty()),
     })
 }
@@ -535,8 +548,13 @@ impl Command {
 }
 
 /// Idempotency key of a `run` task (D10).
-pub fn run_key(command_id: &str, host_id: &str) -> String {
-    format!("run:{command_id}:{host_id}")
+/// Idempotency key of a run task (D10): one per host and assignment (D30).
+/// One-shot runs (no assignment) keep `run:{command_id}:{host_id}`.
+pub fn run_key(command_id: &str, host_id: &str, assignment: Option<&str>) -> String {
+    match assignment {
+        Some(assignment) => format!("run:{command_id}:{host_id}:{assignment}"),
+        None => format!("run:{command_id}:{host_id}"),
+    }
 }
 
 /// Idempotency key of a recurring task (D3, D16): `slot` is the interval slot

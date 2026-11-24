@@ -614,15 +614,16 @@ async fn main() -> anyhow::Result<()> {
     sync_orders(&mut client, &token).await?;
 
     if args.run {
-        // first assessment of everything (each host's effective state, D23),
-        // so the map is not all "unknown"
+        // first assessment of everything (every assignment of every host,
+        // one job each, D30), so the map is not all "unknown"
         let stamp = chrono::Utc::now().timestamp();
         let mut run = api::RunNowRequest::new();
         run.set_command_id(format!("dataset-assess-{stamp}").as_str());
-        run.set_selector(selector(&["baseline"]));
+        let every: Vec<&str> = ASSIGNMENTS.iter().map(|a| a.0).collect();
+        run.set_selector(selector(&every));
         run.set_job(api::JobKind::Assess);
         client.run_now(authed(run, &token)).await?;
-        println!("first Assess sent (every host, its effective expected state)");
+        println!("first Assess sent (every assignment of every host)");
     }
     Ok(())
 }

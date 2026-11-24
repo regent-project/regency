@@ -64,6 +64,8 @@ pub struct HostMeta {
     pub labels: Vec<(String, String)>,
     pub conflicting: bool,
     pub effective: Effective,
+    /// D30: the current revision of each assignment selecting the host.
+    pub revisions: Vec<(String, Option<String>)>,
     /// D28: a proactive host's repository freshness and drift.
     pub agent: Option<AgentMeta>,
 }
@@ -82,6 +84,7 @@ pub fn host_summary(doc: &HostDoc, meta: &HostMeta) -> api::HostSummary {
         labels,
         conflicting,
         effective,
+        revisions,
         agent,
     } = meta;
     let mut summary = api::HostSummary::new();
@@ -129,6 +132,14 @@ pub fn host_summary(doc: &HostDoc, meta: &HostMeta) -> api::HostSummary {
     if let Effective::Invalid { reason, .. } = effective {
         summary.set_assignment_error(reason.as_str());
     }
+    for (assignment, revision) in revisions {
+        summary.assignment_states_mut().push(assignment_status(
+            doc,
+            assignment,
+            revision.as_deref(),
+            effective,
+        ));
+    }
     if let Some(report) = &doc.agent {
         summary.set_agent(report.agent.as_str());
         summary.set_agent_version(report.agent_version.as_str());
@@ -146,6 +157,74 @@ pub fn host_summary(doc: &HostDoc, meta: &HostMeta) -> api::HostSummary {
         }
     }
     summary
+}
+
+/// D30: a host's state for one assignment: from the newest job of that
+/// assignment, else from an older job that checked the whole effective state
+/// while it is unchanged (before D30), else unknown.
+pub fn assignment_status(
+    doc: &HostDoc,
+    assignment: &str,
+    revision: Option<&str>,
+    effective: &Effective,
+) -> api::AssignmentStatus {
+    let mut status = api::AssignmentStatus::new();
+    status.set_assignment(assignment);
+    status.set_revision(revision.unwrap_or_default());
+    if let Some(own) = doc.assignments.get(assignment) {
+        status.set_compliance(own.state.compliance.as_str());
+        status.set_error(own.state.error.clone().unwrap_or_default());
+        if !own.cleared {
+            status.set_state_at(ms(own.at));
+            status.set_state_revision(own.revision.as_deref().unwrap_or_default());
+            status.set_job_id(own.outcome.id.trim_start_matches("outcome:"));
+            status.set_job_month(own.outcome.month.as_str());
+        }
+        return status;
+    }
+    // the newest check of the whole effective state (outcomes without
+    // assignment), while that state is still the current one
+    if let Some(whole) = doc.assignments.get(regencylib::model::WHOLE_STATE) {
+        if !whole.cleared
+            && effective.revision().is_some()
+            && whole.revision.as_deref() == effective.revision()
+        {
+            status.set_compliance(whole.state.compliance.as_str());
+            status.set_error(whole.state.error.clone().unwrap_or_default());
+            status.set_state_at(ms(whole.at));
+            // checked in full: up to date for this assignment
+            status.set_state_revision(revision.unwrap_or_default());
+            status.set_job_id(whole.outcome.id.trim_start_matches("outcome:"));
+            status.set_job_month(whole.outcome.month.as_str());
+        } else {
+            status.set_compliance("unknown");
+        }
+        return status;
+    }
+    // a doc from before D30: its latest state is a whole-state check
+    let whole = doc.assignments.is_empty()
+        && effective.revision().is_some()
+        && doc.state_revision.as_deref() == effective.revision()
+        && !doc.state_cleared
+        && doc.state_at.is_some();
+    if whole {
+        status.set_compliance(doc.state.compliance.as_str());
+        status.set_error(doc.state.error.clone().unwrap_or_default());
+        status.set_state_at(doc.state_at.map(ms).unwrap_or(0));
+        // checked in full: up to date for this assignment
+        status.set_state_revision(revision.unwrap_or_default());
+        let newest = [&doc.last_assess, &doc.last_reach]
+            .into_iter()
+            .flatten()
+            .find(|r| Some(r.finished_at) == doc.state_at);
+        if let Some(r) = newest {
+            status.set_job_id(r.id.trim_start_matches("outcome:"));
+            status.set_job_month(r.month.as_str());
+        }
+    } else {
+        status.set_compliance("unknown");
+    }
+    status
 }
 
 /// A one-shot state from YAML (D23): one attribute, a list of attributes,
@@ -315,5 +394,56 @@ mod tests {
         let error = convert_attributes(AttributesInput::Yaml("- Name: x\n  Detail: !Nope {}\n"))
             .unwrap_err();
         assert!(!error.contains("expected struct Attribute"), "{error}");
+    }
+
+    /// D30 upgrade: a whole-state check counts for an assignment never
+    /// checked alone, even once another assignment was, while the effective
+    /// revision is unchanged.
+    #[test]
+    fn whole_state_check_counts_while_current() {
+        use chrono::TimeZone;
+        use regencylib::model::{AssignmentState, HostState, OutcomeRef, WHOLE_STATE};
+        let state = |compliance: &str, t: i64, revision: &str, id: &str| AssignmentState {
+            state: HostState {
+                compliance: compliance.into(),
+                items: Vec::new(),
+                error: None,
+            },
+            at: chrono::Utc.timestamp_opt(t, 0).unwrap(),
+            revision: Some(revision.into()),
+            job: regent_sdk::task::Job::Assess,
+            outcome: OutcomeRef {
+                id: format!("outcome:{id}"),
+                month: "202611".into(),
+                finished_at: chrono::Utc.timestamp_opt(t, 0).unwrap(),
+                cleared: false,
+            },
+            cleared: false,
+        };
+        let mut doc = HostDoc::empty("h", chrono::Utc.timestamp_opt(1, 0).unwrap());
+        doc.assignments.insert(
+            WHOLE_STATE.into(),
+            state("not_compliant", 10, "eff-1", "whole"),
+        );
+        doc.assignments
+            .insert("s/web".into(), state("compliant", 20, "web-1", "web"));
+        let ready = |revision: &str| Effective::Ready {
+            layers: Vec::new(),
+            state: ExpectedState::new(),
+            blame: Vec::new(),
+            warnings: Vec::new(),
+            revision: revision.into(),
+        };
+        // never checked alone: the whole-state check
+        let edge = assignment_status(&doc, "s/edge", Some("edge-1"), &ready("eff-1"));
+        assert_eq!(edge.compliance(), "not_compliant");
+        assert_eq!(edge.job_id(), "whole");
+        assert_eq!(edge.state_revision(), "edge-1", "up to date");
+        // its own check wins
+        let web = assignment_status(&doc, "s/web", Some("web-1"), &ready("eff-1"));
+        assert_eq!(web.compliance(), "compliant");
+        // the effective state changed since: not checked
+        let edge = assignment_status(&doc, "s/edge", Some("edge-2"), &ready("eff-2"));
+        assert_eq!(edge.compliance(), "unknown");
     }
 }

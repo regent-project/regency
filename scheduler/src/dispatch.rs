@@ -1,7 +1,7 @@
 //! Turning resolved hosts into published tasks (D4, D9, D16), shared by
 //! recurring orders and `run` commands.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,12 +22,25 @@ use tracing::{debug, warn};
 /// Tasks of one dispatch waiting for their publisher confirm at once.
 const IN_FLIGHT: usize = 64;
 
-/// What each host runs (D23).
+/// What each host runs (D23, D30).
 pub enum Body<'a> {
-    /// Its effective expected state, composed from its assignments.
-    Effective(&'a Assignments),
+    /// One task per assignment of the host in `scope` (all of them when
+    /// `None`), each running that assignment's final state. The host's
+    /// effective state must be valid (D29).
+    Assignments {
+        assignments: &'a Assignments,
+        scope: Option<&'a BTreeSet<String>>,
+    },
     /// A one-shot raw state, the same for every host.
     OneShot(&'a ExpectedState),
+}
+
+/// One task to publish: a host and what it checks.
+struct Item<'a> {
+    target: &'a ResolvedHost,
+    state: ExpectedState,
+    /// (assignment, revision); `None` for a one-shot state.
+    checked: Option<(String, String)>,
 }
 
 /// What to build for every host.
@@ -40,7 +53,8 @@ pub struct Plan<'a> {
     pub origin: &'a str,
     /// Per-message TTL (recurring tasks: until the next slot, D4).
     pub ttl: Option<Duration>,
-    pub key: &'a (dyn Fn(&str) -> String + Sync),
+    /// Idempotency key of a host's task for an assignment (D30).
+    pub key: &'a (dyn Fn(&str, Option<&str>) -> String + Sync),
     /// Called after each published task: firing a large order is slow but
     /// alive, which the shard watchdog (D3) must see.
     pub progress: &'a (dyn Fn() + Sync),
@@ -107,7 +121,66 @@ impl Dispatcher {
         }
     }
 
-    /// Publish one task per target, then its `PENDING` (D7). Returns how many
+    /// The tasks of the targets: one per host and assignment in scope
+    /// (D30), or one per host for a one-shot state. Hosts without a valid
+    /// effective state get none (D23, D29).
+    fn items<'t>(&self, targets: &'t [ResolvedHost], plan: &Plan<'_>) -> Vec<Item<'t>> {
+        let mut items = Vec::new();
+        let (assignments, scope) = match &plan.body {
+            Body::OneShot(state) => {
+                return targets
+                    .iter()
+                    .map(|target| Item {
+                        target,
+                        state: (*state).clone(),
+                        checked: None,
+                    })
+                    .collect();
+            }
+            Body::Assignments { assignments, scope } => (*assignments, *scope),
+        };
+        // the same for every host (D30), composed once
+        let mut finals: HashMap<String, Option<(ExpectedState, String)>> = HashMap::new();
+        for target in targets {
+            let effective = assignments.effective(&target.labels);
+            match &effective {
+                Effective::Ready { .. } => {}
+                Effective::Unassigned => {
+                    debug!(host_id = %target.host_id, "host skipped: no assignment");
+                    self.published.with_label_values(&["unassigned"]).inc();
+                    continue;
+                }
+                Effective::Invalid { reason, .. } => {
+                    warn!(host_id = %target.host_id, reason, "host skipped: invalid assignments (D29)");
+                    self.published
+                        .with_label_values(&["invalid_assignments"])
+                        .inc();
+                    continue;
+                }
+            }
+            for assignment in effective.assignments() {
+                if scope.is_some_and(|scope| !scope.contains(&assignment)) {
+                    continue;
+                }
+                let entry = finals.entry(assignment.clone()).or_insert_with(|| {
+                    assignments
+                        .final_state(&assignment)
+                        .inspect_err(|reason| warn!(assignment, reason, "assignment skipped"))
+                        .ok()
+                });
+                if let Some((state, revision)) = entry {
+                    items.push(Item {
+                        target,
+                        state: state.clone(),
+                        checked: Some((assignment, revision.clone())),
+                    });
+                }
+            }
+        }
+        items
+    }
+
+    /// Publish the targets' tasks, then their `PENDING` (D7). Returns how many
     /// were published; stops at the first broker error (the caller retries:
     /// keys are deterministic, duplicates are harmless). Up to
     /// [`IN_FLIGHT`] tasks wait for their confirm at once: one at a time
@@ -121,8 +194,10 @@ impl Dispatcher {
         for pool in pools {
             self.ensure_pool(pool).await?;
         }
-        let mut results = futures::stream::iter(targets.iter().map(|t| self.dispatch_one(t, plan)))
-            .buffer_unordered(IN_FLIGHT);
+        let items = self.items(targets, plan);
+        let mut results =
+            futures::stream::iter(items.into_iter().map(|i| self.dispatch_one(i, plan)))
+                .buffer_unordered(IN_FLIGHT);
         let mut count = 0;
         while let Some(result) = results.next().await {
             if result? {
@@ -134,29 +209,14 @@ impl Dispatcher {
     }
 
     /// One task, then its `PENDING` once the task's publish is confirmed.
-    /// `Ok(false)`: refused (D9), or no effective state (D23).
-    async fn dispatch_one(&self, target: &ResolvedHost, plan: &Plan<'_>) -> Result<bool, String> {
-        let key = (plan.key)(&target.host_id);
-        let (expected_state, revision) = match &plan.body {
-            Body::OneShot(state) => ((*state).clone(), None),
-            Body::Effective(assignments) => match assignments.effective(&target.labels) {
-                Effective::Ready {
-                    state, revision, ..
-                } => (state, Some(revision)),
-                Effective::Unassigned => {
-                    debug!(host_id = %target.host_id, "host skipped: no assignment");
-                    self.published.with_label_values(&["unassigned"]).inc();
-                    return Ok(false);
-                }
-                Effective::Invalid { reason, .. } => {
-                    warn!(host_id = %target.host_id, reason, "host skipped: invalid assignments (D29)");
-                    self.published
-                        .with_label_values(&["invalid_assignments"])
-                        .inc();
-                    return Ok(false);
-                }
-            },
-        };
+    /// `Ok(false)`: refused (D9).
+    async fn dispatch_one(&self, item: Item<'_>, plan: &Plan<'_>) -> Result<bool, String> {
+        let Item {
+            target,
+            state: expected_state,
+            checked,
+        } = item;
+        let key = (plan.key)(&target.host_id, checked.as_ref().map(|(a, _)| a.as_str()));
         let task = RegentTask::from(target.builder.clone(), expected_state, plan.job)
             .with_idempotency_key(key.clone());
         // D9, again at the scheduler
@@ -165,7 +225,7 @@ impl Dispatcher {
             self.published.with_label_values(&["refused"]).inc();
             return Ok(false);
         }
-        let envelope = TaskEnvelope::new(task, plan.created_at, plan.origin).checking(revision);
+        let envelope = TaskEnvelope::new(task, plan.created_at, plan.origin).checking(checked);
         let payload = envelope.to_bytes().map_err(|e| e.to_string())?;
         let mut properties =
             BasicProperties::default().with_content_type("application/json".into());

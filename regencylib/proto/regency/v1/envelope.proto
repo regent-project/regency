@@ -35,4 +35,9 @@ message OutcomeEnvelope {
   // `run_log_max_bytes` setting (D24); empty when not kept. Stored as the
   // outcome's `run_log.pb` attachment.
   bytes run_log = 9;
+  // D30: the assignment (`source/name`) whose final state the job checked;
+  // `state_revision` is then that assignment's revision. Empty for one-shot
+  // attributes, regops passes and jobs from before D30 (the whole effective
+  // state).
+  string assignment = 10;
 }

@@ -73,6 +73,7 @@ impl Writer {
         );
         fresh.state_revision = decoded.state_revision.clone();
         fresh.one_shot = decoded.one_shot;
+        fresh.assignment = decoded.assignment.clone();
         let mut attachments: Vec<(&str, &str, &[u8])> = vec![(
             OUTCOME_ATTACHMENT,
             "application/x-protobuf",

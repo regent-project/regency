@@ -94,34 +94,46 @@ picked up by the next firing.
 
 ## The live views
 
-- **Map** (home page): one card per assignment (hosts without one in
-  *(unassigned)*), with its hosts as dots colored by their state against their
-  effective expected state ([Assignments](assignments.md)): grey when
-  unassigned. Two displays of the same groups, a host with several
-  assignments drawn in each of them: **graph** (hosts on rings around the
-  card) and **areas** (each group a rectangle holding its hosts). In a group with
-  both kinds, proactive hosts (regops) are on the left and passive ones
-  (reached by runners) on the right: two half-ring lobes either side of the
-  card, like ∞, in the graph; two columns with a dashed line between them
-  in the areas.
-  Each card has **Assess** and **Reach** buttons (each host runs its own
-  effective state; an assignment's dialog can also run a hand-written
-  attribute once). Once confirmed, the run opens in the right panel and
+- **Map** (home page): each host is drawn once. Hosts are grouped by the
+  exact set of assignments selecting them (hosts without one in
+  *(unassigned)*). A host has a state for each of its assignments, and
+  its dot shows the worst of them ([Assignments](assignments.md)): grey
+  when unassigned, never checked, or checked against an older version of
+  an assignment. The map is a graph: each assignment a card, close to the
+  assignments it shares many hosts with; each
+  group of hosts inside a light outline between its assignments' cards
+  (point at it to see its assignments, one per line, and its counts), a small pie when folded. Links are
+  *grouped*: one plain ribbon per group and assignment, as wide as its
+  hosts, its arrow pointing from the assignment to the hosts it constrains (faint
+  chevrons slowly flow along it). Hover or click an assignment's card to see, on each
+  of its ribbons, how many hosts are in each state for it (Ctrl / Cmd +
+  click selects several; Escape or a click on empty space drops them).
+  Hover a host, or hover / click a ribbon, to see the hosts' own links,
+  each coloured with the host's state for that assignment only; Escape
+  closes them; the toolbar's **Links: per host** shows them all. In a
+  group with both kinds, proactive hosts (regops) are on the left and
+  passive ones (reached by runners) on the right: two half-ring lobes
+  either side of the group, like ∞.
+  **Assess** and **Reach** (an assignment's card) run that assignment's expected state only, on its hosts: the
+  hosts' other assignments are not touched; Reach, which changes the
+  hosts, stands out in orange. **Run** on the card writes one attribute
+  by hand and runs it once on the assignment's hosts. Once confirmed, the run opens in the right panel and
   is followed live: whether the command was accepted, LIVE then FINISHED,
   a progress bar, counts and its hosts (those needing attention first;
   click one to see it). The browser keeps a run until all its jobs have
   ended: after a reload, or back from another page, its panel opens again,
   and a **Job in progress** button per run, at the right end of the
-  toolbar, brings its panel back after closing it or looking at a host. A click on a card folds or unfolds its hosts
-  (they glide back under it, or out of it). **Organize** (toolbar): drag a
-  card to move its group with its hosts, or a host to move it alone (it
-  then follows its group). Pick several things with **Ctrl + click** or a
-  **selection rectangle** (drag on empty space; with Ctrl it adds to the
-  picked ones), then drag any of them to move them all; a click on empty
-  space unpicks everything. In this mode a click on a card picks it
-  instead of folding it, and the middle button pans. The browser
-  remembers the arrangement, per display; **Auto-arrange** puts everything
-  back in the automatic layout. A host with
+  toolbar, brings its panel back after closing it or looking at a host. A
+  click on a group's card folds or unfolds its hosts (they glide back
+  under it, or out of it). **Drag** a card, a host or a group of hosts
+  (grab it anywhere inside its outline) to move it (a host then follows
+  its group); drag empty space to pan. Pick several things
+  with **Ctrl + click** (Cmd on macOS) or **Shift + drag** (a selection
+  rectangle; with Ctrl it adds to the picked ones), then drag any of them
+  to move them all; **Escape** or a click elsewhere unpicks everything.
+  The browser remembers the arrangement, per display; **Auto-arrange**
+  puts everything back in the automatic layout, and **Center** zooms and
+  pans to fit the whole map in view without moving anything. A host with
   a job in progress (pending, running or abort requested) turns light blue
   until it finishes. Zoom with the wheel, pan by dragging;
   hovering a host shows a tip next to the cursor; clicking it opens the

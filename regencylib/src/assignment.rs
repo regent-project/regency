@@ -177,6 +177,31 @@ impl Assignments {
         Ok(compose(&parts))
     }
 
+    /// D30: revision of one assignment, a hash of its own revision and of
+    /// its states' revisions; `None` if it or one of its states is unknown.
+    pub fn revision_of(&self, reference: &str) -> Option<String> {
+        let (def, revision) = self.assignments.get(reference)?;
+        let mut fingerprint = vec![format!("{reference}@{revision}")];
+        for state in &def.expected_states {
+            let (_, state_revision) = self.states.get(state)?;
+            fingerprint.push(format!("{state}@{state_revision}"));
+        }
+        Some(format!("{:016x}", stable_hash(&fingerprint.join("\n"))))
+    }
+
+    /// D30: what a task of one assignment runs on any host it selects
+    /// (whose effective state is valid): its final state and revision.
+    pub fn final_state(&self, reference: &str) -> Result<(ExpectedState, String), String> {
+        let def = self
+            .get(reference)
+            .ok_or_else(|| format!("unknown assignment {reference}"))?;
+        let composition = self.compose_refs(&def.expected_states)?;
+        let revision = self
+            .revision_of(reference)
+            .ok_or_else(|| format!("assignment {reference} refers to an unknown expected state"))?;
+        Ok((composition.state, revision))
+    }
+
     /// Effective state of a host, from its labels (own and built-in).
     pub fn effective(&self, labels: &HostLabels) -> Effective {
         let selected = self.matching(labels);
@@ -877,6 +902,43 @@ mod tests {
                 .assignments(),
             ["s/web", "s/zz"]
         );
+    }
+
+    #[test]
+    fn one_assignment_runs_its_own_final_state() {
+        let base = state(&format!(
+            "Attributes:\n{}{}",
+            line(Some("motd"), "generic"),
+            line(None, "always")
+        ));
+        let web = state(&format!("Attributes:\n{}", line(Some("motd"), "web")));
+        let extra = state(&format!("Attributes:\n{}", line(None, "extra")));
+        let mut items = catalog(
+            vec![
+                ("base", "{}", vec!["base"]),
+                ("web", r#"{role="web"}"#, vec!["base", "web"]),
+                ("extra", "{}", vec!["extra"]),
+            ],
+            vec![("base", base), ("web", web), ("extra", extra)],
+        );
+        let assignments = Assignments::from_catalog(&items);
+        let (web_state, web_rev) = assignments.final_state("s/web").unwrap();
+        assert_eq!(texts(&web_state), ["web", "always"]);
+        let (extra_state, extra_rev) = assignments.final_state("s/extra").unwrap();
+        assert_eq!(texts(&extra_state), ["extra"]);
+        assert_ne!(web_rev, extra_rev);
+        assert!(assignments.final_state("s/nope").is_err());
+        // a change to one of its states changes its revision, not the others'
+        for item in &mut items {
+            if let CatalogBody::ExpectedState(def) = &item.body
+                && def.name == "web"
+            {
+                item.revision = "2".into();
+            }
+        }
+        let changed = Assignments::from_catalog(&items);
+        assert_ne!(changed.revision_of("s/web").unwrap(), web_rev);
+        assert_eq!(changed.revision_of("s/extra").unwrap(), extra_rev);
     }
 
     #[test]

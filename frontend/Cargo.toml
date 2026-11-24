@@ -20,7 +20,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 toml = "1.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Storage", "Window", "Document", "Element", "HtmlMetaElement", "Location", "DomRect", "HtmlCanvasElement", "CanvasRenderingContext2d", "CssStyleDeclaration", "MouseEvent", "PointerEvent"] }
+web-sys = { version = "0.3", features = ["Storage", "Window", "Document", "Element", "HtmlMetaElement", "Location", "DomRect", "HtmlCanvasElement", "CanvasRenderingContext2d", "TextMetrics", "MediaQueryList", "CssStyleDeclaration", "MouseEvent", "PointerEvent"] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 

@@ -1,6 +1,8 @@
 //! `run` commands (D10): any replica expands one into a task per host.
 //! backend authorized the command on the resolved hosts (D12, D16).
 
+use std::collections::BTreeSet;
+
 use lapin::message::Delivery;
 use regencylib::amqp::Handled;
 use regencylib::messages::{Command, CommandBody, run_key};
@@ -24,9 +26,15 @@ pub async fn handle(state: &State, dispatcher: &Dispatcher, delivery: Delivery) 
     let span = info_span!("run", command_id = %command.command_id, principal = %command.issued_by);
     async {
         let assignments = state.assignments();
+        // D30: a run selecting assignments runs those only; otherwise every
+        // assignment of each host
+        let scope: BTreeSet<String> = run.selector.assignments.iter().cloned().collect();
         let body = match &run.one_shot {
             Some(one_shot) => Body::OneShot(one_shot),
-            None => Body::Effective(&assignments),
+            None => Body::Assignments {
+                assignments: &assignments,
+                scope: (!scope.is_empty()).then_some(&scope),
+            },
         };
         let (hostdefs, assignments) = state.hosts();
         let resolution = resolve(&run.selector, &hostdefs, &assignments, run.pool.as_deref());
@@ -34,7 +42,8 @@ pub async fn handle(state: &State, dispatcher: &Dispatcher, delivery: Delivery) 
             warn!(host_id = %host_id, "host skipped (conflicting definitions or unknown)");
         }
         let command_id = command.command_id.clone();
-        let key = move |host: &str| run_key(&command_id, host);
+        let key =
+            move |host: &str, assignment: Option<&str>| run_key(&command_id, host, assignment);
         let plan = Plan {
             job: run.job,
             body,

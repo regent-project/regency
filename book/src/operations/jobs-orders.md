@@ -2,19 +2,24 @@
 
 ## Run now
 
-From the map (a group's card), an assignment's row in **Assignments**, or a host's panel or page: **Assess** or **Reach**. Each host runs its own effective expected state
-([Assignments](assignments.md)); hosts without an assignment are skipped.
+From the map (an assignment's card, or its row on a group's card), an
+assignment's row in **Assignments**, or a host's page: **Assess** or
+**Reach**. An assignment runs its own expected state on its hosts, and
+nothing else; a host runs each of its assignments, one job each
+([Assignments](assignments.md)). Hosts without an assignment, or with
+conflicting assignments, are skipped.
 Over the API, `RunNow` takes a host selector, so one command can target a
 whole assignment, a label selector (`{env="prod", role=~"web|api"}`) or
 every `env=prod` host; with `one_shot_yaml` it runs a
-hand-written attribute once instead (history only). Each host gets its own job; follow them
+hand-written attribute once instead (history only). Each host gets one job
+per assignment run (one for a hand-written attribute); follow them
 in **Jobs** (live, last 24 hours), where queued and running jobs can be
 **aborted**.
 
 ## Recurring orders
 
-An order runs the hosts of an assignment on a schedule, each against its
-effective expected state:
+An order runs an assignment on its hosts on a schedule (that assignment's
+expected state only):
 
 | Field | Example |
 |---|---|
@@ -23,8 +28,8 @@ effective expected state:
 | mode | Assess or Reach |
 | pool | optional override of the hosts' runner pool |
 
-Orders are managed through the API (`UpsertOrder`, `DeleteOrder`,
-`ListOrders`); an orders page in the web UI is planned.
+Orders are managed on the **CronJob** page (Activity), or through the API
+(`UpsertOrder`, `DeleteOrder`, `ListOrders`).
 
 Rules worth knowing:
 
@@ -33,7 +38,7 @@ Rules worth knowing:
   current slot runs.
 - A recurring task that cannot start before the next firing expires
   (`EXPIRED`) instead of piling up.
-- The assignment's hosts and their effective states are resolved at each
+- The assignment's hosts and its expected state are resolved at each
   firing (latest revisions), and the order's **author is re-checked** against the current
   policies: if they may no longer run it, the firing is skipped and recorded.
 - Editing an order changes its revision; jobs of the new revision get new

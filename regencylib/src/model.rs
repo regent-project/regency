@@ -425,6 +425,9 @@ pub struct OutcomeDoc {
     /// A one-shot raw attribute (D23): history only, never the host state.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub one_shot: bool,
+    /// D30: the assignment checked (`state_revision` is its revision).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment: Option<String>,
     /// The decoded result (SDK JSON), for display. The attachment is the
     /// source of truth.
     pub result: serde_json::Value,
@@ -453,6 +456,7 @@ impl OutcomeDoc {
             state: HostState::of_result(result),
             state_revision: None,
             one_shot: false,
+            assignment: None,
             result: serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
             run_log: None,
         }
@@ -524,6 +528,45 @@ pub struct HostDoc {
     /// What a proactive host's agent last reported about itself (D28).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentReport>,
+    /// D30: the host's state per assignment (`source/name`), from the jobs
+    /// that checked one assignment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub assignments: BTreeMap<String, AssignmentState>,
+}
+
+/// D30: key of [`HostDoc::assignments`] holding the host's newest check of
+/// its whole effective state (an outcome without assignment: a scheduler
+/// or runner from before D30). It keeps counting for each assignment while
+/// the effective revision is unchanged, even after other assignments got
+/// their own checks (which replace the host's latest state).
+pub const WHOLE_STATE: &str = "";
+
+/// D30: a host's state for one assignment, from the newest job checking it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignmentState {
+    pub state: HostState,
+    /// `finished_at` of that job's outcome.
+    pub at: DateTime<Utc>,
+    /// Revision of the assignment checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    pub job: Job,
+    pub outcome: OutcomeRef,
+    /// Reset by retention (wins over the same outcome at equal `at`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleared: bool,
+}
+
+impl AssignmentState {
+    /// The newer of two (commutative, idempotent).
+    fn newest(a: &Self, b: &Self) -> Self {
+        let key = |s: &Self| (s.at, s.cleared, serde_json::to_string(s).ok());
+        if key(b) > key(a) {
+            b.clone()
+        } else {
+            a.clone()
+        }
+    }
 }
 
 /// A proactive host's agent report (D28), from the newest pass.
@@ -625,6 +668,7 @@ impl HostDoc {
             last_reach: None,
             certs: CertPins::default(),
             agent: None,
+            assignments: BTreeMap::new(),
         }
     }
 
@@ -650,11 +694,53 @@ impl HostDoc {
         host.state = doc.state.clone();
         host.state_at = Some(doc.finished_at);
         host.state_revision = doc.state_revision.clone();
+        // an outcome without assignment checked the whole effective state
+        {
+            let assignment = doc.assignment.as_deref().unwrap_or(WHOLE_STATE);
+            host.assignments.insert(
+                assignment.to_string(),
+                AssignmentState {
+                    state: doc.state.clone(),
+                    at: doc.finished_at,
+                    revision: doc.state_revision.clone(),
+                    job: doc.job,
+                    outcome: outcome.clone(),
+                    cleared: false,
+                },
+            );
+        }
         match doc.job {
             Job::Assess => host.last_assess = Some(outcome),
             Job::Reach => host.last_reach = Some(outcome),
         }
         host
+    }
+
+    /// A doc written before D30 (no state per assignment): its latest state,
+    /// necessarily a whole-state check, as [`WHOLE_STATE`].
+    fn whole_state_before_d30(&self) -> Option<AssignmentState> {
+        if !self.assignments.is_empty() || self.state_cleared {
+            return None;
+        }
+        let at = self.state_at?;
+        let (job, outcome) = [
+            (Job::Assess, &self.last_assess),
+            (Job::Reach, &self.last_reach),
+        ]
+        .into_iter()
+        .find_map(|(job, r)| {
+            r.as_ref()
+                .filter(|r| r.finished_at == at && !r.cleared)
+                .map(|r| (job, r))
+        })?;
+        Some(AssignmentState {
+            state: self.state.clone(),
+            at,
+            revision: self.state_revision.clone(),
+            job,
+            outcome: outcome.clone(),
+            cleared: false,
+        })
     }
 
     /// Commutative, idempotent merge (newest `finished_at` wins).
@@ -691,6 +777,23 @@ impl HostDoc {
             last_reach: newest_ref(self.last_reach.clone(), other.last_reach.clone()),
             certs: self.certs.merge(&other.certs),
             agent: AgentReport::newest(&self.agent, &other.agent),
+            assignments: {
+                let mut merged = self.assignments.clone();
+                // a doc from before D30 keeps its whole-state check
+                let seeds = [self, other].map(|d| d.whole_state_before_d30());
+                let seeded = seeds
+                    .iter()
+                    .flatten()
+                    .map(|s| (WHOLE_STATE.to_string(), s.clone()));
+                for (assignment, state) in other.assignments.clone().into_iter().chain(seeded) {
+                    let (assignment, state) = (&assignment, &state);
+                    merged
+                        .entry(assignment.clone())
+                        .and_modify(|current| *current = AssignmentState::newest(current, state))
+                        .or_insert_with(|| state.clone());
+                }
+                merged
+            },
         }
     }
 
@@ -717,7 +820,27 @@ impl HostDoc {
             self.state_revision = None;
             changed = true;
         }
+        // D30: states per assignment from that month
+        for state in self.assignments.values_mut() {
+            if state.outcome.month == month && !state.cleared {
+                state.state = HostState::unknown();
+                state.revision = None;
+                state.outcome.cleared = true;
+                state.cleared = true;
+                changed = true;
+            }
+        }
         changed
+    }
+
+    /// Months referred to (retention, D8/D30).
+    pub fn months(&self) -> BTreeSet<String> {
+        [&self.last_assess, &self.last_reach]
+            .into_iter()
+            .flatten()
+            .map(|r| r.month.clone())
+            .chain(self.assignments.values().map(|s| s.outcome.month.clone()))
+            .collect()
     }
 }
 
@@ -1495,5 +1618,121 @@ mod revocation_tests {
             normalize_revocation(REVOKED_HOSTS_KEY, &json!([1])),
             Some(Err(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod d30_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn outcome(assignment: &str, t: i64, compliance: &str, month: &str) -> HostDoc {
+        let at = Utc.timestamp_opt(t, 0).unwrap();
+        let mut doc = HostDoc::empty("h", at);
+        doc.state.compliance = compliance.into();
+        doc.state_at = Some(at);
+        doc.assignments.insert(
+            assignment.into(),
+            AssignmentState {
+                state: HostState {
+                    compliance: compliance.into(),
+                    items: Vec::new(),
+                    error: None,
+                },
+                at,
+                revision: Some(format!("{assignment}@{t}")),
+                job: Job::Assess,
+                outcome: OutcomeRef {
+                    id: format!("outcome:{assignment}:{t}"),
+                    month: month.into(),
+                    finished_at: at,
+                    cleared: false,
+                },
+                cleared: false,
+            },
+        );
+        doc
+    }
+
+    #[test]
+    fn states_per_assignment_merge_independently() {
+        let web_old = outcome("s/web", 10, "not_compliant", "202611");
+        let base = outcome("s/base", 20, "compliant", "202611");
+        let web_new = outcome("s/web", 30, "reach_success", "202611");
+        let merged = web_old.merge(&base).merge(&web_new);
+        assert_eq!(merged, web_new.merge(&base).merge(&web_old), "commutative");
+        assert_eq!(
+            merged.assignments["s/web"].state.compliance,
+            "reach_success"
+        );
+        assert_eq!(merged.assignments["s/base"].state.compliance, "compliant");
+        // the host-level state stays the newest outcome
+        assert_eq!(merged.state.compliance, "reach_success");
+        assert_eq!(merged.merge(&merged), merged, "idempotent");
+    }
+
+    #[test]
+    fn retention_clears_states_of_the_month() {
+        let mut doc = outcome("s/web", 10, "compliant", "202608").merge(&outcome(
+            "s/base",
+            20,
+            "compliant",
+            "202611",
+        ));
+        assert_eq!(
+            doc.months(),
+            BTreeSet::from(["202608".to_string(), "202611".to_string()])
+        );
+        assert!(doc.clear_month("202608"));
+        assert_eq!(doc.assignments["s/web"].state.compliance, "unknown");
+        assert!(doc.assignments["s/web"].cleared);
+        assert_eq!(doc.assignments["s/base"].state.compliance, "compliant");
+        assert!(!doc.clear_month("202608"), "already cleared");
+        // a newer outcome of the assignment wins over the reset
+        let again = doc.merge(&outcome("s/web", 40, "not_compliant", "202611"));
+        assert_eq!(again.assignments["s/web"].state.compliance, "not_compliant");
+    }
+
+    /// A doc written before D30: its latest state is a whole-state check,
+    /// nothing per assignment.
+    fn before_d30(t: i64, compliance: &str) -> HostDoc {
+        let at = Utc.timestamp_opt(t, 0).unwrap();
+        let mut doc = HostDoc::empty("h", at);
+        doc.state.compliance = compliance.into();
+        doc.state_at = Some(at);
+        doc.state_revision = Some("effective".into());
+        doc.last_assess = Some(OutcomeRef {
+            id: format!("outcome:whole:{t}"),
+            month: "202611".into(),
+            finished_at: at,
+            cleared: false,
+        });
+        doc
+    }
+
+    #[test]
+    fn a_whole_state_check_outlives_checks_of_one_assignment() {
+        // upgrade: a doc from before D30, then one assignment checked alone
+        let old = before_d30(10, "not_compliant");
+        let web = outcome("s/web", 20, "compliant", "202611");
+        let merged = old.merge(&web);
+        assert_eq!(merged, web.merge(&old), "commutative");
+        assert_eq!(merged.merge(&web), merged, "idempotent");
+        assert_eq!(
+            merged.state.compliance, "compliant",
+            "latest state replaced"
+        );
+        let whole = &merged.assignments[WHOLE_STATE];
+        assert_eq!(whole.state.compliance, "not_compliant");
+        assert_eq!(whole.revision.as_deref(), Some("effective"));
+        assert_eq!(whole.outcome.id, "outcome:whole:10");
+        assert_eq!(merged.assignments["s/web"].state.compliance, "compliant");
+        // a newer whole-state outcome (an older scheduler, rolling upgrade)
+        // replaces it, and leaves the assignment's own state
+        // (recorded by a dbwriter from 0.8.0 on: under WHOLE_STATE already)
+        let newer = outcome(WHOLE_STATE, 30, "compliant", "202611");
+        let merged = merged.merge(&newer);
+        assert_eq!(merged.assignments[WHOLE_STATE].outcome.id, "outcome::30");
+        assert_eq!(merged.assignments["s/web"].state.compliance, "compliant");
     }
 }

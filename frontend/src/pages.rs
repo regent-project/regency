@@ -23,11 +23,11 @@ pub fn spawn_scoped(task: impl std::future::Future<Output = ()> + 'static) {
     });
 }
 
-/// What a host's colour means (D23): its compliance against its effective
-/// expected state, or why there is none to trust: `unassigned` (no
-/// assignment), `invalid` (assignments that cannot be composed),
-/// `outdated` (checked against an older effective state). Defined hosts
-/// without outcome have compliance `never_run` (`hostdefs::never_run_hosts`).
+/// What a host's colour means (D23, D30): the **worst** of its states per
+/// assignment ([`link_state`]), or why there is none to trust:
+/// `unassigned` (no assignment), `invalid` (assignments that cannot be
+/// composed). Defined hosts without outcome have compliance `never_run`
+/// (`hostdefs::never_run_hosts`).
 pub fn host_state(host: &api::HostSummary) -> &str {
     // D28: a proactive host checks its own state: its colour is its last
     // pass's, assigned or not
@@ -38,10 +38,71 @@ pub fn host_state(host: &api::HostSummary) -> &str {
         "unassigned"
     } else if !host.assignment_error.is_empty() {
         "invalid"
-    } else if host.compliance != "unknown" && host.state_revision != host.effective_revision {
+    } else if host.assignment_states.is_empty() {
+        // a backend from before D30: one state for the whole effective state
+        if host.compliance != "unknown" && host.state_revision != host.effective_revision {
+            "outdated"
+        } else {
+            &host.compliance
+        }
+    } else {
+        host.assignment_states
+            .iter()
+            .map(|status| link_state(host, status))
+            .fold(None, |worst: Option<&str>, state| match worst {
+                Some(w) if severity(w) >= severity(state) => Some(w),
+                _ => Some(state),
+            })
+            .unwrap_or("unknown")
+    }
+}
+
+/// D30: a host's state for one of its assignments: its newest check of
+/// that assignment, `outdated` when the assignment changed since. A
+/// proactive host's pass counts for each (D28).
+pub fn link_state<'a>(host: &'a api::HostSummary, status: &'a api::AssignmentStatus) -> &'a str {
+    if !host.agent.is_empty() {
+        &host.compliance
+    } else if !host.assignment_error.is_empty() {
+        "invalid"
+    } else if status.compliance != "unknown" && status.state_revision != status.revision {
         "outdated"
     } else {
-        &host.compliance
+        &status.compliance
+    }
+}
+
+/// D30: the host's state for each of its assignments, one line each.
+pub fn assignment_states(host: &api::HostSummary) -> impl IntoView + use<> {
+    let lines: Vec<_> = host
+        .assignment_states
+        .iter()
+        .map(|status| {
+            let state = crate::map::map_state(link_state(host, status)).to_string();
+            let when = if status.state_at > 0 {
+                crate::client::format_ms(status.state_at)
+            } else {
+                "never checked".to_string()
+            };
+            view! {
+                <li>
+                    <span class="assignment-name">{status.assignment.clone()}</span>
+                    " " {badge(state)} " "
+                    <span class="ts muted">{when}</span>
+                </li>
+            }
+        })
+        .collect();
+    (!lines.is_empty()).then(|| view! { <ul class="assignment-states">{lines}</ul> })
+}
+
+/// How bad a state is, for the worst of several (D30).
+pub fn severity(state: &str) -> u8 {
+    match state {
+        "not_compliant" | "reach_failed" | "error" => 4,
+        "aborted" | "invalid" => 3,
+        "compliant" | "reach_success" => 1,
+        _ => 2,
     }
 }
 
@@ -890,7 +951,7 @@ pub fn HostPage() -> impl IntoView {
             view! {
                 <dl>
                     <dt>"State"</dt><dd>{badge(host_state(&host).to_string())} " " <span class="muted">{host.error.clone()}</span></dd>
-                    <dt>"Assignments"</dt><dd>{assignments_line(&host)}</dd>
+                    <dt>"Assignments"</dt><dd>{assignments_line(&host)}{assignment_states(&host)}</dd>
                     {agent_lines(&host)}
                     <dt>"Last outcome"</dt><dd><span class="ts">{format_ms(host.state_at)}</span></dd>
                     <dt>"First seen"</dt><dd><span class="ts">{format_ms(host.first_seen)}</span></dd>

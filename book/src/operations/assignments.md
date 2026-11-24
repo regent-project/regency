@@ -17,9 +17,10 @@ A host gets **every** assignment whose selector matches its labels, like a
 Salt top file targeting grains or Ansible groups: adding the label
 `monitoring="true"` to a host gives it the `monitoring` assignment, nothing
 else to edit. Their final states add up into the host's **effective
-expected state**, and that is what gives a host's colour on the map a
-meaning: a host is green when it complies with its effective state, and
-nothing else.
+expected state**. A host has a state **per assignment** (did it comply
+with that assignment's state when last checked?), and its colour on the
+map is the worst of them: a host is green when it complies with each of
+its assignments, and nothing else.
 
 Like the rest of the catalog, assignments come from a Git source
 (`assignments/*.yaml`, read-only in regency, see [Sources](sources.md)),
@@ -101,9 +102,8 @@ refused until the priority or the name of one of them is changed, a Git
 source reports it as an error on the file, and a host they would both
 select is *invalid*.
 
-The effective state has a revision (a hash of the assignments, their
-stacks and their states' revisions): it changes whenever one of them
-changes.
+Each assignment has a revision (a hash of the assignment, its stack and its
+states' revisions): it changes whenever one of them changes.
 
 ## Suspected conflicts
 
@@ -126,31 +126,38 @@ overrides the earlier one), or remove one.
 
 | State | Meaning |
 |---|---|
-| compliant / not compliant | last outcome against the host's **current** effective state |
-| outdated | the last outcome was against an older effective state: assess it again |
+| compliant / not compliant | the host's last check of an assignment, at its **current** revision |
+| outdated | the last check was against an older version of the assignment: assess it again |
 | unassigned | no assignment selects the host: nothing is checked on it (grey, never green) |
 | invalid | conflicting or ambiguous assignments, or a state of a stack is missing (see above) |
 
-The host panel and page show its assignments in order, each with its
-stack, and the effective state's attributes, each tagged with its state
-and assignment.
+The table applies to each assignment of a host; the host's own colour is
+the worst of them (a host never checked against one of its assignments
+stays grey). The host panel, page and hover tip list its state per
+assignment; the host page also shows its assignments in order, each with
+its stack, and the effective state's attributes, each tagged with its
+state and assignment.
 
 ## Assess and Reach
 
-Assess and Reach always run each host against **its own effective
-state** (every assignment it gets): from an assignment's card on the map or
-its row in **Assignments**, from a label card, from a host, or from an
-order. There is no expected state to choose: running a single state or
-assignment alone could undo an override or miss part of the host.
+Assess and Reach of an **assignment** (its card on the map, its row in
+**Assignments**, an order) run that assignment's final state only, on the
+hosts it selects: "reach this state, because these hosts carry these
+labels". The hosts' other assignments are not touched, and their colours
+for them do not change. This is safe because assignments never override
+each other: an attribute set differently by two assignments is a conflict,
+and a host with conflicting assignments gets no job at all.
+
+Assess and Reach of a **host** (its page) run each of its assignments, one
+job each.
 
 Orders reference an assignment, a mode and a schedule (see
 [Running jobs and recurring orders](jobs-orders.md)).
 
 ## One-shot attributes
 
-To check or fix something once, without adding it to an expected state, open
-an assignment's dialog on the map (its **Assess** or **Reach** button) and
-choose **Run an attribute…**. Write the attributes one of two ways, like a
+To check or fix something once, without adding it to an expected state,
+click **Run** on an assignment's card on the map. Write the attributes one of two ways, like a
 query in Grafana, and switch at any time:
 
 - **Builder**: a form. Pick the attribute's **nature** (LineInFile, Apt,

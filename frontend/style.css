@@ -33,6 +33,7 @@
   --ok: #12b76a;
   --bad: #f04438;
   --warn: #f79009;
+  --reach: #e8590c;      /* Reach: an action that changes hosts */
   --unknown: #98a2b3;
   --unassigned: #c2cbd7;   /* no assignment: nothing is checked (D23) */
   --job: #0ba5ec;          /* hosts with a job in progress */
@@ -41,8 +42,6 @@
   --ink-mix: 22%;
   --map-link: #b8c2cf;
   --map-link-extra: #cad2dd;
-  --map-area: #e9eef4;
-  --map-area-line: #c9d2de;
   --shadow: 0 1px 2px rgba(16, 24, 40, .05);
   --shadow-lg: 0 12px 16px -4px rgba(16, 24, 40, .08), 0 4px 6px -2px rgba(16, 24, 40, .03);
   color-scheme: light;
@@ -76,6 +75,7 @@
   --ok: #12b76a;
   --bad: #f04438;
   --warn: #f79009;
+  --reach: #e8590c;      /* Reach: an action that changes hosts */
   --unknown: #667085;
   --unassigned: #283244;
   --job: #0ba5ec;
@@ -84,8 +84,6 @@
   --ink-mix: 15%;
   --map-link: #283244;
   --map-link-extra: #1d2939;
-  --map-area: #101828;
-  --map-area-line: #283244;
   --shadow: none;
   --shadow-lg: 0 12px 24px rgba(0, 0, 0, .45);
   color-scheme: dark;
@@ -233,6 +231,8 @@ button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus); }
 button:disabled { opacity: .5; cursor: default; }
 button.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
 button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); color: #fff; }
+button.primary.reach, button.primary.reach:hover { background: var(--reach); border-color: var(--reach); }
+button.primary.reach:hover { filter: brightness(1.1); }
 .topbar .icon-button { border-color: var(--nav-line); background: var(--nav-hover); box-shadow: none; }
 .topbar .icon-button:hover { background: var(--nav-hover); }
 .error { color: color-mix(in srgb, var(--bad), var(--ink) var(--ink-mix)); margin: .5rem 0; }
@@ -279,10 +279,9 @@ main:has(.map-page) { max-width: none; }
 svg.map { cursor: grab; touch-action: none; user-select: none; }
 svg.map:active { cursor: grabbing; }
 svg.map.over-host { cursor: pointer; }
-svg.map .group { cursor: pointer; }
-svg.map.organizing .group, svg.map.organizing.over-host { cursor: move; }
+svg.map .group { cursor: grab; }
+svg.map .group .btn { cursor: pointer; }
 svg.map.grabbing, svg.map.grabbing .group { cursor: grabbing; }
-svg.map.organizing { cursor: crosshair; }
 svg.map .group.picked .card { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 6 3; }
 svg.map .marquee { fill: color-mix(in srgb, var(--accent) 10%, transparent); stroke: var(--accent); stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; pointer-events: none; }
 .toolbar button.active { border-color: var(--primary); color: var(--accent); background: var(--brand-soft); }
@@ -298,13 +297,37 @@ svg.map .group .donut-track { fill: none; stroke: var(--panel-2); stroke-width: 
 svg.map .group .donut { fill: none; stroke-width: 6; }
 svg.map .group .pct { fill: var(--fg); font-size: 10px; }
 svg.map .group .running { fill: var(--job); font-size: 11px; }
+/* D31: clusters (graph): an outline around their hosts, a caption, a badge
+   when folded; never a card (only assignments are cards) */
+svg.map .group.cluster { pointer-events: none; }
+svg.map .group.cluster .hull { fill: color-mix(in srgb, var(--fg) 3%, transparent); stroke: color-mix(in srgb, var(--fg) 16%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; }
+svg.map .group.cluster .hull-hit { fill: none; stroke: transparent; stroke-width: 12; vector-effect: non-scaling-stroke; pointer-events: stroke; }
+svg.map .group.cluster:hover .hull, svg.map .group.cluster:has(.caption.shown) .hull { stroke: color-mix(in srgb, var(--fg) 40%, transparent); fill: color-mix(in srgb, var(--fg) 5%, transparent); }
+svg.map .group.cluster.picked .hull { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 3; }
+/* the caption only while the pointer is on the cluster (inside it too) */
+svg.map .group .caption { fill: var(--fg); font-size: 11px; font-style: italic; cursor: pointer; opacity: 0; pointer-events: none; transition: opacity .15s; paint-order: stroke; stroke: var(--canvas); stroke-width: 3px; stroke-linejoin: round; }
+svg.map .group .caption.shown { opacity: 1; pointer-events: auto; }
+svg.map .group .caption tspan { font-size: 11px; }
+svg.map .group .caption .caption-count { fill: var(--muted); font-style: normal; }
+svg.map .group.cluster .badge { pointer-events: auto; cursor: pointer; }
+svg.map .group.cluster .badge-bg { fill: var(--panel-2); stroke: color-mix(in srgb, var(--fg) 16%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; }
+svg.map .group.cluster.picked .badge-bg { stroke: var(--accent); stroke-width: 2; }
+svg.map .group .badge-count { fill: var(--fg); font-size: 10px; font-weight: 600; pointer-events: none; }
+/* an assignment whose cluster is hovered */
+svg.map .group.node.related .card { stroke: var(--primary); stroke-width: 2; }
+svg.map .group.node.chosen .card { stroke: var(--fg); stroke-width: 2; }
 svg.map .btn rect { stroke-width: 1; }
 svg.map .btn text { font-size: 12px; font-weight: 500; pointer-events: none; }
-svg.map .btn.assess rect { fill: var(--primary); stroke: var(--primary); }
-svg.map .btn.assess text { fill: #fff; }
-svg.map .btn.reach rect { fill: var(--panel); stroke: var(--line-strong); }
-svg.map .btn.reach text { fill: var(--fg); }
-svg.map .btn:hover rect { filter: brightness(.95); }
+/* Assess reads only: quiet; Reach changes hosts: the action colour; Run
+   (one attribute by hand): quiet, outlined */
+svg.map .btn.assess rect { fill: var(--panel-2); stroke: var(--line); }
+svg.map .btn.assess text { fill: var(--muted); }
+svg.map .btn.reach rect { fill: var(--reach); stroke: var(--reach); }
+svg.map .btn.reach text { fill: #fff; font-weight: 600; }
+svg.map .btn.run rect { fill: none; stroke: var(--line); }
+svg.map .btn.run text { fill: var(--muted); }
+svg.map .btn:hover rect { filter: brightness(1.1); }
+svg.map .btn.assess:hover text, svg.map .btn.run:hover text { fill: var(--fg); }
 /* right panel: groups, selected host; scrolls on its own */
 .map-side { overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 1rem 1.25rem; max-height: calc(100vh - var(--mast-h) - 2rem); overflow-y: auto; position: sticky; top: calc(var(--mast-h) + 1rem); }
 .map-side { scrollbar-color: var(--line) transparent; scrollbar-width: thin; }
@@ -637,3 +660,8 @@ table.run-jobs td:last-child { text-align: right; }
 /* the runs in progress: at the toolbar's right end */
 .toolbar .run-chips { margin-left: auto; display: inline-flex; flex-wrap: wrap; gap: .4rem; justify-content: flex-end; }
 .toolbar.beside-panel { padding-right: calc(var(--right, 2.5rem) + .75rem); }
+
+/* D30: a host's state per assignment */
+.assignment-states { list-style: none; padding: 0; margin: .25rem 0 0; display: flex; flex-direction: column; gap: .15rem; font-size: 12px; }
+.assignment-states li { display: flex; align-items: center; gap: .3rem; flex-wrap: wrap; }
+.assignment-states .assignment-name { font-weight: 600; }
