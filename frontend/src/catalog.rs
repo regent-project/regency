@@ -38,10 +38,10 @@ type Message = RwSignal<Option<(bool, String)>>;
 
 /// The catalog's sources and which ones regency may edit (D11: not Git).
 #[derive(Clone, Copy)]
-struct Sources(RwSignal<Vec<Entry>>);
+pub(crate) struct Sources(pub(crate) RwSignal<Vec<Entry>>);
 
 impl Sources {
-    fn kind_of(&self, source_id: &str) -> String {
+    pub(crate) fn kind_of(&self, source_id: &str) -> String {
         self.0
             .get()
             .iter()
@@ -50,7 +50,7 @@ impl Sources {
             .unwrap_or_else(|| "?".into())
     }
 
-    fn editable(&self) -> Vec<String> {
+    pub(crate) fn editable(&self) -> Vec<String> {
         self.0
             .get()
             .into_iter()
@@ -59,8 +59,58 @@ impl Sources {
             .collect()
     }
 
-    fn first_editable(&self) -> String {
+    pub(crate) fn first_editable(&self) -> String {
         self.editable().first().cloned().unwrap_or_default()
+    }
+
+    /// Whether regency may edit the items of `source_id` (known, not Git).
+    pub(crate) fn is_editable(&self, source_id: &str) -> bool {
+        self.0.with(|list| {
+            list.iter().any(|s| {
+                str_of(&s.item, "source_id") == source_id && str_of(&s.item, "kind") != "git"
+            })
+        })
+    }
+}
+
+/// The catalog items assignments are edited with (here and on the map, D32).
+#[derive(Clone, Copy)]
+pub(crate) struct CatalogData {
+    pub(crate) assignments: RwSignal<Vec<Entry>>,
+    pub(crate) states: RwSignal<Vec<Entry>>,
+    pub(crate) hostdefs: RwSignal<Vec<Entry>>,
+    pub(crate) sources: Sources,
+    pub(crate) error: RwSignal<Option<String>>,
+}
+
+impl CatalogData {
+    pub(crate) fn new() -> Self {
+        Self {
+            assignments: RwSignal::new(Vec::new()),
+            states: RwSignal::new(Vec::new()),
+            hostdefs: RwSignal::new(Vec::new()),
+            sources: Sources(RwSignal::new(Vec::new())),
+            error: RwSignal::new(None),
+        }
+    }
+
+    pub(crate) fn load(&self, session: Session) {
+        load_catalog_with(session, "assignment", self.assignments, self.error);
+        load_catalog_with(session, "expected_state", self.states, self.error);
+        load_catalog_with(session, "hostdef", self.hostdefs, self.error);
+        load_catalog_with(session, "source", self.sources.0, self.error);
+    }
+
+    /// Load again once dbwriter applied a command.
+    pub(crate) fn reload_soon(&self, session: Session) {
+        let data = *self;
+        set_timeout(move || data.load(session), RELOAD_AFTER);
+    }
+
+    /// The assignment `{source}/{name}`, if in the catalog.
+    pub(crate) fn assignment(&self, reference: &str) -> Option<Entry> {
+        self.assignments
+            .with(|list| list.iter().find(|e| reference_of(e) == reference).cloned())
     }
 }
 
@@ -472,16 +522,24 @@ pub fn ExpectedStatesConfig() -> impl IntoView {
 // ------------------------------------------------------------ assignments
 
 #[derive(Clone, Default)]
-struct AssignmentForm {
+pub(crate) struct AssignmentForm {
     source_id: String,
     name: String,
     /// Label selector of its hosts (D29), as text.
-    selector: String,
+    pub(crate) selector: String,
     /// Order among a host's assignments, lower first (D29); as typed.
     priority: String,
     /// Base first, last wins (D27).
     expected_states: Vec<String>,
     existing: bool,
+    /// Set when the form opens (each opening differs).
+    stamp: u64,
+}
+
+fn next_stamp() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// `<source>/<name>`, both parts non-empty.
@@ -518,7 +576,18 @@ fn priority_of(item: &Value) -> i32 {
 }
 
 impl AssignmentForm {
-    fn from_item(item: &Value) -> Self {
+    /// A new assignment of `source_id` selecting `selector`.
+    pub(crate) fn new(source_id: String, selector: String) -> Self {
+        Self {
+            source_id,
+            selector,
+            priority: "0".into(),
+            stamp: next_stamp(),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn from_item(item: &Value) -> Self {
         Self {
             source_id: str_of(item, "source_id"),
             name: str_of(item, "name"),
@@ -526,6 +595,7 @@ impl AssignmentForm {
             priority: priority_of(item).to_string(),
             expected_states: crate::expected::stack_of(item),
             existing: true,
+            stamp: next_stamp(),
         }
     }
 
@@ -575,7 +645,7 @@ impl AssignmentForm {
 }
 
 /// `{source}/{name}` of a catalog entry.
-fn reference_of(entry: &Entry) -> String {
+pub(crate) fn reference_of(entry: &Entry) -> String {
     format!(
         "{}/{}",
         str_of(&entry.item, "source_id"),
@@ -812,31 +882,39 @@ fn selector_body(
     }
 }
 
+/// The form of an assignment (shown while `form` holds one): source, name,
+/// priority, hosts (label filters or Code, matching hosts) and the stack
+/// of expected states with its final state. `compact`: one column (the
+/// map's right panel, D32). `on_saved` runs once backend accepted it.
 #[component]
-pub fn AssignmentsConfig() -> impl IntoView {
+pub(crate) fn AssignmentEditor(
+    form: RwSignal<Option<AssignmentForm>>,
+    catalog: CatalogData,
+    message: Message,
+    #[prop(optional)] compact: bool,
+    #[prop(into)] on_saved: Callback<()>,
+) -> impl IntoView {
     let session = expect_context::<Session>();
-    let assignments = RwSignal::new(Vec::<Entry>::new());
-    let states = RwSignal::new(Vec::<Entry>::new());
-    let hostdefs = RwSignal::new(Vec::<Entry>::new());
-    let sources = Sources(RwSignal::new(Vec::new()));
-    let error = RwSignal::new(None::<String>);
-    let message = RwSignal::new(None::<(bool, String)>);
-    let reload = move || {
-        load_catalog_with(session, "assignment", assignments, error);
-        load_catalog_with(session, "expected_state", states, error);
-        load_catalog_with(session, "hostdef", hostdefs, error);
-        load_catalog_with(session, "source", sources.0, error);
-    };
-    reload();
-    let form = RwSignal::new(None::<AssignmentForm>);
-    // the assignment whose details are shown
-    let details = RwSignal::new(None::<String>);
-    let filter = RwSignal::new(String::new());
+    let CatalogData {
+        assignments,
+        states,
+        hostdefs,
+        sources,
+        ..
+    } = catalog;
     // selector editing: Grafana-like builder or the raw text (Code)
     let code = RwSignal::new(false);
-    // bumped when a form opens: the builder starts again from its selector
+    // bumped when another assignment opens: the builder starts again from its selector
     let opened = RwSignal::new(0u32);
-
+    // a form opened (another one, or the same again): the builder starts
+    // again from its selector
+    Effect::new(move |previous: Option<Option<u64>>| {
+        let stamp = form.with(|f| f.as_ref().map(|f| f.stamp));
+        if stamp.is_some() && previous.is_some_and(|p| p != stamp) {
+            opened.update(|n| *n += 1);
+        }
+        stamp
+    });
     let state_refs =
         Memo::new(move |_| states.with(|s| s.iter().map(reference_of).collect::<Vec<_>>()));
     let state_version = Memo::new(move |_| {
@@ -872,17 +950,139 @@ pub fn AssignmentsConfig() -> impl IntoView {
                 session,
                 message,
                 item,
-                move || {
-                    let _ = form.try_set(None);
-                },
-                reload,
+                move || on_saved.run(()),
+                move || catalog.load(session),
             ),
         }
     };
+    let selector_of =
+        move || form.with(|f| f.as_ref().map(|f| f.selector.clone()).unwrap_or_default());
+    let stack_of = move || {
+        form.with(|f| {
+            f.as_ref()
+                .map(|f| f.expected_states.clone())
+                .unwrap_or_default()
+        })
+    };
+    let common = move || {
+        view! {
+            <div class="form form-row">
+                <Show when=move || !form.get().is_some_and(|f| f.existing)
+                    fallback=move || view! { <p class="muted">{move || form.get().map(|f| format!("{}/{}", f.source_id, f.name)).unwrap_or_default()}</p> }>
+                    {source_select(sources,
+                        move || form.get().map(|f| f.source_id).unwrap_or_default(),
+                        move |v| form.update(|f| if let Some(f) = f { f.source_id = v }))}
+                    <label>"Name"
+                        <input placeholder="web" prop:value=move || form.get().map(|f| f.name).unwrap_or_default()
+                            on:input=move |ev| { let v = event_target_value(&ev); form.update(|f| if let Some(f) = f { f.name = v }); } />
+                    </label>
+                </Show>
+                <label title="A host gets every assignment selecting it, applied by priority (lower first), then by name">"Priority"
+                    <input type="number" step="1" prop:value=move || form.get().map(|f| f.priority).unwrap_or_default()
+                        on:input=move |ev| { let v = event_target_value(&ev); form.update(|f| if let Some(f) = f { f.priority = v }); } />
+                </label>
+            </div>
+        }
+    };
+    let matching = move || {
+        view! {
+            <crate::labelpicker::MatchingHosts
+                selector=Signal::derive(selector_of)
+                hosts=Signal::derive(move || hosts.get()) />
+        }
+    };
+    let final_state = move || {
+        view! {
+            <FinalState
+                stack=Signal::derive(stack_of)
+                selector=""
+                hosts=Signal::derive(move || hosts.get())
+                version=state_version />
+        }
+    };
+    let stack_head = || {
+        view! {
+            <div class="field-head"><span class="field-label">"Stack (base first, the last wins)"</span></div>
+        }
+    };
+    view! {
+        <Show when=move || form.with(Option::is_some)>
+            <div class="card assignment-editor" class:compact=compact>
+                <div class="editor-head">
+                    <h2>{move || if form.with(|f| f.as_ref().is_some_and(|f| f.existing)) { "Assignment" } else { "New assignment" }}</h2>
+                    <div class="toolbar">
+                        <button class="primary" on:click=move |_| save()>"Save"</button>
+                        <button on:click=move |_| form.set(None)>"Cancel"</button>
+                    </div>
+                </div>
+                {common}
+                {if compact {
+                    // one column: hosts, then expected states
+                    view! {
+                        <div class="assignment-stacked">
+                            <h3>"Hosts"</h3>
+                            {selector_head(form, code, opened, message)}
+                            {selector_body(form, hosts, code, opened)}
+                            {matching}
+                            <h3>"Expected states"</h3>
+                            {stack_head}
+                            {stack_editor(form, state_refs)}
+                            {final_state}
+                        </div>
+                    }.into_any()
+                } else {
+                    // a sheet: each row lines up across the two columns
+                    view! {
+                        <div class="assignment-grid">
+                            <h3 class="cell">"Hosts"</h3>
+                            <h3 class="cell right">"Expected states"</h3>
+                            <div class="cell">{selector_head(form, code, opened, message)}</div>
+                            <div class="cell right">{stack_head}</div>
+                            <div class="cell">{selector_body(form, hosts, code, opened)}</div>
+                            <div class="cell right">{stack_editor(form, state_refs)}</div>
+                            <div class="cell">{matching}</div>
+                            <div class="cell right">{final_state}</div>
+                        </div>
+                    }.into_any()
+                }}
+            </div>
+        </Show>
+    }
+}
+
+#[component]
+pub fn AssignmentsConfig() -> impl IntoView {
+    let session = expect_context::<Session>();
+    let catalog = CatalogData::new();
+    let CatalogData {
+        assignments,
+        states,
+        hostdefs,
+        sources,
+        error,
+    } = catalog;
+    let message = RwSignal::new(None::<(bool, String)>);
+    let reload = move || catalog.load(session);
+    reload();
+    let form = RwSignal::new(None::<AssignmentForm>);
+    // the assignment whose details are shown
+    let details = RwSignal::new(None::<String>);
+    let filter = RwSignal::new(String::new());
+
+    let state_refs =
+        Memo::new(move |_| states.with(|s| s.iter().map(reference_of).collect::<Vec<_>>()));
+    let state_version = Memo::new(move |_| {
+        states.with(|s| {
+            s.iter()
+                .map(|e| format!("{}@{}", e.doc_id, str_of(&e.item, "revision")))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+    });
+    let hosts = Memo::new(move |_| hostdefs.with(|h| catalog_hosts(h)));
     let open_form = move |f: AssignmentForm| {
         details.set(None);
         form.set(Some(f));
-        opened.update(|n| *n += 1);
     };
     let visible = move || {
         let needle = filter.get().to_lowercase();
@@ -919,62 +1119,14 @@ pub fn AssignmentsConfig() -> impl IntoView {
         <div class="toolbar">
             <input placeholder="Filter" prop:value=move || filter.get() on:input=move |ev| filter.set(event_target_value(&ev)) />
             <button class="primary" disabled=move || sources.editable().is_empty() || state_refs.with(Vec::is_empty)
-                on:click=move |_| open_form(AssignmentForm { source_id: sources.first_editable(), selector: "{}".into(), priority: "0".into(), ..Default::default() })>"New assignment"</button>
+                on:click=move |_| open_form(AssignmentForm::new(sources.first_editable(), "{}".into()))>"New assignment"</button>
             <button on:click=move |_| reload()>"Refresh"</button>
             {no_source_hint(session, sources, message, reload)}
             <Show when=move || state_refs.with(Vec::is_empty)>
                 <span class="muted">"Create " <a href="/states">"an expected state"</a> " first."</span>
             </Show>
         </div>
-        <Show when=move || form.get().is_some()>
-            <div class="card assignment-editor">
-                <div class="editor-head">
-                    <h2>"Assignment"</h2>
-                    <div class="toolbar">
-                        <button class="primary" on:click=move |_| save()>"Save"</button>
-                        <button on:click=move |_| form.set(None)>"Cancel"</button>
-                    </div>
-                </div>
-                // common parameters
-                <div class="form form-row">
-                    <Show when=move || !form.get().is_some_and(|f| f.existing)
-                        fallback=move || view! { <p class="muted">{move || form.get().map(|f| format!("{}/{}", f.source_id, f.name)).unwrap_or_default()}</p> }>
-                        {source_select(sources,
-                            move || form.get().map(|f| f.source_id).unwrap_or_default(),
-                            move |v| form.update(|f| if let Some(f) = f { f.source_id = v }))}
-                        <label>"Name"
-                            <input placeholder="web" prop:value=move || form.get().map(|f| f.name).unwrap_or_default()
-                                on:input=move |ev| { let v = event_target_value(&ev); form.update(|f| if let Some(f) = f { f.name = v }); } />
-                        </label>
-                    </Show>
-                    <label title="A host gets every assignment selecting it, applied by priority (lower first), then by name">"Priority"
-                        <input type="number" step="1" prop:value=move || form.get().map(|f| f.priority).unwrap_or_default()
-                            on:input=move |ev| { let v = event_target_value(&ev); form.update(|f| if let Some(f) = f { f.priority = v }); } />
-                    </label>
-                </div>
-                // a sheet: each row lines up across the two columns
-                <div class="assignment-grid">
-                    <h3 class="cell">"Hosts"</h3>
-                    <h3 class="cell right">"Expected states"</h3>
-                    <div class="cell">{selector_head(form, code, opened, message)}</div>
-                    <div class="cell right"><div class="field-head"><span class="field-label">"Stack (base first, the last wins)"</span></div></div>
-                    <div class="cell">{selector_body(form, hosts, code, opened)}</div>
-                    <div class="cell right">{stack_editor(form, state_refs)}</div>
-                    <div class="cell">
-                        <crate::labelpicker::MatchingHosts
-                            selector=Signal::derive(move || form.with(|f| f.as_ref().map(|f| f.selector.clone()).unwrap_or_default()))
-                            hosts=Signal::derive(move || hosts.get()) />
-                    </div>
-                    <div class="cell right">
-                        <FinalState
-                            stack=Signal::derive(move || form.with(|f| f.as_ref().map(|f| f.expected_states.clone()).unwrap_or_default()))
-                            selector=""
-                            hosts=Signal::derive(move || hosts.get())
-                            version=state_version />
-                    </div>
-                </div>
-            </div>
-        </Show>
+        <AssignmentEditor form catalog message on_saved=move |()| { let _ = form.try_set(None); } />
         {move || shown.get().map(|entry| {
             let reference = reference_of(&entry);
             let stack = crate::expected::stack_of(&entry.item);
@@ -1134,6 +1286,7 @@ mod tests {
             priority: "10".into(),
             expected_states: vec!["infra/base".into(), "infra/nginx".into()],
             existing: false,
+            stamp: 0,
         };
         let item = form.to_item().unwrap();
         assert_eq!(item["type"], "assignment");

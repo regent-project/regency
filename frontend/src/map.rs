@@ -29,6 +29,14 @@
 //! ([`Arrangement`]); Auto-arrange goes back to the automatic
 //! layout.
 //!
+//! D32 ([`crate::graphedit`]): assignments and labels are edited on the
+//! graph: an arrow drawn from a card's handle to hosts, or a selected
+//! ribbon's ×, opens [`ArrowDialog`] (relabel the hosts or change the
+//! selector, with a preview); + Assignment, Edit and Delete open the
+//! assignment form in the right panel (the hosts its selector selects
+//! ringed) or [`DeleteAssignmentDialog`]; a click inside a cluster opens
+//! [`ClusterPanel`] (its shared labels).
+//!
 //! Shown as "Live view". The legend is a layer on top of the map; one panel,
 //! on the right: groups and the selected host (the fleet counts and the
 //! jobs-in-progress chart are in the masthead, `crate::feeds`; jobs in
@@ -36,7 +44,7 @@
 //! selects it (`/?host=<id>`): its summary and expected state explorer show
 //! in the right panel, "Details" opens the host page.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -47,11 +55,14 @@ use leptos_router::NavigateOptions;
 use leptos_router::hooks::{use_navigate, use_query_map};
 
 use crate::canvas::{self, Frame, Palette, View};
+use crate::catalog::{AssignmentEditor, AssignmentForm, CatalogData};
 use crate::client::{api, authed, client, command_id, format_ms};
+use crate::config::message_view;
 use crate::expected::{
-    AssignmentEntry, GroupTarget, HostStateExplorer, describe_selector, job_label, load_assignments,
+    AssignmentEntry, GroupTarget, HostStateExplorer, describe_selector, job_label,
 };
 use crate::feeds::Feeds;
+use crate::graphedit::{ArrowDialog, ClusterPanel, DeleteAssignmentDialog, GraphEdit};
 use crate::live::{HostLive, HostTip, running_jobs};
 use crate::oneshot::OneShotDialog;
 use crate::pages::{assignments_line, badge, host_state};
@@ -221,6 +232,43 @@ fn rings(jobs: &BTreeMap<String, api::JobSummary>) -> Rings {
         .collect()
 }
 
+/// The assignment a run's job checks, from its key
+/// `run:{command}:{host}:{assignment}` (D30). `None` for one-shot runs
+/// (`run:{command}:{host}`) and recurring jobs.
+fn job_assignment(job: &api::JobSummary) -> Option<&str> {
+    job.job_id
+        .strip_prefix("run:")?
+        .strip_prefix(job.origin.as_str())?
+        .strip_prefix(':')?
+        .strip_prefix(job.host_id.as_str())?
+        .strip_prefix(':')
+        .filter(|a| !a.is_empty())
+}
+
+/// (host, assignment) pairs whose newest run job is in progress: the links
+/// between them are drawn in the job colour until it ends.
+pub type Working = HashSet<(String, String)>;
+
+fn working(jobs: &BTreeMap<String, api::JobSummary>) -> Working {
+    let mut newest: HashMap<(&str, &str), &api::JobSummary> = HashMap::new();
+    for job in jobs.values() {
+        let Some(assignment) = job_assignment(job) else {
+            continue;
+        };
+        let entry = newest
+            .entry((job.host_id.as_str(), assignment))
+            .or_insert(job);
+        if job.created_at > entry.created_at {
+            *entry = job;
+        }
+    }
+    newest
+        .into_iter()
+        .filter(|(_, job)| Ring::of(&job.state).is_some())
+        .map(|((host, assignment), _)| (host.to_string(), assignment.to_string()))
+        .collect()
+}
+
 /// A host on the map: what the canvas draws, no copy of its summary. Job
 /// rings are not part of the layout ([`Rings`]): job events, the most
 /// frequent ones, do not move anything.
@@ -323,6 +371,13 @@ impl Layout {
         Some((start, canvas::link_end(start.0, start.1, n.x, n.y)))
     }
 
+    /// D32: the middle of the ribbon (cluster, node names), if drawn.
+    fn bundle_mid(&self, names: &(String, String)) -> Option<(f64, f64)> {
+        let bundle = self.bundles.get(self.bundle_index(names)?)?;
+        let ((x0, y0), (x1, y1)) = self.bundle_ends(bundle)?;
+        Some(((x0 + x1) / 2.0, (y0 + y1) / 2.0))
+    }
+
     /// D31: the cluster under (`x`, `y`): inside its outline (or badge),
     /// a few units around it, or on its caption above it (one line per
     /// assignment and the counts); the smallest one when they overlap.
@@ -407,6 +462,35 @@ impl Layout {
     /// A cluster folded (its hosts not drawn).
     pub fn folded(&self, index: usize) -> bool {
         self.groups.get(index).is_some_and(|g| g.collapsed)
+    }
+
+    /// The ribbons (indices in `bundles`) and the per-host links (index in
+    /// `hosts`, node) with a job in progress, from [`working`].
+    pub fn working(&self, working: &Working) -> (Vec<usize>, HashSet<(usize, usize)>) {
+        let mut ribbons = Vec::new();
+        let mut links = HashSet::new();
+        for (host, assignment) in working {
+            let Some(node) = self.group_index(&node_key(assignment)) else {
+                continue;
+            };
+            for (group, index) in self.of_host.get(host).into_iter().flatten() {
+                if !matches!(self.groups[*group].kind, Kind::Cluster { .. }) {
+                    continue;
+                }
+                if let Some(b) = self
+                    .bundles
+                    .iter()
+                    .position(|b| b.cluster == *group && b.node == node)
+                    && !ribbons.contains(&b)
+                {
+                    ribbons.push(b);
+                }
+                if let Some(index) = index {
+                    links.insert((*index, node));
+                }
+            }
+        }
+        (ribbons, links)
     }
 
     /// Index of the node of assignment `name` (its group key).
@@ -1340,6 +1424,51 @@ const TIP_DELAY_MS: u64 = 150;
 const TIP_WIDTH: f64 = 380.0;
 const TIP_HEIGHT: f64 = 260.0;
 
+/// D32: what the right panel edits.
+#[derive(Clone, PartialEq)]
+enum Editing {
+    /// The assignment of the form (a new one or from the catalog).
+    Assignment,
+    /// A cluster's labels (its signature).
+    Cluster(Vec<String>),
+}
+
+/// D32: where an arrow drawn from an assignment's handle would land.
+#[derive(Clone, PartialEq, Debug)]
+enum DropTarget {
+    Cluster(String, Vec<String>),
+    Host(String),
+}
+
+/// D32: an arrow being drawn from an assignment's handle.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct Connecting {
+    /// The assignment (`source/name`) and its node's name.
+    reference: String,
+    node: String,
+    /// The pointer (map units).
+    x: f64,
+    y: f64,
+    target: Option<DropTarget>,
+}
+
+/// The hosts selected by exactly the assignments of `signature`.
+fn signature_hosts(
+    hosts: &BTreeMap<String, api::HostSummary>,
+    signature: &[String],
+) -> Vec<String> {
+    hosts
+        .values()
+        .filter(|h| {
+            let mut s = h.assignments.clone();
+            s.sort();
+            s.dedup();
+            s == signature
+        })
+        .map(|h| h.host_id.clone())
+        .collect()
+}
+
 #[component]
 pub fn Map() -> impl IntoView {
     let session = expect_context::<Session>();
@@ -1351,9 +1480,95 @@ pub fn Map() -> impl IntoView {
         flashes,
         ..
     } = expect_context::<Feeds>();
-    let error = RwSignal::new(None::<String>);
-    let assignments = RwSignal::new(Vec::<AssignmentEntry>::new());
-    load_assignments(assignments, error);
+    // D32: the catalog, to edit assignments and hosts' labels on the graph
+    let catalog = CatalogData::new();
+    catalog.load(session);
+    let error = catalog.error;
+    let assignments = Memo::new(move |_| {
+        catalog.assignments.with(|list| {
+            let mut entries: Vec<AssignmentEntry> = list
+                .iter()
+                .filter_map(|e| {
+                    AssignmentEntry::from_catalog(&api::CatalogEntry {
+                        doc_id: e.doc_id.clone(),
+                        item_json: e.item.to_string(),
+                    })
+                })
+                .collect();
+            entries.sort_by(|a, b| a.reference.cmp(&b.reference));
+            entries
+        })
+    });
+    // D32: the assignments regency may edit (not from Git)
+    let editable = Memo::new(move |_| {
+        catalog.assignments.with(|list| {
+            list.iter()
+                .filter(|e| {
+                    catalog
+                        .sources
+                        .is_editable(&crate::config::str_of(&e.item, "source_id"))
+                })
+                .map(crate::catalog::reference_of)
+                .collect::<BTreeSet<String>>()
+        })
+    });
+    // D32: an arrow being drawn, the dialogs, and what the right panel edits
+    let connecting = RwSignal::new(None::<Connecting>);
+    let arrow = RwSignal::new(None::<(String, Vec<String>, bool)>);
+    let deleting = RwSignal::new(None::<(String, usize)>);
+    let editing = RwSignal::new(None::<Editing>);
+    let form = RwSignal::new(None::<AssignmentForm>);
+    let catalog_message = RwSignal::new(None::<(bool, String)>);
+    // the form closed (saved or cancelled): so is its panel
+    Effect::new(move |_| {
+        if form.with(Option::is_none) && editing.with_untracked(|e| *e == Some(Editing::Assignment))
+        {
+            editing.set(None);
+        }
+    });
+    // D32: the hosts the assignment being edited would select, ringed on
+    // the graph
+    let host_sources = Memo::new(move |_| {
+        catalog.hostdefs.with(|defs| {
+            let mut map = BTreeMap::<String, Vec<String>>::new();
+            for e in defs {
+                map.entry(crate::config::str_of(&e.item, "host_id"))
+                    .or_default()
+                    .push(crate::config::str_of(&e.item, "source_id"));
+            }
+            map
+        })
+    });
+    let previewed = Memo::new(move |_| {
+        if editing.with(|e| *e != Some(Editing::Assignment)) {
+            return BTreeSet::new();
+        }
+        let Some(Ok(selector)) = form.with(|f| {
+            f.as_ref()
+                .map(|f| crate::labels::LabelSelector::parse(&f.selector))
+        }) else {
+            return BTreeSet::new();
+        };
+        host_sources.with(|sources| {
+            hosts.with(|hosts| {
+                hosts
+                    .values()
+                    .filter(|h| {
+                        let mut from: Vec<&str> = sources
+                            .get(&h.host_id)
+                            .map(|v| v.iter().map(String::as_str).collect())
+                            .unwrap_or_default();
+                        if !h.agent.is_empty() {
+                            from.push(&h.agent);
+                        }
+                        let own: BTreeMap<String, String> = h.labels.clone().into_iter().collect();
+                        selector.matches(&crate::labels::HostLabels::new(&h.host_id, from, &own))
+                    })
+                    .map(|h| h.host_id.clone())
+                    .collect()
+            })
+        })
+    });
     // reference -> host selector, for the assignment groups' Assess / Reach
     let selectors = Memo::new(move |_| {
         assignments.with(|list| {
@@ -1367,6 +1582,8 @@ pub fn Map() -> impl IntoView {
     // assignments"), hosts without one in "(unassigned)"
     let collapsed = RwSignal::new(BTreeSet::<String>::new());
     let rings = Memo::new(move |_| jobs.with(rings));
+    // (host, assignment) with a run job in progress: their links in the job colour
+    let working = Memo::new(move |_| jobs.with(working));
     // where the user moved groups and hosts
     let arrangement = RwSignal::new(Arrangement::saved());
     let map = Memo::new(move |_| {
@@ -1395,7 +1612,49 @@ pub fn Map() -> impl IntoView {
     // a card or host pressed: it becomes a drag once the pointer moves
     let pressed = StoredValue::new(None::<Grab>);
     let escape = window_event_listener(leptos::ev::keydown, move |ev| {
+        // D32: Delete removes the selected arrow (one opened ribbon), else
+        // the selected assignment (not while typing, nor under a dialog)
+        let typing = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .is_some_and(|e| {
+                e.closest("input, textarea, select, .overlay")
+                    .ok()
+                    .flatten()
+                    .is_some()
+            });
+        if matches!(ev.key().as_str(), "Delete" | "Backspace") && !typing {
+            let ribbon = opened
+                .with_untracked(|o| (o.len() == 1).then(|| o.iter().next().cloned()).flatten());
+            if let Some((cluster, node)) = ribbon {
+                let reference = node.strip_prefix("a:").unwrap_or(&node).to_string();
+                let signature =
+                    map.with_untracked(|m| match m.group_named(&cluster).map(|(_, g)| &g.kind) {
+                        Some(Kind::Cluster { signature }) => Some(signature.clone()),
+                        _ => None,
+                    });
+                if let Some(signature) = signature
+                    && editable.with_untracked(|e| e.contains(&reference))
+                {
+                    let targets = hosts.with_untracked(|h| signature_hosts(h, &signature));
+                    arrow.set(Some((reference, targets, false)));
+                }
+                return;
+            }
+            let node = chosen
+                .with_untracked(|c| (c.len() == 1).then(|| c.iter().next().cloned()).flatten());
+            if let Some(node) = node {
+                let reference = node.strip_prefix("a:").unwrap_or(&node).to_string();
+                if editable.with_untracked(|e| e.contains(&reference)) {
+                    let count =
+                        map.with_untracked(|m| m.group_named(&node).map_or(0, |(_, g)| g.total));
+                    deleting.set(Some((reference, count)));
+                }
+            }
+            return;
+        }
         if ev.key() == "Escape" {
+            connecting.set(None);
             if picks.with_untracked(|p| !p.is_empty()) {
                 picks.set(Picks::new());
             }
@@ -1659,10 +1918,12 @@ pub fn Map() -> impl IntoView {
             links_mode.track();
             selected.track();
             rings.track();
+            working.track();
             flashes.track();
             theme.track();
             grab.track();
             picks.track();
+            previewed.track();
             dirty.store(true, Ordering::Relaxed);
         }
     });
@@ -1798,8 +2059,25 @@ pub fn Map() -> impl IntoView {
                         let open: Vec<usize> = opened.with_untracked(|o| {
                             o.iter().filter_map(|b| layout.bundle_index(b)).collect()
                         });
+                        let preview: Vec<usize> = previewed.with_untracked(|ids| {
+                            if ids.is_empty() {
+                                return Vec::new();
+                            }
+                            layout
+                                .hosts
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, p)| ids.contains(&p.host_id))
+                                .map(|(i, _)| i)
+                                .collect()
+                        });
+                        let (busy_ribbons, busy_links) =
+                            working.with_untracked(|w| layout.working(w));
                         let frame = Frame {
                             layout,
+                            preview: &preview,
+                            busy_ribbons: &busy_ribbons,
+                            busy_links: &busy_links,
                             rings,
                             flashes,
                             view,
@@ -1832,6 +2110,37 @@ pub fn Map() -> impl IntoView {
     // runs its own effective expected state (D23), nothing to choose
     let pending = RwSignal::new(None::<PendingRun>);
     let message = RwSignal::new(None::<String>);
+    let edit = GraphEdit {
+        catalog,
+        hosts,
+        message,
+    };
+    // D32: open an assignment in the right panel
+    let edit_assignment = Callback::new(move |reference: String| {
+        if moved.get_untracked() {
+            return;
+        }
+        if let Some(entry) = catalog.assignment(&reference) {
+            selected.set(None);
+            catalog_message.set(None);
+            form.set(Some(AssignmentForm::from_item(&entry.item)));
+            editing.set(Some(Editing::Assignment));
+        }
+    });
+    let remove_assignment = Callback::new(move |(reference, count): (String, usize)| {
+        if !moved.get_untracked() {
+            deleting.set(Some((reference, count)));
+        }
+    });
+    let new_assignment = move |selector: String| {
+        selected.set(None);
+        catalog_message.set(None);
+        form.set(Some(AssignmentForm::new(
+            catalog.sources.first_editable(),
+            selector,
+        )));
+        editing.set(Some(Editing::Assignment));
+    };
     // one-shot attribute dialog (D23), opened from an assignment's dialog
     let one_shot = RwSignal::new(None::<(GroupTarget, usize)>);
     let ask = move |target: GroupTarget, job: api::JobKind, count: usize| {
@@ -1920,7 +2229,9 @@ pub fn Map() -> impl IntoView {
     };
     // the right panel shows the selected host, else the run
     let showing_host = Memo::new(move |_| selected.with(Option::is_some));
-    let panel_open = Memo::new(move |_| showing_host.get() || active_run.with(Option::is_some));
+    let panel_open = Memo::new(move |_| {
+        showing_host.get() || editing.with(Option::is_some) || active_run.with(Option::is_some)
+    });
 
     // the host panel is open whenever a host is selected
     let right_open = RwSignal::new(true);
@@ -2017,6 +2328,9 @@ pub fn Map() -> impl IntoView {
         }
         if grab.with(Option::is_some) {
             class.push_str(" grabbing");
+        }
+        if connecting.with(Option::is_some) {
+            class.push_str(" connecting");
         }
         class
     };
@@ -2126,6 +2440,11 @@ pub fn Map() -> impl IntoView {
                         }>
                         "Auto-arrange"
                     </button>
+                    <button title="Create an assignment (or click a cluster: New assignment from these hosts; drag from a card's handle to a cluster to make it select those hosts)"
+                        disabled=move || catalog.sources.0.with(|_| catalog.sources.editable().is_empty())
+                        on:click=move |_| new_assignment("{}".to_string())>
+                        "+ Assignment"
+                    </button>
                     <span class="muted">{move || if ready.get() { format!("{} hosts, live", hosts.with(|h| h.len())) } else { "loading…".into() }}</span>
                     <span class="muted">{move || message.get()}</span>
                     // runs not over: their panel, whatever happened since
@@ -2198,6 +2517,31 @@ pub fn Map() -> impl IntoView {
                         }
                         let Some((w, h, _, _)) = metrics(ev.current_target()) else { return };
                         let ctrl = ev.ctrl_key() || ev.meta_key();
+                        // D32: an assignment's handle: draw an arrow from it
+                        let handle = ev
+                            .target()
+                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                            .filter(|e| e.closest(".handle").ok().flatten().is_some())
+                            .and_then(|e| e.closest("g.group.node").ok().flatten())
+                            .and_then(|e| e.get_attribute("data-group"));
+                        if let Some(node) = handle
+                            && let Some((mx, my)) = map_point(&ev)
+                        {
+                            ev.prevent_default();
+                            // not a click on the card
+                            moved.set(true);
+                            if let Some(el) = ev.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
+                                let _ = el.set_pointer_capture(ev.pointer_id());
+                            }
+                            connecting.set(Some(Connecting {
+                                reference: node.strip_prefix("a:").unwrap_or(&node).to_string(),
+                                node,
+                                x: mx,
+                                y: my,
+                                target: None,
+                            }));
+                            return;
+                        }
                         // a card's buttons only click
                         let on_button = ev
                             .target()
@@ -2248,9 +2592,35 @@ pub fn Map() -> impl IntoView {
                     }
                     // the middle button pans, without the browser's autoscroll
                     on:mousedown=move |ev: web_sys::MouseEvent| if ev.button() == 1 { ev.prevent_default(); }
-                    on:pointerup=move |_| { pressed.set_value(None); drag.set(None); drop_grab(); }
-                    on:pointercancel=move |_| { pressed.set_value(None); drag.set(None); grab.set(None); marquee.set(None); }
-                    on:pointerleave=move |_| { pressed.set_value(None); drag.set(None); drop_grab(); hovered.set(None); hovered_bundle.set(None); hovered_cluster.set(None); }
+                    on:pointerup=move |_| {
+                        // D32: an arrow dropped on hosts it does not select yet
+                        if let Some(c) = connecting.get_untracked() {
+                            connecting.set(None);
+                            let targets = match &c.target {
+                                Some(DropTarget::Cluster(_, signature)) if signature.contains(&c.reference) => {
+                                    message.set(Some(format!("{} already selects these hosts", c.reference)));
+                                    None
+                                }
+                                Some(DropTarget::Cluster(_, signature)) => Some(hosts.with_untracked(|h| signature_hosts(h, signature))),
+                                Some(DropTarget::Host(id)) => {
+                                    if hosts.with_untracked(|h| h.get(id).is_some_and(|h| h.assignments.contains(&c.reference))) {
+                                        message.set(Some(format!("{} already selects {id}", c.reference)));
+                                        None
+                                    } else {
+                                        Some(vec![id.clone()])
+                                    }
+                                }
+                                None => None,
+                            };
+                            if let Some(targets) = targets.filter(|t| !t.is_empty()) {
+                                arrow.set(Some((c.reference, targets, true)));
+                            }
+                            return;
+                        }
+                        pressed.set_value(None); drag.set(None); drop_grab();
+                    }
+                    on:pointercancel=move |_| { connecting.set(None); pressed.set_value(None); drag.set(None); grab.set(None); marquee.set(None); }
+                    on:pointerleave=move |_| { connecting.set(None); pressed.set_value(None); drag.set(None); drop_grab(); hovered.set(None); hovered_bundle.set(None); hovered_cluster.set(None); }
                     on:click=move |ev| {
                         if moved.get_untracked() {
                             return;
@@ -2290,6 +2660,23 @@ pub fn Map() -> impl IntoView {
                             opened.update(|o| if !o.remove(&names) { o.insert(names); });
                             return;
                         }
+                        // D32: a cluster's surface: its labels in the right panel
+                        if host.is_none() {
+                            let signature = map_point(&ev).and_then(|(mx, my)| map.with_untracked(|m| {
+                                match &m.groups[m.cluster_on(mx, my)?].kind {
+                                    Kind::Cluster { signature } => Some(signature.clone()),
+                                    Kind::Node => None,
+                                }
+                            }));
+                            if let Some(signature) = signature {
+                                selected.set(None);
+                                editing.set(Some(Editing::Cluster(signature)));
+                                return;
+                            }
+                            if editing.with_untracked(|e| matches!(e, Some(Editing::Cluster(_)))) {
+                                editing.set(None);
+                            }
+                        }
                         // a host: show it in the right panel; empty space: deselect
                         if host.is_none() && chosen.with_untracked(|c| !c.is_empty()) {
                             chosen.set(BTreeSet::new());
@@ -2300,6 +2687,22 @@ pub fn Map() -> impl IntoView {
                         }
                     }
                     on:pointermove=move |ev| {
+                        // D32: an arrow being drawn follows the pointer; a
+                        // host, else a cluster, under it is its target
+                        if connecting.with_untracked(Option::is_some) {
+                            let Some((mx, my)) = map_point(&ev) else { return };
+                            let target = host_under(&ev).map(DropTarget::Host).or_else(|| {
+                                map.with_untracked(|m| {
+                                    let g = &m.groups[m.cluster_at(mx, my)?];
+                                    let Kind::Cluster { signature } = &g.kind else { return None };
+                                    Some(DropTarget::Cluster(g.name.clone(), signature.clone()))
+                                })
+                            });
+                            connecting.update(|c| if let Some(c) = c {
+                                (c.x, c.y, c.target) = (mx, my, target);
+                            });
+                            return;
+                        }
                         // a pressed card or host: dragged once the pointer
                         // has moved a little (it and the other picks)
                         if let Some(what) = pressed.get_value() {
@@ -2375,6 +2778,11 @@ pub fn Map() -> impl IntoView {
                         center.set(Some((cx - (nx - x) * k, cy - (ny - y) * k)));
                         drag.set(Some((nx, ny)));
                     }>
+                    <defs>
+                        <marker id="connect-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+                            <path d="M0 0 L10 5 L0 10 Z" />
+                        </marker>
+                    </defs>
                     // hosts and links: on the canvas, under the cards
                     // group cards, on top
                     <For each=move || map.with(|m| {
@@ -2384,8 +2792,48 @@ pub fn Map() -> impl IntoView {
                         // the target too: the buttons appear once the assignments are loaded
                         key=|(g, running)| (g.name.clone(), g.total, g.ok, g.bad, *running, g.collapsed, g.target.is_some())
                         let:entry>
-                        {card(entry.0, entry.1, CardSignals { cards, picks, moved, hovered_node, hovered_cluster, chosen }, toggle_group, CardActions { ask, run_attribute })}
+                        {card(entry.0, entry.1, CardSignals { cards, picks, moved, hovered_node, hovered_cluster, chosen, editable, connecting, edit: edit_assignment, remove: remove_assignment }, toggle_group, CardActions { ask, run_attribute })}
                     </For>
+                    // D32: the arrow being drawn, from the card's handle
+                    {move || connecting.get().map(|c| {
+                        let (sx, sy) = cards.with(|k| k.get(&c.node).copied())
+                            .map_or((c.x, c.y), |(x, y)| (x, y + CARD_H / 2.0));
+                        let bend = ((c.y - sy).abs() / 2.0).max(40.0);
+                        let d = format!("M{sx} {sy} C{sx} {} {} {} {} {}", sy + bend, c.x, c.y - bend, c.x, c.y);
+                        view! { <path class="connecting" class:on-target=c.target.is_some() d=d marker-end="url(#connect-head)" /> }
+                    })}
+                    // D32: a selected arrow (ribbon opened by a click) of an
+                    // editable assignment: a button removing it
+                    {move || {
+                        let open = opened.get();
+                        cards.track();
+                        open.into_iter().filter_map(|names| {
+                            let reference = names.1.strip_prefix("a:")?.to_string();
+                            if !editable.with(|e| e.contains(&reference)) {
+                                return None;
+                            }
+                            let ((x, y), signature) = map.with(|m| {
+                                let mid = m.bundle_mid(&names)?;
+                                match &m.group_named(&names.0)?.1.kind {
+                                    Kind::Cluster { signature } => Some((mid, signature.clone())),
+                                    Kind::Node => None,
+                                }
+                            })?;
+                            let title = format!("Remove this arrow: {reference} stops selecting these hosts (Delete)");
+                            Some(view! {
+                                <g class="btn edge-btn" transform=format!("translate({x} {y})")
+                                    on:click=move |ev| {
+                                        ev.stop_propagation();
+                                        let targets = hosts.with_untracked(|h| signature_hosts(h, &signature));
+                                        arrow.set(Some((reference.clone(), targets, false)));
+                                    }>
+                                    <circle r="10" />
+                                    <path d="M-4 -4 L4 4 M4 -4 L-4 4" />
+                                    <title>{title}</title>
+                                </g>
+                            })
+                        }).collect_view()
+                    }}
                     // selection rectangle
                     {move || marquee.get().map(|(x0, y0, x1, y1)| view! {
                         <rect class="marquee" x=x0.min(x1) y=y0.min(y1)
@@ -2410,6 +2858,7 @@ pub fn Map() -> impl IntoView {
                                 <li><svg width="16" height="16"><circle cx="8" cy="8" r="6.5" fill="none" stroke="var(--muted)" stroke-width="1" /></svg> " graph: hosts selected by exactly the same assignments, drawn together; point at it for its assignments and counts (folded: a pie of their states)"</li>
                                 <li><svg width="16" height="16"><path d="M1 8 H9" stroke="var(--muted)" stroke-width="5" opacity=".5" /><path d="M9 3 L15 8 L9 13 Z" fill="var(--muted)" opacity=".5" /></svg> " graph: one ribbon per cluster and assignment, as wide as its hosts, pointing from the assignment to the hosts it constrains (faint chevrons flow along it); assignments sharing many hosts lie close together; hover or click the assignment for its hosts' states, the ribbon for its hosts' links"</li>
                                 <li><svg width="16" height="16"><path d="M15 4 L5 10" stroke="var(--bad)" stroke-width="2" /><path d="M1 12.5 L6.5 12.6 L4.4 7.6 Z" fill="var(--bad)" /></svg> " a link assignment → host (hover a host or a ribbon, or Links: per host): the host's state for that assignment only; a host is its worst link"</li>
+                                <li><svg width="16" height="16"><circle cx="8" cy="8" r="5" fill="var(--panel)" stroke="var(--accent)" stroke-width="2" /></svg> " handle under an assignment's card: drag it to hosts to make the assignment select them; click a ribbon, then its × (or Delete) to stop; click inside a cluster to edit its labels"</li>
                             </ul>
                         </details>
                 </div>
@@ -2424,9 +2873,14 @@ pub fn Map() -> impl IntoView {
                 move || if showing_host.get() {
                     let navigate = navigate.clone();
                     view! {
-                    {move || active_run.with(Option::is_some).then(|| view! {
-                        <button class="small back" on:click=move |_| selected.set(None)>"← Back to the run"</button>
-                    })}
+                    {move || {
+                        let back = if editing.with(Option::is_some) {
+                            Some("← Back to the edit")
+                        } else {
+                            active_run.with(Option::is_some).then_some("← Back to the run")
+                        };
+                        back.map(|text| view! { <button class="small back" on:click=move |_| selected.set(None)>{text}</button> })
+                    }}
                     <div class="host-head">
                         <h2>{move || selected.get().unwrap_or_default()}</h2>
                         <button class="primary" on:click={
@@ -2448,6 +2902,22 @@ pub fn Map() -> impl IntoView {
                     <h2>"Last known state"</h2>
                     <HostStateExplorer with_last_run=true host=Signal::derive(move || selected_host.with(|h| h.as_ref().map(|(host, _)| host.clone()))) />
                     }.into_any()
+                } else if let Some(what) = editing.get() {
+                    match what {
+                        Editing::Assignment => view! {
+                            {message_view(catalog_message)}
+                            <AssignmentEditor form catalog message=catalog_message compact=true
+                                on_saved=move |()| {
+                                    message.set(Some("assignment saved: the map updates in a moment".into()));
+                                    let _ = form.try_set(None);
+                                } />
+                        }.into_any(),
+                        Editing::Cluster(signature) => view! {
+                            <ClusterPanel edit signature
+                                on_new=move |selector: String| new_assignment(selector)
+                                on_close=move |()| editing.set(None) />
+                        }.into_any(),
+                    }
                 } else {
                     active_run.get().map(|run| view! {
                         <RunPanel run=run
@@ -2483,6 +2953,12 @@ pub fn Map() -> impl IntoView {
         </Show>
         {move || one_shot.get().map(|(target, hosts)| view! {
             <OneShotDialog target hosts on_close=Callback::new(move |_| one_shot.set(None)) />
+        })}
+        {move || arrow.get().map(|(assignment, targets, adding)| view! {
+            <ArrowDialog edit assignment targets adding on_close=move |()| arrow.set(None) />
+        })}
+        {move || deleting.get().map(|(assignment, hosts)| view! {
+            <DeleteAssignmentDialog edit assignment hosts on_close=move |()| deleting.set(None) />
         })}
     }
 }
@@ -2532,6 +3008,12 @@ struct CardSignals {
     /// D31: assignment nodes selected by a click (their ribbons' statistics
     /// shown).
     chosen: RwSignal<BTreeSet<String>>,
+    /// D32: the assignments regency may edit (references), the arrow being
+    /// drawn, and what the card's Edit / Delete do.
+    editable: Memo<BTreeSet<String>>,
+    connecting: RwSignal<Option<Connecting>>,
+    edit: Callback<String>,
+    remove: Callback<(String, usize)>,
 }
 
 /// What an assignment's buttons do: `ask` confirms an Assess / Reach,
@@ -2609,6 +3091,21 @@ fn cluster_chip(
     let picked_as = Grab::Group(group.name.clone());
     let picks = signals.picks;
     let hovered_cluster = signals.hovered_cluster;
+    // D32: an arrow being drawn over it (already selecting it, or not)
+    let connecting = signals.connecting;
+    let target_as = group.name.clone();
+    let on_target = Signal::derive(move || {
+        connecting.with(|c| {
+            c.as_ref().and_then(|c| match &c.target {
+                Some(DropTarget::Cluster(name, signature)) if *name == target_as => {
+                    Some(signature.contains(&c.reference))
+                }
+                _ => None,
+            })
+        })
+    });
+    let drop_target = move || on_target.get() == Some(false);
+    let drop_already = move || on_target.get() == Some(true);
     let count = format!(
         "{} host{}",
         group.total,
@@ -2667,7 +3164,7 @@ fn cluster_chip(
     };
     view! {
         <g class="group cluster" class:picked=move || picks.with(|p| p.contains(&picked_as))
-            class:folded=group.collapsed
+            class:folded=group.collapsed class:drop-target=drop_target class:drop-already=drop_already
             data-group=group.name.clone() transform=card_transform(signals.cards, &group)>
             {body}
             {caption}
@@ -2693,6 +3190,9 @@ fn group_card(
         hovered_node,
         hovered_cluster,
         chosen,
+        editable,
+        edit,
+        remove,
         ..
     } = signals;
     let CardActions { ask, run_attribute } = actions;
@@ -2749,6 +3249,44 @@ fn group_card(
             </g>
         }
     });
+    // D32: above the card (hovered or selected), Edit / Delete; at its
+    // bottom, the handle arrows are drawn from (React Flow like)
+    let tools = {
+        let reference = group.label.clone();
+        let count = group.total;
+        let (tw, th, ty) = (64.0, 22.0, top - 28.0);
+        move || {
+            let (r1, r2) = (reference.clone(), reference.clone());
+            if editable.with(|e| e.contains(&reference)) {
+                view! {
+                    <g class="node-tools">
+                        <rect class="tools-bridge" x=left y=ty width=w height=28.0 />
+                        <g class="btn tool" on:click=move |ev| { ev.stop_propagation(); edit.run(r1.clone()); }>
+                            <rect x=-tw - 3.0 y=ty width=tw height=th rx="6" />
+                            <text x=-tw / 2.0 - 3.0 y=ty + 15.0 text-anchor="middle">"Edit"</text>
+                            <title>"Edit this assignment: hosts (label selector), priority, expected states"</title>
+                        </g>
+                        <g class="btn tool danger" on:click=move |ev| { ev.stop_propagation(); remove.run((r2.clone(), count)); }>
+                            <rect x="3" y=ty width=tw height=th rx="6" />
+                            <text x=tw / 2.0 + 3.0 y=ty + 15.0 text-anchor="middle">"Delete"</text>
+                            <title>"Delete this assignment (Delete key)"</title>
+                        </g>
+                    </g>
+                    <circle class="handle" cx="0" cy=top + h r="6">
+                        <title>"Drag to a cluster or a host: this assignment selects them too"</title>
+                    </circle>
+                }
+                .into_any()
+            } else {
+                view! {
+                    <g class="node-tools">
+                        <text class="tools-note" x="0" y=ty + 15.0 text-anchor="middle">"Read only: defined in Git"</text>
+                    </g>
+                }
+                .into_any()
+            }
+        }
+    };
     let bad_class = if group.bad > 0 {
         "count-bad"
     } else {
@@ -2772,7 +3310,8 @@ fn group_card(
             <text class="count-ok" x=left + 12.0 y=top + 60.0>{format!("{} compliant", group.ok)}</text>
             <text class=bad_class x=left + 12.0 y=top + 75.0>{format!("{} not compliant", group.bad)}</text>
             {buttons}
-            <title>{format!("Assignment {} — its hosts' states for it; hover or click it for the statistics of its ribbons; drag to move, Ctrl + click to pick", name_for_title)}</title>
+            {tools}
+            <title>{format!("Assignment {} — its hosts' states for it; hover or click it for the statistics of its ribbons; drag to move, Ctrl + click to pick; drag its bottom handle to hosts to make it select them", name_for_title)}</title>
         </g>
     }
 }
@@ -3359,6 +3898,51 @@ mod tests {
         // D31: no chip in the middle, a host there; nothing past the outline
         assert!(map.host_at(web.x, web.y, DOT).is_some());
         assert!(map.host_at(web.x + web.radius + DOT, web.y, DOT).is_none());
+    }
+
+    #[test]
+    fn links_of_an_assignment_with_a_job_in_progress() {
+        let job = |id: &str, origin: &str, host: &str, state: &str, created_at| {
+            let job = api::JobSummary {
+                job_id: id.into(),
+                origin: origin.into(),
+                host_id: host.into(),
+                state: state.into(),
+                created_at,
+                ..Default::default()
+            };
+            (job.job_id.clone(), job)
+        };
+        let jobs = [
+            job("run:c1:shared:git/web", "c1", "shared", "STARTED", 10),
+            job("run:c1:h1:git/db", "c1", "h1", "PENDING", 10),
+            // a newer job of the same pair ended: back to normal
+            job("run:c2:h1:git/db", "c2", "h1", "FINISHED", 20),
+            // one-shot run and recurring job: no assignment in the key
+            job("run:c3:h4", "c3", "h4", "STARTED", 10),
+            job("rec:o1:r1:5:h7", "o1", "h7", "STARTED", 10),
+        ]
+        .into_iter()
+        .collect();
+        let working = working(&jobs);
+        assert_eq!(
+            working,
+            [("shared".to_string(), "git/web".to_string())].into()
+        );
+        let map = layout(&fleet(), &BTreeSet::new(), &selectors());
+        let (ribbons, links) = map.working(&working);
+        let web = map.group_index(&node_key("git/web")).unwrap();
+        assert_eq!(ribbons.len(), 1);
+        let ribbon = &map.bundles[ribbons[0]];
+        assert_eq!(ribbon.node, web);
+        let shared = map.placements("shared").next().unwrap();
+        assert_eq!(ribbon.cluster, shared.group);
+        let index = map
+            .hosts
+            .iter()
+            .position(|p| p.host_id == "shared")
+            .unwrap();
+        assert_eq!(links, [(index, web)].into());
     }
 
     #[test]

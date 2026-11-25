@@ -17,8 +17,10 @@ map's graph, assignments are nodes and each host is drawn once, linked to
 each of its assignments in its state for it (its own colour is the worst
 link). The web client also gains pages for recurring jobs (CronJob), users
 and API tokens, Cedar policies and certificate revocation; host
-definitions and hosts are one Hosts page; cards and hosts on the map are
-moved by dragging them. Also fixes `LineInFile` lines starting with `-`
+definitions and hosts are one Hosts page; on the map, assignments and
+labels are edited where they are drawn (connect an assignment to hosts,
+disconnect them, edit a group's labels, with a preview of the hosts
+joining and leaving), and cards and hosts are moved by dragging them. Also fixes `LineInFile` lines starting with `-`
 (regent-sdk 0.26.1) and a false drift warning on proactive hosts.
 
 **Upgrading** (the all-in-one does all of this by itself):
@@ -124,6 +126,25 @@ No change.
     own links (Escape closes the clicked ones); **Links: per host** in the
     toolbar shows every link.
   - The areas display is gone: the map is the graph only.
+  - **Edit assignments and labels on the graph** (like a node editor):
+    - drag from the handle at the bottom of an assignment's card to a
+      group of hosts (or one host) to make the assignment select them;
+    - select a ribbon (click it), then its **×** or the Delete key, to
+      make it stop selecting them;
+    - each time, choose between **relabelling the hosts** (their host
+      definitions get or lose the labels the selector needs) and
+      **changing the assignment's selector** (a suggestion is prefilled
+      and editable), with a preview of the hosts joining and leaving every
+      assignment before anything is saved;
+    - **+ Assignment** (toolbar), **Edit** and **Delete** above a card
+      (or the Delete key on a selected card): the Assignments page's form
+      opens in the right panel, and the hosts its selector would select
+      are ringed on the map;
+    - click inside a group of hosts: the labels they share, editable for
+      all of them at once, and **New assignment from these hosts**.
+    Items from Git sources stay read-only, and so do hosts defined in Git,
+    by several sources or only by their regops agent (listed with the
+    reason).
   - **Move things by dragging them**: drag a card, a host or a group of
     hosts (anywhere inside its outline) where you want it; drag empty space
     to pan. Pick several with Ctrl / Cmd + click or
@@ -131,6 +152,9 @@ No change.
     a click elsewhere drops the picks. The browser remembers the
     arrangement; **Auto-arrange** returns to the automatic
     layout.
+  - While an Assess / Reach of an assignment runs, its links to the hosts
+    with a job in progress turn light blue, the job colour, like those
+    hosts, and go back to normal as each job ends.
   - **Center** (toolbar): zooms and pans so that the whole map fits in view,
     leaving moved cards and hosts where they are.
   - **Full host names** (no longer cut to 8 characters; shown from the same

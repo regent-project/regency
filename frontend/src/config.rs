@@ -91,7 +91,7 @@ pub(crate) fn message_view(message: RwSignal<Option<(bool, String)>>) -> impl In
 
 // ---------------------------------------------------------------- catalog
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Entry {
     pub(crate) doc_id: String,
     pub(crate) item: Value,

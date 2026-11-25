@@ -141,6 +141,15 @@ pub struct Frame<'a> {
     pub selected: Option<&'a str>,
     /// Hosts picked on the map (Ctrl + click, Shift + drag): indices in `layout.hosts`.
     pub picked: &'a [usize],
+    /// D32: hosts the assignment being edited would select: indices in
+    /// `layout.hosts`.
+    pub preview: &'a [usize],
+    /// Ribbons (indices in `layout.bundles`) with a job of their assignment
+    /// in progress on some of their hosts: drawn in the job colour.
+    pub busy_ribbons: &'a [usize],
+    /// Per-host links (index in `layout.hosts`, node) with a job of that
+    /// assignment in progress on that host: drawn in the job colour.
+    pub busy_links: &'a std::collections::HashSet<(usize, usize)>,
     /// Draw host names (zoomed in).
     pub names: bool,
 }
@@ -209,7 +218,6 @@ pub fn draw_flow(
     let phase = (now / 1000.0 * FLOW_SPEED) % FLOW_SPACING;
     ctx.set_line_cap("round");
     ctx.set_line_join("round");
-    ctx.set_stroke_style_str(&palette.fg);
     ctx.set_line_width(1.4 / vp.k);
     for (i, bundle) in f.layout.bundles.iter().enumerate() {
         if !ribbon_drawn(f, bundle, tiny, &fanned) {
@@ -227,11 +235,13 @@ pub fn draw_flow(
         }
         let strong =
             f.focus.contains(&bundle.node) || f.hovered_bundle == Some(i) || f.opened.contains(&i);
-        let alpha = match (strong, focus) {
+        let busy = f.busy_ribbons.contains(&i);
+        let alpha = match (strong || busy, focus) {
             (true, _) => 0.45,
             (false, false) => 0.22,
             (false, true) => 0.07,
         };
+        ctx.set_stroke_style_str(if busy { &palette.job } else { &palette.fg });
         let pixels = crate::map::ribbon_pixels(total);
         // from the card to the arrowhead's base, in pixels along the ribbon
         let (ux, uy, len) = unit(ex, ey, cx, cy);
@@ -403,9 +413,13 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
             for tone in tones {
                 ctx.set_stroke_style_str(palette.tone(tone));
                 ctx.begin_path();
-                for p in &f.layout.hosts {
+                for (index, p) in f.layout.hosts.iter().enumerate() {
                     for &(node, t) in &p.links {
                         if t != tone {
+                            continue;
+                        }
+                        // drawn below, in the job colour
+                        if f.busy_links.contains(&(index, node)) {
                             continue;
                         }
                         let Some((nx, ny)) = f.layout.center(node) else {
@@ -420,9 +434,29 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
                 }
                 ctx.stroke();
             }
+            // links with a job in progress, in the job colour
+            if !f.busy_links.is_empty() {
+                ctx.set_global_alpha(0.8);
+                ctx.set_stroke_style_str(&palette.job);
+                ctx.begin_path();
+                for &(index, node) in f.busy_links {
+                    let (Some(p), Some((nx, ny))) =
+                        (f.layout.hosts.get(index), f.layout.center(node))
+                    else {
+                        continue;
+                    };
+                    let (ex, ey) = link_end(p.x, p.y, nx, ny);
+                    if vp.segment_seen(p.x, p.y, ex, ey) {
+                        ctx.move_to(p.x, p.y);
+                        ctx.line_to(ex, ey);
+                    }
+                }
+                ctx.stroke();
+            }
             ctx.set_global_alpha(1.0);
         }
-        // ribbons; something hovered: the others fade
+        // ribbons; something hovered: the others fade; a job of its
+        // assignment in progress on some of its hosts: the job colour
         let focus = !f.focus.is_empty() || f.hovered_bundle.is_some();
         ctx.set_line_cap("butt");
         for (i, bundle) in f.layout.bundles.iter().enumerate() {
@@ -444,12 +478,20 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
                 || f.opened.contains(&i);
             let pixels = crate::map::ribbon_pixels(total);
             ctx.set_line_width((if strong { pixels + 1.0 } else { pixels }) / vp.k);
-            ctx.set_global_alpha(match (strong, focus) {
-                (true, _) => 0.55,
-                (false, false) => 0.3,
-                (false, true) => 0.1,
+            let busy = f.busy_ribbons.contains(&i);
+            ctx.set_global_alpha(match (strong, busy, focus) {
+                (_, true, _) => 0.85,
+                (true, false, _) => 0.55,
+                (false, false, false) => 0.3,
+                (false, false, true) => 0.1,
             });
-            let colour = if strong { &palette.fg } else { &palette.muted };
+            let colour = if busy {
+                &palette.job
+            } else if strong {
+                &palette.fg
+            } else {
+                &palette.muted
+            };
             ctx.set_stroke_style_str(colour);
             // oriented: from the assignment, an arrow into its hosts'
             // outline (the assignment constrains these hosts)
@@ -478,14 +520,21 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         // ribbons: a small arrow at the host
         ctx.set_line_width(vp.line(2.0 / vp.k).max(1.0 / vp.k));
         let (head, half) = (7.0 / vp.k, 3.5 / vp.k);
-        for tone in tones {
-            ctx.set_stroke_style_str(palette.tone(tone));
-            ctx.set_fill_style_str(palette.tone(tone));
+        // `None`: links with a job in progress, in the job colour
+        for colour in tones.map(Some).into_iter().chain([None]) {
+            let paint = colour.map_or(palette.job.as_str(), |tone| palette.tone(tone));
+            ctx.set_stroke_style_str(paint);
+            ctx.set_fill_style_str(paint);
             let mut arrows = Vec::new();
             ctx.begin_path();
-            for p in &f.layout.hosts {
+            for (index, p) in f.layout.hosts.iter().enumerate() {
                 for &(node, t) in &p.links {
-                    if t != tone || !highlighted(p, node) {
+                    let busy = f.busy_links.contains(&(index, node));
+                    let of_colour = match colour {
+                        Some(tone) => t == tone && !busy,
+                        None => busy,
+                    };
+                    if !of_colour || !highlighted(p, node) {
                         continue;
                     }
                     let Some((nx, ny)) = f.layout.center(node) else {
@@ -595,6 +644,18 @@ pub fn draw_hosts(ctx: &Ctx, width: f64, height: f64, dpr: f64, palette: &Palett
         ctx.begin_path();
         for p in f.layout.placements(id) {
             circle(ctx, p.x, p.y, (DOT + 4.0).max(7.0 / vp.k));
+        }
+        ctx.stroke();
+    }
+    // D32: selected by the assignment being edited: a solid ring
+    if !f.preview.is_empty() {
+        ctx.set_stroke_style_str(&palette.accent);
+        ctx.set_line_width(vp.line(2.5 / vp.k).max(2.0));
+        ctx.begin_path();
+        for p in f.preview.iter().filter_map(|i| f.layout.hosts.get(*i)) {
+            if vp.seen(p.x, p.y) {
+                circle(ctx, p.x, p.y, (DOT + 5.5).max(7.0 / vp.k));
+            }
         }
         ctx.stroke();
     }

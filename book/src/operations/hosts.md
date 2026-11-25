@@ -135,7 +135,8 @@ picked up by the next firing.
   puts everything back in the automatic layout, and **Center** zooms and
   pans to fit the whole map in view without moving anything. A host with
   a job in progress (pending, running or abort requested) turns light blue
-  until it finishes. Zoom with the wheel, pan by dragging;
+  until it finishes; so do the links (ribbons and per-host links) from the
+  assignment that job runs (Assess / Reach) to that host. Zoom with the wheel, pan by dragging;
   hovering a host shows a tip next to the cursor; clicking it opens the
   right panel: its summary, what runs on it live, and its **Last known
   state**, the attributes of its effective state each coloured with its
@@ -158,3 +159,42 @@ picked up by the next firing.
   Assess / Reach now, and its attributes, one folded row each, named after
   the attribute type and its name, tagged with the assignment each comes
   from.
+
+## Editing on the map
+
+The map edits assignments and labels where they are drawn. A group of
+hosts stands for the labels its hosts share; a selector is an AND of
+filters, so making an assignment select more or fewer hosts can change
+either the hosts or the selector, and the map asks which each time:
+
+- **Connect:** drag from the handle at the bottom of an assignment's card
+  to a group of hosts (or one host). *Label the hosts* sets on them the
+  labels the selector's `key="value"` filters need (refused when another
+  filter would still fail, e.g. a regex or a `!=`); *Change its selector*
+  offers a selector matching the assignment's hosts and the new ones (the
+  labels they all share, else a `host=~"…"` list), which you can edit.
+- **Disconnect:** click a ribbon to select it, then its **×** (or press
+  Delete). *Relabel the hosts* removes a label one of the selector's
+  `=` / `=~` filters needs (pick which); *Change its selector* adds an
+  exclusion (a label value only those hosts have, else `host!~"…"`).
+- **Preview:** before anything is saved, each option lists, per
+  assignment, the hosts that would join and leave it. It is computed by
+  the browser from the labels it knows; the scheduler resolves selections
+  again when it runs them.
+- **A group's labels:** click inside a group of hosts: the labels they
+  share, editable; applying changes them on every host of the group (same
+  preview). **New assignment from these hosts** opens a new assignment
+  selecting those labels.
+- **Assignments:** **+ Assignment** in the toolbar, **Edit** and
+  **Delete** above a card (or Delete on a selected card). The form is the
+  Assignments page's, in the right panel; while it is open, the hosts its
+  selector would select are ringed on the map.
+
+Relabelling writes a host's definition, and only when the host has exactly
+one, from an API/frontend source: hosts defined in Git, by several sources
+(changing one definition would make them conflict) or only by their regops
+agent are left unchanged and listed with the reason. A label reported by a
+regops agent cannot be removed this way (the agent would set it again):
+change it in the agent's `[Regency] labels`. Assignments from Git sources
+are read-only on the map too.
+

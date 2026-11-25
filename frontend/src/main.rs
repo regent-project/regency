@@ -10,6 +10,7 @@ mod config;
 mod cronjobs;
 mod expected;
 mod feeds;
+mod graphedit;
 mod hostdefs;
 mod icons;
 mod jobchart;

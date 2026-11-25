@@ -147,36 +147,6 @@ pub fn describe_selector(selector: &api::HostSelector) -> String {
     parts.join(" · ")
 }
 
-/// Load every assignment of the catalog into `into` (by reference).
-pub fn load_assignments(into: RwSignal<Vec<AssignmentEntry>>, error: RwSignal<Option<String>>) {
-    let session = expect_context::<Session>();
-    spawn_scoped(async move {
-        let request = api::ListCatalogRequest {
-            source_id: String::new(),
-            r#type: "assignment".into(),
-        };
-        match client()
-            .list_catalog(authed(request, &session.token()))
-            .await
-        {
-            Ok(response) => {
-                let mut list: Vec<AssignmentEntry> = response
-                    .into_inner()
-                    .items
-                    .iter()
-                    .filter_map(AssignmentEntry::from_catalog)
-                    .collect();
-                list.sort_by(|a, b| a.reference.cmp(&b.reference));
-                let _ = into.try_set(list);
-            }
-            Err(status) => {
-                session.check(&status);
-                let _ = error.try_set(Some(status.message().to_string()));
-            }
-        }
-    });
-}
-
 /// What a map group stands for: the hosts its Assess / Reach run on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GroupTarget {

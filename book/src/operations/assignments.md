@@ -58,6 +58,10 @@ All the matchers must hold. Every host also has the built-in labels
 `host` (its id) and `source` (the sources defining it, `regops` for a
 reporting agent): `{host="web-01"}` is one host.
 
+Assignments can also be created, edited and connected to hosts on the
+map, by relabelling hosts or changing a selector: see
+[Editing on the map](hosts.md#editing-on-the-map).
+
 ## Overrides inside a stack: the last state wins
 
 1. The states are taken in order, base first.
